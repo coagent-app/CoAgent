@@ -1,0 +1,38 @@
+{
+  "productName": "Co-Agent",
+  "version": "0.0.1",
+  "identifier": "com.coagent.desktop",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "security": {
+      "csp": "default-src 'self' tauri: ipc: http://localhost:1420 asset: http://asset.localhost; img-src 'self' asset: http://asset.localhost blob: data:; media-src 'self' asset: http://asset.localhost blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'",
+      "assetProtocol": {
+        "enable": true
+      }
+    },
+    "windows": [
+      {
+        "title": "Co-Agent",
+        "width": 1200,
+        "height": 780,
+        "minWidth": 800,
+        "minHeight": 600,
+        "resizable": true,
+        "decorations": true,
+        "transparent": false,
+        "dragDropEnabled": false
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/icon.icns", "icons/icon.png"]
+  }
+}

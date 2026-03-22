@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.turbo/
+*.env
+memory/
+embeddings/
+.worktrees/
+target/
+*.DS_Store
+.wrangler/
+.dev.vars
+*.tsbuildinfo

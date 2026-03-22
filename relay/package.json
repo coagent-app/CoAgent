@@ -1,0 +1,18 @@
+{
+  "name": "@coagent/relay",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.0.0",
+    "typescript": "^5.4.0",
+    "wrangler": "^3.0.0"
+  },
+  "dependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.12.17",
+    "vitest": "^4.0.18"
+  }
+}

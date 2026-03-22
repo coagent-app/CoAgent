@@ -1,0 +1,35 @@
+{
+  "name": "@coagent/agent-core",
+  "version": "0.0.1",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/server.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.30.0",
+    "@coagent/mcp-memory": "workspace:*",
+    "@coagent/shared": "workspace:*",
+    "@composio/core": "^0.6.3",
+    "@huggingface/transformers": "^3.8.1",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "dotenv": "^16.0.0",
+    "mammoth": "^1.11.0",
+    "node-cron": "^3.0.0",
+    "pdf-parse": "^1.1.4",
+    "uuid": "^10.0.0",
+    "ws": "^8.0.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/node-cron": "^3.0.0",
+    "@types/pdf-parse": "^1.1.5",
+    "@types/uuid": "^10.0.0",
+    "@types/ws": "^8.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^2.0.0"
+  }
+}
