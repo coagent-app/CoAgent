@@ -19,7 +19,7 @@ jobs:
             rust-target: aarch64-apple-darwin
             bun-target: bun-darwin-arm64
             label: macOS (Apple Silicon)
-          - platform: macos-13
+          - platform: macos-15
             rust-target: x86_64-apple-darwin
             bun-target: bun-darwin-x64
             label: macOS (Intel)
@@ -36,8 +36,6 @@ jobs:
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 9
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
