@@ -1,0 +1,101 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            rust-target: aarch64-apple-darwin
+            bun-target: bun-darwin-arm64
+            label: macOS (Apple Silicon)
+          - platform: macos-13
+            rust-target: x86_64-apple-darwin
+            bun-target: bun-darwin-x64
+            label: macOS (Intel)
+          - platform: windows-latest
+            rust-target: x86_64-pc-windows-msvc
+            bun-target: bun-windows-x64
+            label: Windows
+
+    runs-on: ${{ matrix.platform }}
+    name: Build — ${{ matrix.label }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      # Windows: install WebView2 (already on Win 11, needed for Win 10 CI)
+      - name: Install WebView2 (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile "$env:TEMP\MicrosoftEdgeWebview2Setup.exe"
+          Start-Process -FilePath "$env:TEMP\MicrosoftEdgeWebview2Setup.exe" -Args "/silent /install" -Wait
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build TypeScript packages
+        run: pnpm build
+
+      # Compile sidecar binaries
+      - name: Compile coagent-server sidecar
+        run: bun build packages/agent-core/dist/server.js --compile --target=${{ matrix.bun-target }} --outfile apps/desktop/src-tauri/binaries/coagent-server-${{ matrix.rust-target }}
+
+      - name: Compile coagent-memory sidecar
+        shell: bash
+        run: |
+          MCP_ENTRY=$(node -e "console.log(require.resolve('@coagent/mcp-memory'))")
+          bun build "$MCP_ENTRY" --compile --target=${{ matrix.bun-target }} --outfile apps/desktop/src-tauri/binaries/coagent-memory-${{ matrix.rust-target }}
+
+      # Make sidecars executable (Unix only)
+      - name: chmod sidecars
+        if: matrix.platform != 'windows-latest'
+        run: chmod +x apps/desktop/src-tauri/binaries/*
+
+      # Build Tauri (auto-bundles sidecars via externalBin)
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: apps/desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Co-Agent ${{ github.ref_name }}'
+          releaseBody: 'See the assets below to download for your platform.'
+          releaseDraft: true
+          prerelease: false
