@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "private": true,
   "scripts": {
-    "dev": "vite",
+    "dev": "node ../../scripts/start-dev.js",
     "build": "tsc && vite build",
     "tauri": "tauri"
   },

@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capabilities","local":true,"windows":["main"],"permissions":["core:default","shell:allow-open"]}}
+{"default":{"identifier":"default","description":"Default capabilities","local":true,"windows":["main"],"permissions":["core:default","shell:allow-open",{"identifier":"shell:allow-execute","allow":[{"name":"binaries/coagent-server","sidecar":true}]},{"identifier":"shell:allow-spawn","allow":[{"name":"binaries/coagent-server","sidecar":true}]}]}}

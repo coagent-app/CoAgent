@@ -24,15 +24,26 @@ config({ path: join(homedir(), '.coagent', '.env') })
 
 const PORT = parseInt(process.env.COAGENT_PORT ?? '7830')
 
-// Resolve MCP server entry points relative to this package's node_modules
-const mcpMemoryPath = require.resolve('@coagent/mcp-memory')
+// Resolve MCP memory server — use sidecar binary if available, else node
+function resolveMcpMemory(): { command: string; args: string[] } {
+  const { dirname } = require('path') as typeof import('path')
+  // When compiled as a sidecar, the memory binary lives next to the server binary
+  const sidecarPath = join(dirname(process.execPath), 'coagent-memory')
+  if (existsSync(sidecarPath)) {
+    return { command: sidecarPath, args: [] }
+  }
+  // Fallback for dev mode: use node
+  const mcpMemoryPath = require.resolve('@coagent/mcp-memory')
+  return { command: 'node', args: [mcpMemoryPath] }
+}
 
 function buildMcpConfigs(): MCPServerConfig[] {
+  const mem = resolveMcpMemory()
   return [
     {
       name: 'memory',
-      command: 'node',
-      args: [mcpMemoryPath],
+      command: mem.command,
+      args: mem.args,
       env: {
         COAGENT_DATA_DIR: join(homedir(), '.coagent'),
         ...(process.env.OPENAI_API_KEY ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY } : {})
@@ -170,13 +181,16 @@ let currentMcpSlugs: string[] = []
 const ALWAYS_ON_TOOLKITS = ['composio_search', 'text_to_pdf']
 
 async function refreshComposioMcp(slugs: string[]): Promise<void> {
-  const allToolkits = [...new Set([...ALWAYS_ON_TOOLKITS, ...slugs])]
+  // Merge with current slugs so we never drop recently-added integrations
+  // (Composio may report them as not-yet-ACTIVE during OAuth flow)
+  const mergedSlugs = [...new Set([...currentMcpSlugs, ...slugs])]
+  const allToolkits = [...new Set([...ALWAYS_ON_TOOLKITS, ...mergedSlugs])]
   const { url, apiKey } = await setupComposioMcp(process.env.COMPOSIO_API_KEY!, allToolkits, 'default', true)
   await agent.mcpManager.disconnectAll()
   await agent.mcpManager.connect(buildMcpConfigs())
   await agent.mcpManager.connectHttp('composio', url, apiKey)
-  currentMcpSlugs = slugs
-  console.log('[Composio] MCP refreshed with toolkits:', slugs.join(', '))
+  currentMcpSlugs = mergedSlugs
+  console.log('[Composio] MCP refreshed with toolkits:', mergedSlugs.join(', '))
 }
 
 if (process.env.COMPOSIO_API_KEY) {
@@ -394,6 +408,8 @@ wss.on('connection', (ws) => {
       } else {
         try {
           await disconnectIntegration(process.env.COMPOSIO_API_KEY, msg.slug)
+          // Explicitly remove from tracked slugs so refreshComposioMcp doesn't re-add it
+          currentMcpSlugs = currentMcpSlugs.filter(s => s !== msg.slug)
           const slugs = await getConnectedSlugs(process.env.COMPOSIO_API_KEY)
           await refreshComposioMcp(slugs)
           await sendIntegrations(ws)

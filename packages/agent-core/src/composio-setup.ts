@@ -28,18 +28,14 @@ export async function setupComposioMcp(
   const cacheKey = `composioMcpUrl_${userId}`
   const cachedUrl = cfg[cacheKey] as string | undefined
 
-  if (cachedUrl && !forceRefresh) {
-    console.log(`[Composio] Using cached MCP URL for user "${userId}"`)
-    return { url: cachedUrl, apiKey }
-  }
-
   const listResult = await (composio.mcp as any).list({ name: MCP_CONFIG_NAME })
   const existing = (listResult as any)?.items?.find((s: any) => s.name === MCP_CONFIG_NAME)
 
   let mcpBaseUrl: string
 
   if (existing) {
-    if (forceRefresh && toolkits.length > 0) {
+    // Always update toolkits so newly connected integrations are available
+    if (toolkits.length > 0) {
       await composio.mcp.update(existing.id, { toolkits } as any)
       console.log(`[Composio] Updated MCP toolkits: ${toolkits.join(', ')}`)
     }

@@ -3,8 +3,8 @@ import { open } from '@tauri-apps/plugin-shell'
 import type { ApprovalItem, DoneItem, TodoItem, AgentMessage, WSServerMessage, WSClientMessage, Integration, AgentSettings, FileEntry, AuthStatus, AuthMethod, RelayUsage } from '@coagent/shared'
 
 const WS_URL = 'ws://localhost:7830'
-const RECONNECT_BASE = 1000
-const RECONNECT_MAX = 15000
+const RECONNECT_BASE = 250
+const RECONNECT_MAX = 10000
 
 export function useAgent() {
   const wsRef = useRef<WebSocket | null>(null)

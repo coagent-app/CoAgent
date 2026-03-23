@@ -10,3 +10,4 @@ target/
 .wrangler/
 .dev.vars
 *.tsbuildinfo
+binaries/

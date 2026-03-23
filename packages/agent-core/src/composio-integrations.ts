@@ -207,11 +207,10 @@ export async function generateAuthUrl(
   }
 
   // No extra fields needed — use SDK auth flow
+  // Remove old accounts FIRST, then authorize (not in parallel — avoids deleting the new account)
+  await removeAllAccountsForSlug(apiKey, slug, userId).catch(() => {})
   const composio = new Composio({ apiKey })
-  const [result] = await Promise.all([
-    composio.toolkits.authorize(userId, slug),
-    removeAllAccountsForSlug(apiKey, slug, userId).catch(() => {}),
-  ])
+  const result = await composio.toolkits.authorize(userId, slug)
   const url = (result as any)?.redirectUrl
   if (!url) throw new Error(`No auth URL returned for ${slug}`)
   return url

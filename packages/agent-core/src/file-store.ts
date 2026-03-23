@@ -427,7 +427,7 @@ export async function ingestFile(
   let embedding: number[] = []
   if (getOpenAIKey()) {
     try {
-      embedding = await embedText(`${filename} ${summary}`)
+      embedding = await embedText(`${safeGroup ? safeGroup + '/' : ''}${filename} ${summary}`)
     } catch (err) {
       console.warn('[FileStore] OpenAI embedding failed, falling back to keyword search:', (err as Error).message)
     }
@@ -588,12 +588,20 @@ export async function listFiles(dataDir: string): Promise<FileEntry[]> {
   return index.map(({ embedding: _, dirty: __, ...entry }) => entry)
 }
 
+function keywordMatch(entry: FileIndexEntry, q: string): boolean {
+  const haystack = `${entry.group} ${entry.filename} ${entry.summary}`.toLowerCase()
+  // Match if ALL query words appear somewhere in the haystack
+  const words = q.toLowerCase().split(/\s+/).filter(w => w.length > 1)
+  if (words.length === 0) return false
+  return words.some(w => haystack.includes(w))
+}
+
 export async function searchFiles(dataDir: string, query: string, limit = 5): Promise<FileEntry[]> {
   if (!getOpenAIKey()) {
     const index = await readIndex(dataDir)
     const q = query.toLowerCase()
     return index
-      .filter(e => e.filename.toLowerCase().includes(q) || e.summary.toLowerCase().includes(q))
+      .filter(e => keywordMatch(e, q))
       .slice(0, limit)
       .map(({ embedding: _, dirty: __, ...entry }) => entry)
   }
@@ -606,16 +614,19 @@ export async function searchFiles(dataDir: string, query: string, limit = 5): Pr
     const index = await readIndex(dataDir)
     const q = query.toLowerCase()
     return index
-      .filter(e => e.filename.toLowerCase().includes(q) || e.summary.toLowerCase().includes(q))
+      .filter(e => keywordMatch(e, q))
       .slice(0, limit)
       .map(({ embedding: _, dirty: __, ...entry }) => entry)
   }
   const index = await readIndex(dataDir)
+  const q = query.toLowerCase()
 
-  const scored = index.map(e => ({
-    entry: e,
-    score: e.embedding.length > 0 ? cosine(queryEmb, e.embedding) : 0
-  }))
+  const scored = index.map(e => {
+    const embScore = e.embedding.length > 0 ? cosine(queryEmb, e.embedding) : 0
+    // Hybrid: boost entries with keyword matches in filename/folder/summary
+    const kwBoost = keywordMatch(e, q) ? 0.3 : 0
+    return { entry: e, score: embScore + kwBoost }
+  })
   scored.sort((a, b) => b.score - a.score)
 
   const top = scored.slice(0, limit)

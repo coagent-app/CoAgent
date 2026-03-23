@@ -177,8 +177,18 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
     }
   },
   {
+    name: 'list_files',
+    description: 'List all files, optionally filtered by folder. Returns id, filename, folder, and summary for each file.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        folder: { type: 'string', description: 'Filter by folder name (e.g. "Reports" or "Reports/Q1"). Omit to list all files.' }
+      }
+    }
+  },
+  {
     name: 'search_files',
-    description: 'Search user files by query.',
+    description: 'Search user files by query. Searches filenames, summaries, and folder names.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -356,8 +366,9 @@ function expandQuery(query: string): string[] {
   const expanded = new Set(words)
   for (const word of words) {
     for (const [key, synonyms] of Object.entries(SYNONYMS)) {
-      if (word.includes(key) || key.includes(word)) synonyms.forEach(s => expanded.add(s))
-      if (synonyms.some(s => word.includes(s) || s.includes(word))) {
+      // Only expand on exact key match, not substring (prevents "google" → calendar)
+      if (word === key) synonyms.forEach(s => expanded.add(s))
+      if (synonyms.includes(word)) {
         expanded.add(key)
         synonyms.forEach(s => expanded.add(s))
       }
@@ -370,12 +381,21 @@ function scoreTools(query: string, tools: Anthropic.Tool[], limit = 8): Anthropi
   const words = expandQuery(query)
   if (words.length === 0) return tools.slice(0, limit)
 
+  // Build a compact prefix from the query: "Google Sheets" → "googlesheets", "Google Maps" → "googlemaps"
+  const compactQuery = query.toLowerCase().replace(/[\s_-]+/g, '')
+
   const scored = tools.map(tool => {
     const name = tool.name.toLowerCase().replace(/_/g, ' ')
+    const compactName = tool.name.toLowerCase().replace(/[_\s-]+/g, '')
     const desc = (tool.description ?? '').toLowerCase()
     let score = 0
+
+    // Strongest signal: tool prefix matches the compact query exactly
+    // e.g. "googlesheets" matches GOOGLESHEETS_ADD_SHEET
+    if (compactName.startsWith(compactQuery)) score += 20
+
     for (const w of words) {
-      if (name.includes(w)) score += 4          // name match = strongest signal
+      if (name.includes(w)) score += 4
       else if (name.split(' ').some(n => n.startsWith(w) || w.startsWith(n))) score += 2
       if (desc.includes(w)) score += 1
     }
@@ -444,7 +464,7 @@ Current settings:
 
   return `You are CoAgent — a private AI agent running on the user's machine. Help with anything asked. Never refuse by saying something is outside your scope.
 
-File references: When listing files from search_files, use preview card links: [filename](coagent-file:FILE_ID). Don't paste file content unless asked.
+File references: When listing files from list_files or search_files, show them as a plain text list (e.g. "- report.md — summary"). Do NOT use coagent-file: links for listings. Only use [filename](coagent-file:FILE_ID) when the user asks to open or view a specific single file. Don't paste file content unless asked.
 
 Document tools: Use create_document for substantial content (emails, reports). Use update_document to revise — always pushes to the editing panel. Don't use for short answers.
 
@@ -470,6 +490,7 @@ Your memory files:
 Read these on startup and heartbeats. When the user shares anything worth remembering — preferences, contacts, project details, decisions, instructions, corrections — save it to the relevant file immediately. Delete stale or resolved files with delete_memory.
 
 Routine tasks: act, then add_done_item. High-stakes actions: queue_approval instead.
+When queuing emails/messages: put the full draft body in "detail", and put recipient, subject, etc. in "metadata" so the user can review everything before approving.
 On heartbeat: check due tasks, search events. If nothing needs attention, reply "All clear." immediately.
 
 Keep responses concise. No emojis. Markdown only when helpful.${onboardingSection}`
@@ -848,6 +869,22 @@ export class Agent {
             const patch = block.input as Partial<AgentSettings>
             await writeSettings(this.dataDir, patch)
             result = 'Settings updated.'
+
+          } else if (block.name === 'list_files') {
+            const { folder } = block.input as { folder?: string }
+            const files = await listFiles(this.dataDir)
+            const folderLower = folder?.toLowerCase()
+            const filtered = folderLower
+              ? files.filter(f => f.group.toLowerCase() === folderLower || f.group.toLowerCase().startsWith(`${folderLower}/`))
+              : files
+            console.log(`[Agent] list_files(folder=${folder ?? 'all'}) → ${filtered.length}/${files.length} files`)
+            if (filtered.length === 0) {
+              result = folder ? `No files in folder "${folder}". Available folders: ${[...new Set(files.map(f => f.group).filter(Boolean))].join(', ')}` : 'No files stored yet.'
+            } else {
+              result = filtered.map(f =>
+                `[id:${f.id}] ${f.group ? f.group + '/' : ''}${f.filename} — ${f.summary}`
+              ).join('\n')
+            }
 
           } else if (block.name === 'search_files') {
             const { query, limit } = block.input as { query: string; limit?: number }

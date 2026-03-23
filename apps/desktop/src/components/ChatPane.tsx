@@ -279,6 +279,13 @@ const AgentBubble = React.memo(function AgentBubble({ content, files, onOpenDocu
 
   // Extract referenced files and clean content
   const { cleanContent, referencedFiles } = React.useMemo(() => {
+    // Count file links first — if there are many, this is a listing, not a document reference
+    const allMatches = [...content.matchAll(FILE_LINK_RE)]
+    if (allMatches.length > 3) {
+      // Too many links — show as plain text list instead of stripping names
+      const plain = content.replace(FILE_LINK_RE, (_match, label) => label)
+      return { cleanContent: plain.trim(), referencedFiles: [] }
+    }
     const ids: string[] = []
     const clean = content.replace(FILE_LINK_RE, (_match, _label, id) => {
       ids.push(id)
@@ -342,10 +349,25 @@ export function ChatPane({ messages, streamingText, thinking, toolLabel, connect
     })
   }, [])
 
+  const pendingMsgRef = useRef<string | null>(null)
+
+  // Send queued message once connection is established
+  useEffect(() => {
+    if (connected && pendingMsgRef.current) {
+      onChat(pendingMsgRef.current)
+      pendingMsgRef.current = null
+    }
+  }, [connected, onChat])
+
   const handleSend = useCallback(() => {
     const msg = input.trim()
-    if (!msg || !connected) return
-    onChat(msg)
+    if (!msg) return
+    if (!connected) {
+      // Queue the message — it'll be sent when connected
+      pendingMsgRef.current = msg
+    } else {
+      onChat(msg)
+    }
     setInput('')
   }, [input, connected, onChat])
 
@@ -456,13 +478,13 @@ export function ChatPane({ messages, streamingText, thinking, toolLabel, connect
       <div className="px-7 py-4 border-t border-neutral-100 dark:border-neutral-800 flex gap-2.5 items-center">
         <Input
           className="flex-1 text-[13.5px] dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500"
-          placeholder={connected ? 'Ask Co-Agent anything…' : 'Connecting…'}
+          placeholder={connected ? 'Ask Co-Agent anything…' : 'Starting up…'}
           value={input}
           onChange={e => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          disabled={!connected || isActive}
+          disabled={isActive}
         />
-        <Button size="sm" onClick={handleSend} disabled={!connected || isActive || !input.trim()}>
+        <Button size="sm" onClick={handleSend} disabled={isActive || !input.trim()}>
           <Send size={14} className="mr-1.5" />
           Send
         </Button>
