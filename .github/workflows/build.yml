@@ -19,10 +19,6 @@ jobs:
             rust-target: aarch64-apple-darwin
             bun-target: bun-darwin-arm64
             label: macOS (Apple Silicon)
-          - platform: macos-13
-            rust-target: x86_64-apple-darwin
-            bun-target: bun-darwin-x64
-            label: macOS (Intel)
           - platform: windows-latest
             rust-target: x86_64-pc-windows-msvc
             bun-target: bun-windows-x64
