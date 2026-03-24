@@ -76,9 +76,7 @@ jobs:
 
       - name: Compile coagent-memory sidecar
         shell: bash
-        run: |
-          MCP_ENTRY=$(node -e "console.log(require.resolve('@coagent/mcp-memory'))")
-          bun build "$MCP_ENTRY" --compile --target=${{ matrix.bun-target }} --outfile apps/desktop/src-tauri/binaries/coagent-memory-${{ matrix.rust-target }}
+        run: bun build packages/mcp-memory/dist/index.js --compile --target=${{ matrix.bun-target }} --outfile apps/desktop/src-tauri/binaries/coagent-memory-${{ matrix.rust-target }}
 
       # Make sidecars executable (Unix only)
       - name: chmod sidecars
