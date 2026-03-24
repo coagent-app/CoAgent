@@ -1,9 +1,178 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::ffi::c_void;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::Mutex;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
+
+// ── File logging (visible when launched from Finder where stderr is lost) ────
+fn log(msg: &str) {
+    use std::io::Write;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs();
+    let line = format!("[{}] {}\n", secs, msg);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/coagent.log")
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+// ── Raw Objective-C helpers (avoid cocoa/objc crate dependencies) ────────────
+#[cfg(target_os = "macos")]
+unsafe fn sel(name: &str) -> *mut c_void {
+    extern "C" { fn sel_registerName(name: *const u8) -> *mut c_void; }
+    let cstr = std::ffi::CString::new(name).unwrap();
+    sel_registerName(cstr.as_ptr() as *const u8)
+}
+#[cfg(target_os = "macos")]
+unsafe fn objc_cls(name: &str) -> *mut c_void {
+    extern "C" { fn objc_getClass(name: *const u8) -> *mut c_void; }
+    let cstr = std::ffi::CString::new(name).unwrap();
+    objc_getClass(cstr.as_ptr() as *const u8)
+}
+#[cfg(target_os = "macos")]
+unsafe fn objc_msg(obj: *mut c_void, sel: *mut c_void) -> *mut c_void {
+    extern "C" { fn objc_msgSend(obj: *mut c_void, sel: *mut c_void, ...) -> *mut c_void; }
+    objc_msgSend(obj, sel)
+}
+#[cfg(target_os = "macos")]
+unsafe fn objc_msg_1(obj: *mut c_void, sel: *mut c_void, arg: *mut c_void) -> *mut c_void {
+    extern "C" { fn objc_msgSend(obj: *mut c_void, sel: *mut c_void, ...) -> *mut c_void; }
+    objc_msgSend(obj, sel, arg)
+}
+#[cfg(target_os = "macos")]
+unsafe fn objc_msg_bool(obj: *mut c_void, sel: *mut c_void, val: bool) -> *mut c_void {
+    extern "C" { fn objc_msgSend(obj: *mut c_void, sel: *mut c_void, ...) -> *mut c_void; }
+    objc_msgSend(obj, sel, val as i32)
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn objc_msg_2(obj: *mut c_void, sel: *mut c_void, a: *mut c_void, b: *mut c_void) -> *mut c_void {
+    extern "C" { fn objc_msgSend(obj: *mut c_void, sel: *mut c_void, ...) -> *mut c_void; }
+    objc_msgSend(obj, sel, a, b)
+}
+#[cfg(target_os = "macos")]
+unsafe fn create_nsstring(s: &str) -> *mut c_void {
+    let cls = objc_cls("NSString");
+    let cstr = std::ffi::CString::new(s).unwrap();
+    let alloc: *mut c_void = objc_msg(cls, sel("alloc"));
+    objc_msg_1(alloc, sel("initWithUTF8String:"), cstr.as_ptr() as *mut c_void)
+}
+
+// Whether fn key is currently held (for press/release edge detection in callback)
+static FN_DOWN: AtomicBool = AtomicBool::new(false);
+const FN_FLAG: u64 = 0x800000;
+
+#[derive(Clone, Copy)]
+enum FnKeyEvent { Pressed, Released }
+
+// Channel sender — callback sends events here (non-blocking, nanoseconds)
+static FN_SENDER: std::sync::OnceLock<std::sync::mpsc::Sender<FnKeyEvent>> = std::sync::OnceLock::new();
+
+mod cg {
+    use std::ffi::c_void;
+    pub const K_CG_HID_EVENT_TAP: u32 = 0;
+    pub const K_CG_HEAD_INSERT: u32 = 0;
+    pub const K_CG_EVENT_TAP_OPTION_DEFAULT: u32 = 0;
+    pub const K_CG_FLAGS_CHANGED: u32 = 12;
+    pub fn event_mask_bit(t: u32) -> u64 { 1 << t }
+    extern "C" {
+        pub fn CGEventTapCreate(
+            tap: u32, place: u32, options: u32, mask: u64,
+            cb: extern "C" fn(*mut c_void, u32, *mut c_void, *mut c_void) -> *mut c_void,
+            info: *mut c_void,
+        ) -> *mut c_void;
+        pub fn CGEventTapEnable(tap: *mut c_void, enable: bool);
+        pub fn CGEventTapIsEnabled(tap: *mut c_void) -> bool;
+        pub fn CGEventGetFlags(event: *mut c_void) -> u64;
+        pub fn CFMachPortCreateRunLoopSource(alloc: *const c_void, port: *mut c_void, order: i64) -> *mut c_void;
+        pub fn CFRunLoopGetCurrent() -> *mut c_void;
+        pub fn CFRunLoopAddSource(rl: *mut c_void, source: *mut c_void, mode: *const c_void);
+        pub fn CFRunLoopRun();
+        pub static kCFRunLoopCommonModes: *const c_void;
+    }
+}
+
+// Accessibility permission check — prompts the user if not granted
+mod ax {
+    use std::ffi::c_void;
+    extern "C" {
+        // Returns true if this process is trusted for Accessibility
+        pub fn AXIsProcessTrustedWithOptions(options: *const c_void) -> bool;
+        // CoreFoundation helpers to build the options dictionary
+        pub fn CFDictionaryCreate(
+            alloc: *const c_void,
+            keys: *const *const c_void,
+            values: *const *const c_void,
+            count: isize,
+            key_cbs: *const c_void,
+            value_cbs: *const c_void,
+        ) -> *const c_void;
+        pub static kCFBooleanTrue: *const c_void;
+        // Key: kAXTrustedCheckOptionPrompt
+        pub static kAXTrustedCheckOptionPrompt: *const c_void;
+        pub static kCFTypeDictionaryKeyCallBacks: c_void;
+        pub static kCFTypeDictionaryValueCallBacks: c_void;
+    }
+
+    /// Check if we have Accessibility permission. If `prompt` is true, shows
+    /// the macOS system dialog asking the user to grant it.
+    pub fn is_trusted(prompt: bool) -> bool {
+        unsafe {
+            if prompt {
+                let keys = [kAXTrustedCheckOptionPrompt];
+                let values = [kCFBooleanTrue];
+                let opts = CFDictionaryCreate(
+                    std::ptr::null(),
+                    keys.as_ptr(),
+                    values.as_ptr(),
+                    1,
+                    &kCFTypeDictionaryKeyCallBacks as *const _ as *const c_void,
+                    &kCFTypeDictionaryValueCallBacks as *const _ as *const c_void,
+                );
+                AXIsProcessTrustedWithOptions(opts)
+            } else {
+                AXIsProcessTrustedWithOptions(std::ptr::null())
+            }
+        }
+    }
+}
+
+static EVENT_TAP: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static APP_HANDLE: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+
+// Callback: nanoseconds of work — detect edge, send to channel, suppress event.
+extern "C" fn fn_key_callback(
+    _proxy: *mut c_void, etype: u32, event: *mut c_void, _info: *mut c_void,
+) -> *mut c_void {
+    // 0xFFFFFFFE = tap disabled notification — re-enable and pass through
+    if etype == 0xFFFFFFFE {
+        let tap = EVENT_TAP.load(Ordering::Relaxed);
+        if !tap.is_null() { unsafe { cg::CGEventTapEnable(tap, true); } }
+        return event;
+    }
+    let flags = unsafe { cg::CGEventGetFlags(event) };
+    let is_fn = (flags & FN_FLAG) != 0;
+    let was_down = FN_DOWN.load(Ordering::Relaxed);
+
+    if is_fn && !was_down {
+        FN_DOWN.store(true, Ordering::Release);
+        if let Some(tx) = FN_SENDER.get() { let _ = tx.send(FnKeyEvent::Pressed); }
+        return std::ptr::null_mut(); // suppress emoji picker
+    } else if !is_fn && was_down {
+        FN_DOWN.store(false, Ordering::Release);
+        if let Some(tx) = FN_SENDER.get() { let _ = tx.send(FnKeyEvent::Released); }
+        return std::ptr::null_mut();
+    }
+    event
+}
 
 struct ServerProcess(Mutex<Option<Child>>);
 
@@ -33,6 +202,38 @@ fn read_file_bytes(path: String) -> Result<Vec<u8>, String> {
     std::fs::read(&path).map_err(|e| format!("Failed to read '{}': {}", path, e))
 }
 
+#[tauri::command]
+fn reveal_in_file_manager(path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    #[cfg(target_os = "macos")]
+    {
+        if p.is_file() {
+            Command::new("open").args(["-R", &path]).spawn()
+                .map_err(|e| format!("Failed to reveal '{}': {}", path, e))?;
+        } else {
+            Command::new("open").arg(&path).spawn()
+                .map_err(|e| format!("Failed to open '{}': {}", path, e))?;
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if p.is_file() {
+            Command::new("explorer").args(["/select,", &path]).spawn()
+                .map_err(|e| format!("Failed to reveal '{}': {}", path, e))?;
+        } else {
+            Command::new("explorer").arg(&path).spawn()
+                .map_err(|e| format!("Failed to open '{}': {}", path, e))?;
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let dir = if p.is_file() { p.parent().map(|p| p.to_str().unwrap_or(&path)).unwrap_or(&path) } else { &path };
+        Command::new("xdg-open").arg(dir).spawn()
+            .map_err(|e| format!("Failed to open '{}': {}", dir, e))?;
+    }
+    Ok(())
+}
+
 fn find_server_binary() -> Option<std::path::PathBuf> {
     // The binary is in the same directory as the main executable (Contents/MacOS/)
     // Tauri's externalBin places it there automatically during bundling
@@ -48,33 +249,157 @@ fn find_server_binary() -> Option<std::path::PathBuf> {
 }
 
 fn main() {
+    log("CoAgent starting up");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(ServerProcess(Mutex::new(None)))
         .setup(|app| {
             if let Some(server_path) = find_server_binary() {
-                eprintln!("[Tauri] Starting server: {:?}", server_path);
+                log(&format!("[Tauri] Starting server: {:?}", server_path));
                 match Command::new(&server_path)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .spawn()
                 {
                     Ok(child) => {
-                        eprintln!("[Tauri] Server started (pid: {})", child.id());
+                        log(&format!("[Tauri] Server started (pid: {})", child.id()));
                         let state: tauri::State<ServerProcess> = app.state();
                         *state.0.lock().unwrap() = Some(child);
                     }
                     Err(e) => {
-                        eprintln!("[Tauri] Failed to start server: {}", e);
+                        log(&format!("[Tauri] Failed to start server: {}", e));
                     }
                 }
             } else {
-                eprintln!("[Tauri] No server binary found next to executable");
+                log("[Tauri] No server binary found next to executable");
             }
+
+            let _ = APP_HANDLE.set(app.handle().clone());
+
+            // Ensure voice-pill is hidden on startup + force transparent background
+            #[cfg(target_os = "macos")]
+            if let Some(pill_win) = app.get_webview_window("voice-pill") {
+                let _ = pill_win.hide();
+                let _ = pill_win.with_webview(|wv| {
+                    unsafe {
+                        let wkwebview: *mut c_void = wv.inner().cast();
+                        // [wkWebView setValue:@NO forKey:@"drawsBackground"]
+                        let no_obj = objc_msg_bool(objc_cls("NSNumber"), sel("numberWithBool:"), false);
+                        let key = create_nsstring("drawsBackground");
+                        objc_msg_2(wkwebview, sel("setValue:forKey:"), no_obj, key);
+
+                        // Set window background to clear + no shadow
+                        let ns_window: *mut c_void = objc_msg(wkwebview, sel("window"));
+                        let clear_color: *mut c_void = objc_msg(objc_cls("NSColor"), sel("clearColor"));
+                        objc_msg_1(ns_window, sel("setBackgroundColor:"), clear_color);
+                        objc_msg_bool(ns_window, sel("setOpaque:"), false);
+                        objc_msg_bool(ns_window, sel("setHasShadow:"), false);
+                    }
+                });
+            }
+
+            // Check Accessibility permission — prompt user if missing
+            let trusted = ax::is_trusted(true); // true = show macOS prompt dialog
+            if trusted {
+                log("[Tauri] Accessibility permission: granted");
+            } else {
+                log("[Tauri] Accessibility permission: NOT granted — prompted user");
+            }
+
+            // Channel: callback sends events (nanoseconds), worker receives (blocks, zero CPU)
+            let (tx, rx) = std::sync::mpsc::channel::<FnKeyEvent>();
+            let _ = FN_SENDER.set(tx);
+
+            // Thread 1: CGEventTap setup — waits for permission if needed, then runs RunLoop
+            std::thread::spawn(move || {
+                // If not trusted yet, poll every 2s until user grants permission
+                if !trusted {
+                    log("[Tauri] Waiting for Accessibility permission...");
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        if ax::is_trusted(false) {
+                            log("[Tauri] Accessibility permission granted!");
+                            break;
+                        }
+                    }
+                }
+
+                unsafe {
+                    let mask = cg::event_mask_bit(cg::K_CG_FLAGS_CHANGED);
+                    let tap = cg::CGEventTapCreate(
+                        cg::K_CG_HID_EVENT_TAP,
+                        cg::K_CG_HEAD_INSERT,
+                        cg::K_CG_EVENT_TAP_OPTION_DEFAULT,
+                        mask,
+                        fn_key_callback,
+                        std::ptr::null_mut(),
+                    );
+                    if tap.is_null() {
+                        log("[Tauri] CGEventTap failed even after permission check");
+                        return;
+                    }
+                    EVENT_TAP.store(tap, Ordering::Release);
+                    log("[Tauri] CGEventTap active — fn key will trigger voice");
+                    let src = cg::CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0);
+                    let rl = cg::CFRunLoopGetCurrent();
+                    cg::CFRunLoopAddSource(rl, src, cg::kCFRunLoopCommonModes);
+                    cg::CGEventTapEnable(tap, true);
+                    cg::CFRunLoopRun();
+                }
+            });
+
+            // Thread 2: Blocks on channel — zero CPU when idle, instant wake on fn key.
+            // recv_timeout(500ms) also lets us periodically re-enable the tap if macOS killed it.
+            std::thread::spawn(move || {
+                loop {
+                    match rx.recv_timeout(std::time::Duration::from_millis(500)) {
+                        Ok(evt) => {
+                            let Some(handle) = APP_HANDLE.get() else { continue; };
+                            match evt {
+                                FnKeyEvent::Pressed => {
+                                    log("[Voice] fn pressed");
+                                    let _ = handle.emit("voice-fn-press", ());
+                                    if let Some(pill) = handle.get_webview_window("voice-pill") {
+                                        // Position pill at bottom center of primary monitor
+                                        if let Ok(Some(monitor)) = pill.primary_monitor() {
+                                            let screen = monitor.size();
+                                            let scale = monitor.scale_factor();
+                                            let logical_w = screen.width as f64 / scale;
+                                            let logical_h = screen.height as f64 / scale;
+                                            let pill_w = 440.0;
+                                            let x = (logical_w - pill_w) / 2.0;
+                                            let y = logical_h - 170.0; // above the dock
+                                            let _ = pill.set_position(tauri::LogicalPosition::new(x, y));
+                                        }
+                                        let _ = pill.show();
+                                    }
+                                }
+                                FnKeyEvent::Released => {
+                                    log("[Voice] fn released");
+                                    let _ = handle.emit("voice-fn-release", ());
+                                    // Don't hide pill here — voice.ts hides it after showing response
+                                }
+                            }
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            // Periodic health check: re-enable tap if macOS disabled it
+                            let tap = EVENT_TAP.load(Ordering::Relaxed);
+                            if !tap.is_null() && !unsafe { cg::CGEventTapIsEnabled(tap) } {
+                                log("[Voice] Re-enabling disabled event tap");
+                                unsafe { cg::CGEventTapEnable(tap, true); }
+                            }
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+            });
+
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![open_file, read_file_bytes])
+        .invoke_handler(tauri::generate_handler![open_file, read_file_bytes, reveal_in_file_manager])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -82,7 +407,7 @@ fn main() {
 impl Drop for ServerProcess {
     fn drop(&mut self) {
         if let Some(mut child) = self.0.lock().unwrap().take() {
-            eprintln!("[Tauri] Killing server process");
+            log("[Tauri] Killing server process");
             let _ = child.kill();
             let _ = child.wait();
         }

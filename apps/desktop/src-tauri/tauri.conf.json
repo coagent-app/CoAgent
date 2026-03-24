@@ -10,8 +10,9 @@
   },
   "app": {
     "withGlobalTauri": false,
+    "macOSPrivateApi": true,
     "security": {
-      "csp": "default-src 'self' tauri: ipc: http://localhost:1420 asset: http://asset.localhost; connect-src 'self' ws://localhost:7830 http://localhost:7830 https://backend.composio.dev https://api.openai.com https://api.voyageai.com; img-src 'self' asset: http://asset.localhost blob: data: https://logos.composio.dev; media-src 'self' asset: http://asset.localhost blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'",
+      "csp": "default-src 'self' tauri: ipc: http://localhost:1420 asset: http://asset.localhost; connect-src 'self' ws://localhost:7830 http://localhost:7830 https://backend.composio.dev https://api.openai.com https://api.voyageai.com; img-src 'self' asset: http://asset.localhost blob: data: https://logos.composio.dev; media-src 'self' asset: http://asset.localhost blob: mediastream:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'",
       "assetProtocol": {
         "enable": true
       }
@@ -27,6 +28,20 @@
         "decorations": true,
         "transparent": false,
         "dragDropEnabled": false
+      },
+      {
+        "label": "voice-pill",
+        "title": "Voice",
+        "url": "overlay.html",
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "width": 440,
+        "height": 80,
+        "visible": false,
+        "resizable": false,
+        "focus": false
       }
     ]
   },

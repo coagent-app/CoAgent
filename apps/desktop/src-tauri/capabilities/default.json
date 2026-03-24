@@ -2,9 +2,12 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capabilities",
-  "windows": ["main"],
+  "windows": ["main", "voice-pill"],
   "permissions": [
     "core:default",
+    "core:event:default",
+    "core:window:default",
+    "global-shortcut:default",
     "shell:allow-open",
     {
       "identifier": "shell:allow-execute",

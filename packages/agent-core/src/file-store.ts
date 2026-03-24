@@ -613,7 +613,8 @@ export async function searchFiles(dataDir: string, query: string, limit = 5): Pr
   })
   scored.sort((a, b) => b.score - a.score)
 
-  const top = scored.slice(0, limit)
+  // Filter out low-relevance results — only return files with meaningful similarity
+  const top = scored.filter(s => s.score > 0.15).slice(0, limit)
   const topIds = new Set(top.map(s => s.entry.id))
   const updated = index.map(e => topIds.has(e.id) ? { ...e, lastAccessed: new Date().toISOString() } : e)
   await writeIndex(dataDir, updated)

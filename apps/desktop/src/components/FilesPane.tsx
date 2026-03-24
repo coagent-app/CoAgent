@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Trash2, FileText, Sheet, Image, File, Folder, Pencil, LayoutGrid, List, ArrowUpDown, ArrowUp, ArrowDown, Search, X } from 'lucide-react'
+import { Trash2, FileText, Sheet, Image, File, Folder, Pencil, LayoutGrid, List, ArrowUpDown, ArrowUp, ArrowDown, Search, X, ChevronLeft, ExternalLink } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import type { FileEntry } from '@coagent/shared'
 
@@ -21,7 +21,7 @@ interface FilesPaneProps {
 }
 
 type ContextMenu =
-  | { kind: 'file'; id: string; currentName: string; x: number; y: number }
+  | { kind: 'file'; id: string; currentName: string; path: string; x: number; y: number }
   | { kind: 'folder'; name: string; x: number; y: number }
 
 /** Rubber band rect tracked in viewport (clientX/Y) coordinates. */
@@ -929,7 +929,7 @@ export function FilesPane({
         onDragEnd={() => { setDraggingId(null); setDragOverFolder(null) }}
         onClick={(e) => { if (!isRenaming) handleItemClick(e, file.id) }}
         onDoubleClick={() => { if (!isRenaming) handleOpenFile(file.path) }}
-        onContextMenu={(e) => openContextMenu(e, { kind: 'file', id: file.id, currentName: file.filename, x: 0, y: 0 })}
+        onContextMenu={(e) => openContextMenu(e, { kind: 'file', id: file.id, currentName: file.filename, path: file.path, x: 0, y: 0 })}
         className={`group relative flex flex-col items-center gap-1.5 p-2 rounded-xl cursor-pointer select-none transition-all duration-150 ${
           draggingId === file.id
             ? 'opacity-50 scale-95'
@@ -994,7 +994,7 @@ export function FilesPane({
         onDragEnd={() => { setDraggingId(null); setDragOverFolder(null) }}
         onClick={(e) => { if (!isRenaming) handleItemClick(e, file.id) }}
         onDoubleClick={() => { if (!isRenaming) handleOpenFile(file.path) }}
-        onContextMenu={(e) => openContextMenu(e, { kind: 'file', id: file.id, currentName: file.filename, x: 0, y: 0 })}
+        onContextMenu={(e) => openContextMenu(e, { kind: 'file', id: file.id, currentName: file.filename, path: file.path, x: 0, y: 0 })}
         className={`flex items-center gap-3 px-2 py-2 rounded-lg cursor-pointer select-none transition-all duration-100 ${
           draggingId === file.id
             ? 'opacity-50'
@@ -1068,9 +1068,26 @@ export function FilesPane({
         <div className="flex items-start justify-between">
           <div>
             <p className="text-[10px] font-semibold text-neutral-400 dark:text-neutral-500 uppercase tracking-widest mb-1">Context</p>
-            <h1 className="text-[19px] font-bold tracking-tight text-neutral-900 dark:text-neutral-100">
-              {currentPath === '' ? 'Files' : currentPath.split('/').pop()!}
-            </h1>
+            <div className="flex items-center gap-2">
+              {currentPath !== '' && (
+                <button
+                  onClick={() => {
+                    const parts = currentPath.split('/')
+                    parts.pop()
+                    setCurrentPath(parts.join('/'))
+                    setSelected(new Set())
+                    lastSelectedRef.current = null
+                  }}
+                  className="p-1 -ml-1 rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors text-neutral-400 dark:text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300"
+                  title="Go back"
+                >
+                  <ChevronLeft size={18} />
+                </button>
+              )}
+              <h1 className="text-[19px] font-bold tracking-tight text-neutral-900 dark:text-neutral-100">
+                {currentPath === '' ? 'Files' : currentPath.split('/').pop()!}
+              </h1>
+            </div>
             {currentPath !== '' && (
               <nav className="flex items-center gap-0.5 mt-1 flex-wrap">
                 <button
@@ -1451,6 +1468,20 @@ export function FilesPane({
           style={{ top: contextMenu.y, left: contextMenu.x }}
           onMouseDown={e => e.stopPropagation()}
         >
+          {contextMenu.kind === 'file' && (
+            <button
+              className="w-full flex items-center gap-2.5 px-3 py-2 text-[13px] text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800 transition-colors"
+              onClick={() => {
+                if (contextMenu.kind === 'file') {
+                  invoke('reveal_in_file_manager', { path: contextMenu.path }).catch(console.error)
+                }
+                setContextMenu(null)
+              }}
+            >
+              <ExternalLink size={13} className="text-neutral-400 dark:text-neutral-500" />
+              {navigator.platform.includes('Mac') ? 'Show in Finder' : 'Show in Explorer'}
+            </button>
+          )}
           <button
             className="w-full flex items-center gap-2.5 px-3 py-2 text-[13px] text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800 transition-colors"
             onClick={() => {

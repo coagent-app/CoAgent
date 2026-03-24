@@ -24,8 +24,12 @@ export interface AgentSettings {
   active_hours: { start: number; end: number }
   active_days: DayName[]
   autonomy: Autonomy
+  heartbeat_interval: number // minutes between heartbeats (0 = disabled)
   powerModel: string
   apiKeys: ApiKeys
+  voice_enabled: boolean   // global toggle for voice pill
+  voice_response: boolean  // TTS read-back of summary
+  voice_hotkey: string     // shortcut string e.g. "Control+Space"
 }
 
 export type TriggerSource = 'heartbeat' | 'webhook' | 'manual' | 'memory_cleanup'
@@ -123,6 +127,8 @@ export type WSClientMessage =
   | { type: 'set_model'; model: string }
   | { type: 'update_api_keys'; keys: Partial<ApiKeys> }
   | { type: 'get_api_keys' }
+  | { type: 'voice_chat'; message: string }
+  | { type: 'voice_audio'; data: string }
 
 export type WSServerMessage =
   | { type: 'queue_update'; items: ApprovalItem[] }
@@ -154,6 +160,8 @@ export type WSServerMessage =
   | { type: 'heartbeat'; status: 'started' | 'done' | 'skipped' | 'escalated'; summary?: string }
   | { type: 'skills_update'; skills: { name: string; description: string }[] }
   | { type: 'file_ingested'; id: string; filename: string }
+  | { type: 'voice_summary'; summary: string }
+  | { type: 'voice_transcribed'; text: string }
 
 export interface RelayUsage {
   inputTokens: number

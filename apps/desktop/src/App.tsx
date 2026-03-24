@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import { CheckCircle2, Circle, Trash2 } from 'lucide-react'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Button } from '@/components/ui/button'
@@ -14,6 +14,7 @@ import { DocumentPanel } from '@/components/DocumentPanel'
 import { useAgent } from '@/hooks/useAgent'
 import { useTheme } from '@/hooks/useTheme'
 import { cn } from '@/lib/utils'
+import { registerVoiceHotkey, unregisterVoiceHotkey } from '@/lib/voice'
 import type { ApprovalItem } from '@coagent/shared'
 
 function formatDue(due: string): string {
@@ -36,6 +37,21 @@ export default function App() {
   useEffect(() => {
     if (activeDocument) setLastDocumentId(activeDocument.id)
   }, [activeDocument])
+
+  // Voice: register fn key for recording, Rust handles pill show/hide
+  useEffect(() => {
+    registerVoiceHotkey('fn', (base64) => {
+      window.dispatchEvent(new CustomEvent('coagent-ws-send', {
+        detail: { type: 'voice_audio', data: base64 }
+      }))
+    }, () => {})
+    ;(window as any).__voiceActive = true
+    return () => {
+      unregisterVoiceHotkey()
+      ;(window as any).__voiceActive = false
+    }
+  }, [])
+
 
   function handleApprove(id: string) {
     approve(id)
@@ -179,6 +195,7 @@ export default function App() {
           </ScrollArea>
         )}
       </div>
+
 
       <IntegrationsModal
         open={modalOpen}

@@ -186,6 +186,25 @@ function GeneralTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate:
           })}
         </div>
       </FieldRow>
+      <FieldRow label="Heartbeat interval">
+        <div className="flex items-center gap-2">
+          <select
+            value={s.heartbeat_interval}
+            onChange={e => onUpdate({ heartbeat_interval: Number(e.target.value) })}
+            className="h-9 rounded-md border border-input bg-background px-3 py-1 text-[13.5px] text-neutral-800 dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-ring"
+          >
+            <option value={0}>Disabled</option>
+            <option value={15}>Every 15 minutes</option>
+            <option value={30}>Every 30 minutes</option>
+            <option value={60}>Every hour</option>
+            <option value={120}>Every 2 hours</option>
+            <option value={240}>Every 4 hours</option>
+          </select>
+        </div>
+        <p className="text-[11.5px] text-neutral-400 dark:text-neutral-500 mt-0.5">
+          How often the agent wakes up to check to-dos, monitor services, and handle tasks.
+        </p>
+      </FieldRow>
 
       <Separator className="my-6 dark:bg-neutral-800" />
 
@@ -209,6 +228,56 @@ function GeneralTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate:
           )
         })}
       </div>
+
+      <Separator className="my-6 dark:bg-neutral-800" />
+
+      <SectionHeader eyebrow="Voice" title="Push-to-talk" />
+      <FieldRow label="Enable voice input">
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => onUpdate({ voice_enabled: !s.voice_enabled })}
+            className={cn(
+              'relative w-10 h-6 rounded-full transition-colors',
+              s.voice_enabled
+                ? 'bg-neutral-900 dark:bg-neutral-100'
+                : 'bg-neutral-300 dark:bg-neutral-700'
+            )}
+          >
+            <span className={cn(
+              'absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white dark:bg-neutral-900 transition-transform',
+              s.voice_enabled && 'translate-x-4'
+            )} />
+          </button>
+          <span className="text-[12.5px] text-neutral-500 dark:text-neutral-400">
+            Hold {s.voice_hotkey.replace('Control', 'Ctrl')} to talk
+          </span>
+        </div>
+      </FieldRow>
+      {s.voice_enabled && (
+        <FieldRow label="Speak responses">
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => onUpdate({ voice_response: !s.voice_response })}
+              className={cn(
+                'relative w-10 h-6 rounded-full transition-colors',
+                s.voice_response
+                  ? 'bg-neutral-900 dark:bg-neutral-100'
+                  : 'bg-neutral-300 dark:bg-neutral-700'
+              )}
+            >
+              <span className={cn(
+                'absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white dark:bg-neutral-900 transition-transform',
+                s.voice_response && 'translate-x-4'
+              )} />
+            </button>
+            <span className="text-[12.5px] text-neutral-500 dark:text-neutral-400">
+              Uses OpenAI TTS — costs extra
+            </span>
+          </div>
+        </FieldRow>
+      )}
     </>
   )
 }

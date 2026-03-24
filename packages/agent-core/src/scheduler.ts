@@ -38,14 +38,23 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
     agent.handleTrigger({ source: 'memory_cleanup' })
   })
 
-  // Hourly heartbeat — top of every hour
-  cron.schedule('0 * * * *', async () => {
+  // Configurable heartbeat — check every minute, fire when interval elapsed
+  let lastHeartbeat = 0
+  cron.schedule('* * * * *', async () => {
     const settings = await readSettings(dataDir)
+    const interval = settings.heartbeat_interval ?? 60
+    if (interval <= 0) return // disabled
+
+    const now = Date.now()
+    if (now - lastHeartbeat < interval * 60 * 1000) return
+
     if (!isActiveNow(settings)) {
       console.log('[Scheduler] Outside active hours — skipping heartbeat')
       callbacks?.onHeartbeat?.('skipped')
       return
     }
+
+    lastHeartbeat = now
 
     await purgeEventStore(dataDir).catch((err) =>
       console.error('[Scheduler] Purge failed:', err.message)

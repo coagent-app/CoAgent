@@ -36,6 +36,7 @@ export function useAgent() {
   const [relayModel, setRelayModel] = useState<string | null>(null)
   const [relayUsage, setRelayUsage] = useState<RelayUsage | null>(null)
   const [apiKeyStatus, setApiKeyStatus] = useState<{ anthropic: boolean; composio: boolean; openai: boolean } | null>(null)
+  const [voiceSummary, setVoiceSummary] = useState<string | null>(null)
 
   // Document streaming — buffer chunks in ref, flush to React state each frame
   const docStreamBuf = useRef('')
@@ -96,11 +97,19 @@ export function useAgent() {
           })
           setToolLabel(msg.label)
           setThinking(true)
+          // Forward tool label to voice pill if voice is active
+          if ((window as any).__voiceActive) {
+            import('@/lib/voice').then(v => v.showVoiceToolLabel(msg.label))
+          }
         }
         if (msg.type === 'chat_chunk') {
           setThinking(false)
           setToolLabel(null)
           setStreamingText(prev => (prev ?? '') + msg.text)
+          // Forward just the first sentence to voice pill
+          if ((window as any).__voiceActive) {
+            import('@/lib/voice').then(v => v.showVoiceResponse(msg.text))
+          }
         }
         if (msg.type === 'chat_response') {
           // Snapshot any remaining streaming text as a final bubble
@@ -146,6 +155,17 @@ export function useAgent() {
         if (msg.type === 'file_ingested') recentIngestedFiles.current.push({ id: msg.id, filename: msg.filename })
         if (msg.type === 'heartbeat') setLastHeartbeat({ time: new Date(), status: msg.status })
         if (msg.type === 'skills_update') setSkills(msg.skills)
+        if (msg.type === 'voice_transcribed') {
+          // Show the user's voice input in chat
+          setMessages(prev => [...prev, { role: 'user' as const, content: msg.text, timestamp: new Date().toISOString() }].slice(-100))
+          // Reset voice response accumulator for fresh response
+          import('@/lib/voice').then(v => v.resetVoiceResponse())
+        }
+        if (msg.type === 'voice_summary') {
+          setVoiceSummary(msg.summary)
+          // Show summary in pill, then auto-hide after delay
+          import('@/lib/voice').then(v => v.showVoiceSummary(msg.summary))
+        }
         if (msg.type === 'error') { setError(msg.message); setTimeout(() => setError(null), 5000) }
         if (msg.type === 'integration_needs_fields') {
           setPendingFields({ slug: msg.slug, fields: msg.fields })
@@ -174,6 +194,18 @@ export function useAgent() {
       pollIntervals.current.forEach(clearInterval)
       wsRef.current?.close()
     }
+  }, [])
+
+  // ── Voice: allow App.tsx to send WS messages via custom event ───────────────
+  useEffect(() => {
+    function handleWsSend(e: Event) {
+      const detail = (e as CustomEvent).detail
+      if (detail && wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify(detail))
+      }
+    }
+    window.addEventListener('coagent-ws-send', handleWsSend)
+    return () => window.removeEventListener('coagent-ws-send', handleWsSend)
   }, [])
 
   // ── Global HTML5 drag-drop (always active, works from any view) ─────────────
@@ -341,5 +373,5 @@ export function useAgent() {
     setActiveDocument(null)
   }, [send])
 
-  return { queue, done, todos, messages, streamingText, thinking, processing, toolLabel, connected, lastHeartbeat, skills, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, activeDocument, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, apiKeyStatus, pendingFields, setPendingFields, updateApiKeys, setModel, chat, approve, reject, editQueueItem, completeTodo, deleteTodo, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, openDocument, updateDocument, closeDocument }
+  return { queue, done, todos, messages, streamingText, thinking, processing, toolLabel, connected, lastHeartbeat, skills, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, activeDocument, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, apiKeyStatus, pendingFields, setPendingFields, updateApiKeys, setModel, chat, approve, reject, editQueueItem, completeTodo, deleteTodo, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, openDocument, updateDocument, closeDocument, voiceSummary }
 }

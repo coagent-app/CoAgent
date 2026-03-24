@@ -170,6 +170,11 @@ agent.onDocumentStream = (event) => {
   }
 }
 
+agent.onSettingsChanged = async () => {
+  const settings = await readSettings(DATA_DIR)
+  broadcast({ type: 'settings_update', settings })
+}
+
 agent.onSkillsChanged = async () => {
   const skills = await agent.getSkills()
   broadcast({ type: 'skills_update', skills })
@@ -330,6 +335,108 @@ wss.on('connection', (ws) => {
         sendFilesAndFolders(ws).catch(console.error)
       } catch (err: any) {
         console.error('[Server] chat error:', err.message)
+        send(ws, { type: 'error', message: err.message ?? 'Something went wrong.' })
+        send(ws, { type: 'agent_stopped' })
+      }
+    }
+
+    if (msg.type === 'voice_audio') {
+      // Receive base64 audio from frontend, transcribe with Whisper, then process as voice chat
+      if (!process.env.OPENAI_API_KEY) {
+        send(ws, { type: 'error', message: 'Add your OpenAI API key in Settings → API Keys to use voice input.' })
+        return
+      }
+      try {
+        const audioBuffer = Buffer.from(msg.data, 'base64')
+        const blob = new Blob([audioBuffer], { type: 'audio/webm' })
+        const form = new FormData()
+        form.append('file', blob, 'voice.webm')
+        form.append('model', 'whisper-1')
+        form.append('language', 'en')
+        form.append('prompt', 'This is a voice command to a personal AI assistant called Co-Agent. The user is speaking naturally in English.')
+        form.append('temperature', '0.2')
+
+        const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}` },
+          body: form,
+        })
+        const data = await res.json() as { text?: string; error?: { message: string } }
+        const text = data.text?.trim()
+
+        if (!text) {
+          // Nothing transcribed — silently dismiss the pill
+          send(ws, { type: 'voice_summary', summary: '' })
+          return
+        }
+
+        console.log('[Voice] Transcribed:', text)
+
+        // Process as a voice chat message
+        if (!process.env.ANTHROPIC_API_KEY) {
+          send(ws, { type: 'chat_response', message: { role: 'assistant', content: 'I need an Anthropic API key to respond.', timestamp: new Date().toISOString() } })
+          return
+        }
+        // Show transcribed text in chat UI as user message
+        broadcast({ type: 'voice_transcribed', text })
+        send(ws, { type: 'agent_thinking' })
+        let streamed = ''
+        let wasToolCall = false
+        const response = await agent.chat(
+          text,
+          (chunk) => {
+            if (wasToolCall && streamed) { streamed += '\n\n'; wasToolCall = false }
+            streamed += chunk
+            broadcast({ type: 'chat_chunk', text: chunk })
+          },
+          (tool, label) => { wasToolCall = true; broadcast({ type: 'tool_start', tool, label }) }
+        )
+        send(ws, { type: 'chat_response', message: { role: 'assistant', content: streamed || response, timestamp: new Date().toISOString() } })
+        send(ws, { type: 'queue_update', items: agent.queue.getPending() })
+        send(ws, { type: 'done_update', items: agent.queue.getDone() })
+        send(ws, { type: 'todo_update', items: agent.todos.getAll() })
+        sendFilesAndFolders(ws).catch(console.error)
+        send(ws, { type: 'voice_summary', summary: 'Refer to Co-Agent for full details' })
+      } catch (err: any) {
+        console.error('[Voice] Transcription/chat error:', err.message)
+        send(ws, { type: 'error', message: `Voice failed: ${err.message}` })
+        send(ws, { type: 'agent_stopped' })
+      }
+    }
+
+    if (msg.type === 'voice_chat') {
+      if (!process.env.ANTHROPIC_API_KEY) {
+        send(ws, {
+          type: 'chat_response',
+          message: { role: 'assistant', content: 'I need an API key before I can help. Head to **Settings → API Keys** and add your Anthropic API key to get started.', timestamp: new Date().toISOString() }
+        })
+        return
+      }
+      send(ws, { type: 'agent_thinking' })
+      try {
+        let streamed = ''
+        let wasToolCall = false
+        const response = await agent.chat(
+          msg.message,
+          (chunk) => {
+            if (wasToolCall && streamed) { streamed += '\n\n'; wasToolCall = false }
+            streamed += chunk
+            broadcast({ type: 'chat_chunk', text: chunk })
+          },
+          (tool, label) => { wasToolCall = true; broadcast({ type: 'tool_start', tool, label }) }
+        )
+        // Use the full streamed text so step-by-step updates are preserved
+        send(ws, {
+          type: 'chat_response',
+          message: { role: 'assistant', content: streamed || response, timestamp: new Date().toISOString() }
+        })
+        send(ws, { type: 'queue_update', items: agent.queue.getPending() })
+        send(ws, { type: 'done_update', items: agent.queue.getDone() })
+        send(ws, { type: 'todo_update', items: agent.todos.getAll() })
+        sendFilesAndFolders(ws).catch(console.error)
+        send(ws, { type: 'voice_summary', summary: 'Refer to Co-Agent for full details' })
+      } catch (err: any) {
+        console.error('[Server] voice_chat error:', err.message)
         send(ws, { type: 'error', message: err.message ?? 'Something went wrong.' })
         send(ws, { type: 'agent_stopped' })
       }

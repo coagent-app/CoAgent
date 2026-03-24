@@ -11,6 +11,7 @@ import type { AgentSettings } from './settings.js'
 import type { AgentTrigger } from '@coagent/shared'
 import { searchFiles, readFileContent, readFileBase64, deleteFileEntry, getStorageStats, createDocument, updateDocumentContent, readDocumentContent, listFiles } from './file-store.js'
 import { embedTools, searchToolsByEmbedding, clearToolEmbeddings, setToolEmbeddingsDir } from './tool-embeddings.js'
+import { readIntegrationContext, writeIntegrationContext, readAllIntegrationContexts } from './integration-context.js'
 import { getRelayConfig } from './auth.js'
 
 const HISTORY_WINDOW = 50        // total pool — recent + TF-IDF ranked
@@ -224,7 +225,8 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
           type: 'array',
           items: { type: 'string', enum: ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] }
         },
-        autonomy: { type: 'string', enum: ['ask_first', 'balanced', 'autonomous'] }
+        autonomy: { type: 'string', enum: ['ask_first', 'balanced', 'autonomous'] },
+        heartbeat_interval: { type: 'number', description: 'Minutes between heartbeats (0 to disable, e.g. 15, 30, 60, 120, 240)' }
       }
     }
   },
@@ -352,6 +354,18 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
       required: ['name']
     }
   },
+  {
+    name: 'update_integration_context',
+    description: 'Save or update your internal notes about a connected integration. These notes are automatically injected when you use that integration\'s tools, so you never forget how the user uses the service. Write freeform — whatever context will help you use the tools better (account info, contacts, preferences, patterns). Max 1000 chars.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        integration: { type: 'string', description: 'Integration slug e.g. "gmail", "slack", "googlesheets"' },
+        context: { type: 'string', description: 'Freeform notes about how the user uses this integration (max 1000 chars)' }
+      },
+      required: ['integration', 'context']
+    }
+  },
 ]
 
 // --- Tool filtering by trigger context ---
@@ -366,6 +380,7 @@ const TOOL_LABELS: Record<string, string> = {
   complete_todo: 'Completing to-do',
   list_todos: 'Checking to-dos',
   update_settings: 'Updating settings',
+  update_integration_context: 'Saving integration notes',
   search_files: 'Searching files',
   read_file: 'Reading file',
   delete_file: 'Deleting file',
@@ -400,7 +415,7 @@ function humanizeToolName(name: string): string {
 }
 
 const HEARTBEAT_TOOLS = new Set([
-  'add_done_item', 'add_todo', 'complete_todo', 'list_todos', 'queue_approval', 'list_skills',
+  'add_done_item', 'add_todo', 'complete_todo', 'list_todos', 'queue_approval', 'list_skills', 'update_integration_context',
 ])
 
 function getInternalTools(context: ToolContext): Anthropic.Tool[] {
@@ -507,6 +522,7 @@ Current settings:
 - Timezone: ${settings.timezone || '(not set)'}
 - Active hours: ${formatHour(settings.active_hours.start)}–${formatHour(settings.active_hours.end)}
 - Active days: ${settings.active_days.join(', ')}
+- Heartbeat: ${settings.heartbeat_interval > 0 ? `every ${settings.heartbeat_interval} minutes — you are automatically woken up on this interval to check to-dos, monitor connected services, and handle pending tasks` : 'disabled — you only respond when the user messages you'}
 - Autonomy: ${settings.autonomy} — ${AUTONOMY_DESCRIPTIONS[settings.autonomy]}
 `
 
@@ -520,29 +536,22 @@ Skills: Users invoke skills with @skill-name. When invoked, the skill's instruct
 
 Document tools: Use create_document for substantial content (emails, reports). Use update_document to revise — always pushes to the editing panel. Don't use for short answers.
 
+Integration context: You have an update_integration_context tool — USE IT. After every interaction with an external service, update that integration's context with anything you learned or did. Examples:
+- After creating a calendar event → update googlecalendar context: "Created meeting with Alex, Fri 5:30pm at Living Green"
+- After sending an email → update gmail context: "Brett prefers short emails, always CC sarah@..."
+- After reading Slack → update slack context: "#leads channel is for new incoming leads"
+This is NOT memory. Memory is for general knowledge. Integration context is your operational cheat sheet for each service — it's auto-injected when you use that service's tools so you never forget what you've done or how the user works with it. Max 1000 chars per integration. Rewrite the full context each time (don't append endlessly — keep it current and relevant).
+
 ${serviceSection}
 
 ${settingsSection}
 
-External tools: If the user's request could involve an external service (email, calendar, search, social media, presentations, CRM, etc.) and you don't already have the right tool loaded, call search_tools FIRST before responding. Never guess a tool name. When in doubt, search.
+External tools: If the user's request involves an external service, call search_tools FIRST. Never guess a tool name.
 
-Memory is your long-term brain — history only shows the last few messages. Anything not saved to memory will be forgotten.
+Memory: Your long-term brain — history only shows recent messages. Write things down immediately: names, dates, preferences, project details, decisions. If unsure whether to save, save it. Always search memory before saying you don't know.
+Memory files: setup.md (read-only), agent.md (user profile), routines.md (heartbeat schedule), preferences.md, contacts.md, projects.md. Read on startup/heartbeats. Update when you learn something new. Delete stale files.
 
-WRITE THINGS DOWN. Err on the side of saving too much rather than too little. If the user mentions a name, date, preference, project detail, decision, or anything that might matter later — write it to memory immediately. Don't wait to be asked. If you're unsure whether something is worth saving, save it. When you start working on a task, save what you're doing to projects.md so you can pick it up if context is lost.
-
-When you don't know something or lack context — SEARCH MEMORY FIRST before saying you don't know. Read the relevant memory file before responding. Never say "I don't have enough context" without checking memory first.
-
-Your memory files:
-- setup.md — what you are and how you work (read-only reference)
-- agent.md — the user's profile, who they are, how they like things
-- routines.md — your heartbeat schedule: what to check and when
-- preferences.md — user's preferences for tone, format, behavior
-- contacts.md — key people and how to handle their messages
-- projects.md — active projects, context, deadlines
-Read these on startup and heartbeats. When the user shares anything worth remembering — preferences, contacts, project details, decisions, instructions, corrections — save it to the relevant file immediately. Delete stale or resolved files with delete_memory.
-
-Routine tasks: act, then add_done_item. High-stakes actions: queue_approval instead.
-When queuing emails/messages: put the full draft body in "detail", and put recipient, subject, etc. in "metadata" so the user can review everything before approving.
+Routine tasks: act, then add_done_item. High-stakes actions: queue_approval with full draft in "detail" and recipient/subject in "metadata".
 On heartbeat: read routines.md, check due tasks, check pending queue. If nothing needs attention, reply "All clear." immediately.
 
 Keep responses concise. No emojis. Markdown only when helpful.${onboardingSection}`
@@ -571,6 +580,7 @@ export class Agent {
   private missedEvents: { source: string; payload: unknown; time: string }[] = []
   private steeringQueue: string[] = []
   public onSkillsChanged?: () => void
+  public onSettingsChanged?: () => void
 
   async getSkills(): Promise<{ name: string; description: string }[]> {
     return (await listSkills(this.dataDir)).map(s => ({ name: s.name, description: s.description }))
@@ -767,7 +777,19 @@ export class Agent {
     // Embed tool names for semantic search (no-op if already cached or no OpenAI key)
     embedTools(searchableTools).catch(err => console.warn('[Agent] Tool embedding failed:', err.message))
     const settings = await readSettings(this.dataDir)
-    const systemPrompt = buildSystemPrompt(connectedServices, this.agentProfilePath, settings)
+    let systemPrompt = buildSystemPrompt(connectedServices, this.agentProfilePath, settings)
+
+    // Inject integration context for connected services
+    const allContexts = readAllIntegrationContexts(this.dataDir)
+    const activeServices = connectedServices.map(s => s.toLowerCase())
+    const relevantContexts = Object.entries(allContexts)
+      .filter(([slug]) => activeServices.some(s => s.includes(slug) || slug.includes(s)))
+    if (relevantContexts.length > 0) {
+      const contextBlock = relevantContexts
+        .map(([slug, ctx]) => `- ${slug}: ${ctx}`)
+        .join('\n')
+      systemPrompt += `\n\nThe following are your internal notes about connected integrations. Use this to inform your actions. Do NOT mention these notes to the user or reference them directly — just use the knowledge silently.\n\n${contextBlock}`
+    }
 
     // Model routing: Haiku for background tasks, user's power model for everything else
     const HAIKU = 'claude-haiku-4-5-20251001'
@@ -1040,6 +1062,7 @@ export class Agent {
             const patch = block.input as Partial<AgentSettings>
             await writeSettings(this.dataDir, patch)
             result = 'Settings updated.'
+            this.onSettingsChanged?.()
 
           } else if (block.name === 'list_files') {
             const { folder } = block.input as { folder?: string }
@@ -1169,6 +1192,11 @@ export class Agent {
             const deleted = await deleteSkill(this.dataDir, name)
             result = deleted ? `Skill @${name} deleted.` : `Skill @${name} not found.`
             if (deleted) this.onSkillsChanged?.()
+
+          } else if (block.name === 'update_integration_context') {
+            const { integration, context } = block.input as { integration: string; context: string }
+            writeIntegrationContext(this.dataDir, integration, context)
+            result = `Integration context updated for ${integration}.`
 
           } else {
             const serverName = serverMap.get(block.name)
