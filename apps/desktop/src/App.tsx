@@ -26,7 +26,7 @@ function formatDue(due: string): string {
 }
 
 export default function App() {
-  const { queue, done, todos, messages, streamingText, thinking, toolLabel, connected, integrations, error, chat, approve, reject, editQueueItem, completeTodo, deleteTodo, connectIntegration, disconnectIntegration, settings, updateSettings, authStatus, updateAuth, verifyAuth, files, folders, searchResults, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, openDocument, activeDocument, updateDocument, closeDocument, relayActive, relayModel, setRelayModel, relayUsage, activateRelay, refreshRelayStatus, apiKeyStatus, pendingFields, setPendingFields, updateApiKeys, setModel } = useAgent()
+  const { queue, done, todos, messages, streamingText, thinking, processing, toolLabel, connected, lastHeartbeat, skills, steer, stopAgent, integrations, error, chat, approve, reject, editQueueItem, completeTodo, deleteTodo, connectIntegration, disconnectIntegration, settings, updateSettings, authStatus, updateAuth, verifyAuth, files, folders, searchResults, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, openDocument, activeDocument, updateDocument, closeDocument, relayActive, relayModel, setRelayModel, relayUsage, activateRelay, refreshRelayStatus, apiKeyStatus, pendingFields, setPendingFields, updateApiKeys, setModel } = useAgent()
   const { dark, toggle: toggleTheme } = useTheme()
   const [view, setView] = useState<View>('chat')
   const [selectedItem, setSelectedItem] = useState<ApprovalItem | null>(null)
@@ -72,7 +72,7 @@ export default function App() {
 
         {view === 'chat' && (
           <div className="relative flex-1 flex overflow-hidden">
-            <ChatPane messages={messages} streamingText={streamingText} thinking={thinking} toolLabel={toolLabel} connected={connected} onChat={chat} files={files} onOpenDocument={openDocument} activeDocumentId={lastDocumentId} apiKeyStatus={apiKeyStatus} onNavigateToSettings={() => setView('settings')} className="flex-1" />
+            <ChatPane messages={messages} streamingText={streamingText} thinking={thinking} processing={processing} toolLabel={toolLabel} connected={connected} onChat={chat} onSteer={steer} onStop={stopAgent} onIngestFile={ingestFile} files={files} onOpenDocument={openDocument} activeDocumentId={lastDocumentId} apiKeyStatus={apiKeyStatus} onNavigateToSettings={() => setView('settings')} lastHeartbeat={lastHeartbeat} skills={skills} className="flex-1" />
             {activeDocument && (
               <DocumentPanel
                 document={activeDocument}

@@ -6,6 +6,8 @@ export const INTEGRATION_DESCRIPTIONS: Record<string, string> = {
   slack: 'Team messaging',
   discord: 'Community chat',
   microsoft_teams: 'Team chat & meetings',
+  telegram: 'Messaging',
+  sendgrid: 'Transactional email',
   intercom: 'Customer messaging',
   dialpad: 'Business phone',
   whatsapp: 'Messaging',
@@ -52,6 +54,7 @@ export const INTEGRATION_DESCRIPTIONS: Record<string, string> = {
   freshbooks: 'Invoicing',
 
   // Project Management
+  jira: 'Issue tracking',
   asana: 'Project management',
   clickup: 'Project management',
   monday: 'Project management',
@@ -74,6 +77,7 @@ export const INTEGRATION_DESCRIPTIONS: Record<string, string> = {
   wakatime: 'Coding analytics',
 
   // Finance & Payments
+  quickbooks: 'Accounting',
   stripe: 'Payments',
   square: 'Payments & POS',
   xero: 'Accounting',
@@ -85,15 +89,20 @@ export const INTEGRATION_DESCRIPTIONS: Record<string, string> = {
   ynab: 'Budgeting',
 
   // eCommerce
+  spotify: 'Music',
   shopify: 'eCommerce',
   servicem8: 'Field service',
 
   // Social & Marketing
   linkedin: 'Professional network',
   facebook: 'Social media',
+  instagram: 'Social media',
+  tiktok: 'Short-form video',
   reddit: 'Community & forums',
   youtube: 'Video platform',
+  facebook_ads: 'Meta ad campaigns',
   googleads: 'Ad campaigns',
+  semrush: 'SEO & marketing',
   google_analytics: 'Website analytics',
   google_maps: 'Maps & places',
   klaviyo: 'Email & SMS marketing',

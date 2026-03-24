@@ -23,7 +23,7 @@ echo "  → coagent-server"
 bun build "$ROOT/packages/agent-core/dist/server.js" --compile --outfile "$BINDIR/coagent-server-$TARGET"
 
 echo "  → coagent-memory"
-MCP_ENTRY=$(node -e "console.log(require.resolve('@coagent/mcp-memory'))")
+MCP_ENTRY="$ROOT/packages/mcp-memory/dist/index.js"
 bun build "$MCP_ENTRY" --compile --outfile "$BINDIR/coagent-memory-$TARGET"
 
 chmod +x "$BINDIR/"*

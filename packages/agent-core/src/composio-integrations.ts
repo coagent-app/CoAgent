@@ -28,6 +28,7 @@ export const INTEGRATIONS = [
   { slug: 'linkedin', name: 'LinkedIn' },
   { slug: 'outlook', name: 'Outlook' },
   { slug: 'zoom', name: 'Zoom' },
+  { slug: 'spotify', name: 'Spotify' },
   { slug: 'discord', name: 'Discord' },
   { slug: 'asana', name: 'Asana' },
   { slug: 'trello', name: 'Trello' },
@@ -44,6 +45,8 @@ export const INTEGRATIONS = [
   // Email & Communication
   { slug: 'zoho_mail', name: 'Zoho Mail' },
   { slug: 'microsoft_teams', name: 'Microsoft Teams' },
+  { slug: 'telegram', name: 'Telegram' },
+  { slug: 'sendgrid', name: 'SendGrid' },
   { slug: 'intercom', name: 'Intercom' },
   { slug: 'dialpad', name: 'Dialpad' },
   { slug: 'whatsapp', name: 'WhatsApp' },
@@ -83,6 +86,7 @@ export const INTEGRATIONS = [
   { slug: 'freshbooks', name: 'FreshBooks' },
 
   // Project Management
+  { slug: 'jira', name: 'Jira' },
   { slug: 'clickup', name: 'ClickUp' },
   { slug: 'monday', name: 'Monday' },
   { slug: 'linear', name: 'Linear' },
@@ -101,6 +105,7 @@ export const INTEGRATIONS = [
   { slug: 'wakatime', name: 'WakaTime' },
 
   // Finance & Payments
+  { slug: 'quickbooks', name: 'QuickBooks' },
   { slug: 'square', name: 'Square' },
   { slug: 'xero', name: 'Xero' },
   { slug: 'zoho_books', name: 'Zoho Books' },
@@ -114,8 +119,12 @@ export const INTEGRATIONS = [
   { slug: 'servicem8', name: 'Servicem8' },
 
   // Social & Marketing
+  { slug: 'instagram', name: 'Instagram' },
+  { slug: 'tiktok', name: 'TikTok' },
   { slug: 'reddit', name: 'Reddit' },
+  { slug: 'facebook_ads', name: 'Meta Ads' },
   { slug: 'googleads', name: 'Google Ads' },
+  { slug: 'semrush', name: 'SEMrush' },
   { slug: 'google_maps', name: 'Google Maps' },
   { slug: 'klaviyo', name: 'Klaviyo' },
   { slug: 'eventbrite', name: 'Eventbrite' },
@@ -150,26 +159,101 @@ export async function getIntegrationStatuses(
   }))
 }
 
-/** Fetch required fields for connecting an account (cached per slug) */
-const fieldsCache = new Map<string, { name: string; displayName: string; description: string }[]>()
+/** Fetch toolkit auth info (cached) */
+interface ToolkitAuth {
+  managed: boolean
+  mode: string
+  /** Fields the user must fill to connect (API key integrations) */
+  connectionFields: { name: string; displayName: string; description: string }[]
+  /** Fields needed to create an auth config (unmanaged OAuth — client_id, client_secret, etc.) */
+  setupFields: { name: string; displayName: string; description: string; default?: string }[]
+}
 
-export async function getRequiredFields(
-  apiKey: string,
-  slug: string
-): Promise<{ name: string; displayName: string; description: string }[]> {
-  if (fieldsCache.has(slug)) return fieldsCache.get(slug)!
+const authCache = new Map<string, ToolkitAuth>()
+
+async function getToolkitAuth(apiKey: string, slug: string): Promise<ToolkitAuth> {
+  if (authCache.has(slug)) return authCache.get(slug)!
   try {
     const res = await fetch(`${COMPOSIO_BASE}/toolkits/${slug}`, {
       headers: { 'X-API-KEY': apiKey }
     })
     const data = await res.json() as any
-    const fields = data?.auth_config_details?.[0]?.fields?.connected_account_initiation?.required ?? []
-    const result = fields.map((f: any) => ({ name: f.name, displayName: f.displayName, description: f.description }))
-    fieldsCache.set(slug, result)
+    const managed = (data?.composio_managed_auth_schemes ?? []).length > 0
+    const authConfig = data?.auth_config_details?.[0]
+    const mode = authConfig?.mode ?? ''
+
+    const connectionFields = (authConfig?.fields?.connected_account_initiation?.required ?? [])
+      .map((f: any) => ({ name: f.name, displayName: f.displayName, description: f.description }))
+
+    const setupFields = (authConfig?.fields?.auth_config_creation?.required ?? [])
+      .map((f: any) => ({ name: f.name, displayName: f.displayName, description: f.description, default: f.default }))
+
+    const result: ToolkitAuth = { managed, mode, connectionFields, setupFields }
+    authCache.set(slug, result)
     return result
   } catch {
-    return []
+    return { managed: false, mode: '', connectionFields: [], setupFields: [] }
   }
+}
+
+/** Public: get all fields the user needs to provide (connection + setup fields combined) */
+export async function getRequiredFields(
+  apiKey: string,
+  slug: string
+): Promise<{ name: string; displayName: string; description: string }[]> {
+  const auth = await getToolkitAuth(apiKey, slug)
+  // For API key integrations: connection fields (e.g. generic_api_key)
+  if (auth.connectionFields.length > 0) return auth.connectionFields
+  // For unmanaged OAuth: setup fields (client_id, client_secret)
+  if (!auth.managed && auth.setupFields.length > 0) return auth.setupFields
+  return []
+}
+
+/** Create an auth config for unmanaged OAuth apps (client_id/secret) */
+async function ensureAuthConfig(
+  apiKey: string,
+  slug: string,
+  params: Record<string, string>
+): Promise<string> {
+  const auth = await getToolkitAuth(apiKey, slug)
+  const authConfigName = `${slug}_coagent`
+
+  // Build the config payload
+  const configData: Record<string, string> = {}
+  for (const f of auth.setupFields) {
+    configData[f.name] = params[f.name]?.trim() || f.default || ''
+  }
+  // Always include redirect URI for OAuth
+  if (!configData.oauth_redirect_uri) {
+    configData.oauth_redirect_uri = 'https://backend.composio.dev/api/v1/auth-apps/add'
+  }
+
+  // Check if auth config already exists
+  const listRes = await fetch(`${COMPOSIO_BASE}/auth_configs?toolkit_slug=${slug}`, {
+    headers: { 'X-API-KEY': apiKey }
+  })
+  const listData = await listRes.json() as any
+  const existing = (listData?.items ?? []).find((c: any) => c.name === authConfigName)
+  if (existing) {
+    console.log(`[Composio] Reusing auth config ${authConfigName} (${existing.id})`)
+    return existing.id
+  }
+
+  // Create new auth config
+  const res = await fetch(`${COMPOSIO_BASE}/auth_configs`, {
+    method: 'POST',
+    headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: authConfigName,
+      toolkit_slug: slug,
+      type: auth.mode || 'OAUTH2',
+      credentials: configData
+    })
+  })
+  const body = await res.json() as any
+  if (!res.ok) throw new Error(body?.error?.message ?? `Failed to create auth config for ${slug}`)
+  console.log(`[Composio] Created auth config ${authConfigName} (${body.id})`)
+  return body.id
 }
 
 export async function generateAuthUrl(
@@ -178,21 +262,24 @@ export async function generateAuthUrl(
   userId = 'default',
   params?: Record<string, string>
 ): Promise<string> {
-  // If this integration requires extra fields, use the REST API to pass them
-  const requiredFields = await getRequiredFields(apiKey, slug)
-  if (requiredFields.length > 0) {
-    // Check all required fields are provided
-    const missing = requiredFields.filter(f => !params?.[f.name]?.trim())
+  const auth = await getToolkitAuth(apiKey, slug)
+
+  // Collect all required fields the user needs to provide
+  const allRequired = await getRequiredFields(apiKey, slug)
+  if (allRequired.length > 0) {
+    const missing = allRequired.filter(f => !params?.[f.name]?.trim())
     if (missing.length > 0) {
-      // Return a special error with field info so frontend can prompt
-      const err: any = new Error(`NEEDS_FIELDS`)
-      err.fields = requiredFields
+      const err: any = new Error('NEEDS_FIELDS')
+      err.fields = allRequired
       throw err
     }
+  }
 
+  // API key integrations — connect directly with the provided data
+  if (auth.connectionFields.length > 0) {
     await removeAllAccountsForSlug(apiKey, slug, userId)
     const data: Record<string, string> = {}
-    for (const f of requiredFields) data[f.name] = params![f.name].trim()
+    for (const f of auth.connectionFields) data[f.name] = params![f.name].trim()
 
     const res = await fetch(`${COMPOSIO_BASE}/connected_accounts`, {
       method: 'POST',
@@ -206,8 +293,28 @@ export async function generateAuthUrl(
     return url
   }
 
-  // No extra fields needed — use SDK auth flow
-  // Remove old accounts FIRST, then authorize (not in parallel — avoids deleting the new account)
+  // Unmanaged OAuth — create auth config first, then connect using it
+  if (!auth.managed && auth.setupFields.length > 0) {
+    const authConfigId = await ensureAuthConfig(apiKey, slug, params!)
+    await removeAllAccountsForSlug(apiKey, slug, userId)
+
+    const res = await fetch(`${COMPOSIO_BASE}/connected_accounts`, {
+      method: 'POST',
+      headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        toolkit_slug: slug,
+        user_uuid: userId,
+        auth_config_id: authConfigId
+      })
+    })
+    const body = await res.json() as any
+    if (!res.ok) throw new Error(body?.error?.message ?? `Failed to connect ${slug}`)
+    const url = body?.redirectUrl ?? body?.redirect_url
+    if (!url) throw new Error(`No auth URL returned for ${slug}`)
+    return url
+  }
+
+  // Managed OAuth — use SDK auth flow directly
   await removeAllAccountsForSlug(apiKey, slug, userId).catch(() => {})
   const composio = new Composio({ apiKey })
   const result = await composio.toolkits.authorize(userId, slug)

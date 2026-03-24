@@ -269,30 +269,24 @@ function cosine(a: number[], b: number[]): number {
 type SampleResult =
   | { type: 'text'; text: string }
   | { type: 'image'; base64: string; mediaType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp' }
+  | { type: 'document'; base64: string; mediaType: 'application/pdf' }
 
 async function sampleContent(filename: string, buffer: Buffer, mimeType: string): Promise<SampleResult> {
   const ext = extname(filename).toLowerCase()
 
-  // Images — Claude reads natively as base64
+  // Images — Claude reads natively
   const imageExts = ['.jpg', '.jpeg', '.png', '.gif', '.webp']
   if (mimeType.startsWith('image/') || imageExts.includes(ext)) {
     const mediaTypeMap: Record<string, 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'> = {
       '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
       '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp'
     }
-    const mediaType = mediaTypeMap[ext] ?? 'image/jpeg'
-    return { type: 'image', base64: buffer.toString('base64'), mediaType }
+    return { type: 'image', base64: buffer.toString('base64'), mediaType: mediaTypeMap[ext] ?? 'image/jpeg' }
   }
 
-  // PDF — extract text from first 2 pages
+  // PDF — Claude reads natively as a document block
   if (ext === '.pdf') {
-    try {
-      const pdfParse = (await import('pdf-parse')).default
-      const data = await pdfParse(buffer, { max: 2 })
-      return { type: 'text', text: data.text.slice(0, 200) }
-    } catch {
-      return { type: 'text', text: '[PDF — could not extract text]' }
-    }
+    return { type: 'document', base64: buffer.toString('base64'), mediaType: 'application/pdf' }
   }
 
   // DOCX — extract text via mammoth
@@ -300,13 +294,13 @@ async function sampleContent(filename: string, buffer: Buffer, mimeType: string)
     try {
       const mammoth = await import('mammoth')
       const result = await mammoth.extractRawText({ buffer })
-      return { type: 'text', text: result.value.slice(0, 200) }
+      return { type: 'text', text: result.value.slice(0, 500) }
     } catch {
       return { type: 'text', text: '[DOCX — could not extract text]' }
     }
   }
 
-  // XLSX / XLS — extract first sheet as CSV-like text
+  // XLSX / XLS
   if (ext === '.xlsx' || ext === '.xls') {
     try {
       const XLSX = await import('xlsx')
@@ -314,36 +308,20 @@ async function sampleContent(filename: string, buffer: Buffer, mimeType: string)
       const sheetName = wb.SheetNames[0]
       if (sheetName) {
         const ws = wb.Sheets[sheetName]
-        const csv = XLSX.utils.sheet_to_csv(ws)
-        return { type: 'text', text: csv.slice(0, 200) }
+        return { type: 'text', text: XLSX.utils.sheet_to_csv(ws).slice(0, 500) }
       }
     } catch { /* fall through */ }
     return { type: 'text', text: '[Excel — could not extract data]' }
   }
 
-  // CSV — first 20 rows
-  if (ext === '.csv') {
-    return { type: 'text', text: buffer.toString('utf-8').slice(0, 200) }
-  }
-
-  // JSON — parse and truncate
-  if (ext === '.json') {
-    try {
-      const parsed = JSON.parse(buffer.toString('utf-8'))
-      return { type: 'text', text: JSON.stringify(parsed, null, 2).slice(0, 200) }
-    } catch {
-      return { type: 'text', text: buffer.toString('utf-8').slice(0, 200) }
-    }
-  }
-
-  // Text-based formats — markdown, HTML, plain text, code files
-  const textExts = ['.md', '.txt', '.html', '.htm', '.xml', '.yaml', '.yml', '.toml', '.env', '.ts', '.js', '.py', '.rb', '.go', '.rs', '.java', '.cpp', '.c', '.sh']
+  // Text-based formats
+  const textExts = ['.md', '.txt', '.html', '.htm', '.xml', '.yaml', '.yml', '.toml', '.env', '.ts', '.js', '.py', '.rb', '.go', '.rs', '.java', '.cpp', '.c', '.sh', '.csv', '.json']
   if (textExts.includes(ext) || mimeType.startsWith('text/')) {
-    return { type: 'text', text: buffer.toString('utf-8').slice(0, 200) }
+    return { type: 'text', text: buffer.toString('utf-8').slice(0, 500) }
   }
 
-  // Unknown — try UTF-8; if it looks binary, say so
-  const sample = buffer.toString('utf-8').slice(0, 200)
+  // Unknown — try UTF-8
+  const sample = buffer.toString('utf-8').slice(0, 500)
   const binaryCharCount = (sample.match(/[\x00-\x08\x0e-\x1f\x7f-\x9f]/g) ?? []).length
   if (binaryCharCount > sample.length * 0.1) {
     return { type: 'text', text: 'Binary file — content not extractable for preview.' }
@@ -368,12 +346,18 @@ Write a 2-3 sentence summary of what this file is and what it contains. Then ass
 Respond in this exact JSON format:
 {"summary": "...", "group": "..."}`
 
-  const content: Anthropic.MessageParam['content'] = sample.type === 'image'
-    ? [
-        { type: 'image', source: { type: 'base64', media_type: sample.mediaType, data: sample.base64 } },
-        { type: 'text', text: prompt }
-      ]
-    : [{ type: 'text', text: `${prompt}\n\nFile contents (sample):\n${sample.text}` }]
+  const content: any =
+    sample.type === 'image'
+      ? [
+          { type: 'image', source: { type: 'base64', media_type: sample.mediaType, data: sample.base64 } },
+          { type: 'text', text: prompt }
+        ]
+      : sample.type === 'document'
+        ? [
+            { type: 'document', source: { type: 'base64', media_type: sample.mediaType, data: sample.base64 } },
+            { type: 'text', text: prompt }
+          ]
+        : [{ type: 'text', text: `${prompt}\n\nFile contents (sample):\n${sample.text}` }]
 
   const response = await anthropic.messages.create({
     model: 'claude-haiku-4-5-20251001',
@@ -635,6 +619,26 @@ export async function searchFiles(dataDir: string, query: string, limit = 5): Pr
   await writeIndex(dataDir, updated)
 
   return top.map(({ entry: { embedding: _, dirty: __, ...entry } }) => entry)
+}
+
+export async function readFileBase64(dataDir: string, id: string): Promise<{ base64: string; filename: string; mimeType: string }> {
+  const index = await readIndex(dataDir)
+  const entry = index.find(e => e.id === id)
+  if (!entry) throw new Error(`File ${id} not found`)
+  const buffer = await readFile(entry.path)
+  const ext = extname(entry.filename).toLowerCase()
+  const mimeTypes: Record<string, string> = {
+    '.pdf': 'application/pdf', '.doc': 'application/msword',
+    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    '.xls': 'application/vnd.ms-excel', '.csv': 'text/csv',
+    '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
+    '.txt': 'text/plain', '.md': 'text/markdown', '.json': 'application/json',
+    '.html': 'text/html', '.zip': 'application/zip',
+    '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  }
+  return { base64: buffer.toString('base64'), filename: entry.filename, mimeType: mimeTypes[ext] ?? 'application/octet-stream' }
 }
 
 export async function readFileContent(dataDir: string, id: string): Promise<string> {

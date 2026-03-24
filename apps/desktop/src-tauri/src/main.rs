@@ -1,13 +1,11 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use tauri::Manager;
-use tauri_plugin_shell::ShellExt;
-use tauri_plugin_shell::process::CommandChild;
 
-struct ServerProcess(Mutex<Option<CommandChild>>);
+struct ServerProcess(Mutex<Option<Child>>);
 
 #[tauri::command]
 fn open_file(path: String) -> Result<(), String> {
@@ -35,48 +33,44 @@ fn read_file_bytes(path: String) -> Result<Vec<u8>, String> {
     std::fs::read(&path).map_err(|e| format!("Failed to read '{}': {}", path, e))
 }
 
+fn find_server_binary() -> Option<std::path::PathBuf> {
+    // The binary is in the same directory as the main executable (Contents/MacOS/)
+    // Tauri's externalBin places it there automatically during bundling
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("coagent-server");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .manage(ServerProcess(Mutex::new(None)))
         .setup(|app| {
-            // Use Tauri's sidecar API — it knows where the binary is in the bundle
-            let sidecar_command = app.shell().sidecar("binaries/coagent-server")
-                .map_err(|e| format!("Failed to create sidecar command: {}", e))?;
-
-            match sidecar_command.spawn() {
-                Ok((mut rx, child)) => {
-                    println!("[Tauri] Server sidecar started (pid: {})", child.pid());
-                    let state: tauri::State<ServerProcess> = app.state();
-                    *state.0.lock().unwrap() = Some(child);
-
-                    // Log sidecar output in background
-                    tauri::async_runtime::spawn(async move {
-                        use tauri_plugin_shell::process::CommandEvent;
-                        while let Some(event) = rx.recv().await {
-                            match event {
-                                CommandEvent::Stdout(line) => {
-                                    let text = String::from_utf8_lossy(&line);
-                                    print!("[server] {}", text);
-                                }
-                                CommandEvent::Stderr(line) => {
-                                    let text = String::from_utf8_lossy(&line);
-                                    eprint!("[server] {}", text);
-                                }
-                                CommandEvent::Terminated(payload) => {
-                                    println!("[Tauri] Server exited: {:?}", payload);
-                                    break;
-                                }
-                                _ => {}
-                            }
-                        }
-                    });
+            if let Some(server_path) = find_server_binary() {
+                eprintln!("[Tauri] Starting server: {:?}", server_path);
+                match Command::new(&server_path)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                {
+                    Ok(child) => {
+                        eprintln!("[Tauri] Server started (pid: {})", child.id());
+                        let state: tauri::State<ServerProcess> = app.state();
+                        *state.0.lock().unwrap() = Some(child);
+                    }
+                    Err(e) => {
+                        eprintln!("[Tauri] Failed to start server: {}", e);
+                    }
                 }
-                Err(e) => {
-                    eprintln!("[Tauri] Failed to start server sidecar: {}", e);
-                    // Fall through — frontend will show connection retry
-                }
+            } else {
+                eprintln!("[Tauri] No server binary found next to executable");
             }
             Ok(())
         })
@@ -87,9 +81,10 @@ fn main() {
 
 impl Drop for ServerProcess {
     fn drop(&mut self) {
-        if let Some(child) = self.0.lock().unwrap().take() {
-            println!("[Tauri] Killing server sidecar");
+        if let Some(mut child) = self.0.lock().unwrap().take() {
+            eprintln!("[Tauri] Killing server process");
             let _ = child.kill();
+            let _ = child.wait();
         }
     }
 }

@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react'
-import { Send, FileText, Sheet, File, X, ChevronLeft, ChevronRight, ExternalLink } from 'lucide-react'
+import { Send, Square, FileText, Sheet, File, X, ChevronLeft, ChevronRight, ExternalLink, Paperclip } from 'lucide-react'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { invoke } from '@tauri-apps/api/core'
 import { Button } from '@/components/ui/button'
@@ -14,14 +14,20 @@ interface ChatPaneProps {
   messages: AgentMessage[]
   streamingText: string | null
   thinking: boolean
+  processing: boolean
   toolLabel: string | null
   connected: boolean
   onChat: (message: string) => void
+  onSteer?: (message: string) => void
+  onStop?: () => void
+  onIngestFile?: (filename: string, mimeType: string, data: string) => void
   files: FileEntry[]
   onOpenDocument?: (id: string) => void
   activeDocumentId: string | null
   apiKeyStatus?: { anthropic: boolean; composio: boolean; openai: boolean } | null
   onNavigateToSettings?: () => void
+  lastHeartbeat?: { time: Date; status: string } | null
+  skills?: { name: string; description: string }[]
   className?: string
 }
 
@@ -333,8 +339,14 @@ const AgentBubble = React.memo(function AgentBubble({ content, files, onOpenDocu
   )
 })
 
-export function ChatPane({ messages, streamingText, thinking, toolLabel, connected, onChat, files, onOpenDocument, activeDocumentId, apiKeyStatus, onNavigateToSettings, className }: ChatPaneProps) {
+export function ChatPane({ messages, streamingText, thinking, processing, toolLabel, connected, onChat, onSteer, onStop, onIngestFile, files, onOpenDocument, activeDocumentId, apiKeyStatus, onNavigateToSettings, lastHeartbeat, skills = [], className }: ChatPaneProps) {
   const [input, setInput] = useState('')
+  const [skillQuery, setSkillQuery] = useState<string | null>(null)
+  const [selectedSkillIdx, setSelectedSkillIdx] = useState(0)
+  const [attachedFiles, setAttachedFiles] = useState<{ name: string; size: number }[]>([])
+  const [isDragging, setIsDragging] = useState(false)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   // Scroll to bottom on new messages / streaming
@@ -359,23 +371,81 @@ export function ChatPane({ messages, streamingText, thinking, toolLabel, connect
     }
   }, [connected, onChat])
 
+  // Skill autocomplete: detect @query in input
+  const filteredSkills = React.useMemo(() => {
+    if (skillQuery === null || skills.length === 0) return []
+    const q = skillQuery.toLowerCase()
+    return skills.filter(s => s.name.includes(q) || s.description.toLowerCase().includes(q))
+  }, [skillQuery, skills])
+
+  const handleInputChange = useCallback((value: string) => {
+    setInput(value)
+    // Detect @ mention at cursor position
+    const atIdx = value.lastIndexOf('@')
+    if (atIdx !== -1 && (atIdx === 0 || value[atIdx - 1] === ' ')) {
+      const query = value.slice(atIdx + 1)
+      if (!query.includes(' ')) {
+        setSkillQuery(query)
+        setSelectedSkillIdx(0)
+        return
+      }
+    }
+    setSkillQuery(null)
+  }, [])
+
+  const insertSkill = useCallback((skillName: string) => {
+    const atIdx = input.lastIndexOf('@')
+    const before = input.slice(0, atIdx)
+    setInput(`${before}@${skillName} `)
+    setSkillQuery(null)
+    inputRef.current?.focus()
+  }, [input])
+
+  const processFiles = useCallback((fileList: FileList | File[]) => {
+    const files = Array.from(fileList)
+    for (const file of files) {
+      const reader = new FileReader()
+      reader.onload = () => {
+        const base64 = (reader.result as string).split(',')[1]
+        onIngestFile?.(file.name, file.type || 'application/octet-stream', base64)
+        setAttachedFiles(prev => [...prev, { name: file.name, size: file.size }])
+      }
+      reader.readAsDataURL(file)
+    }
+  }, [onIngestFile])
+
+  const isActive = processing || thinking || streamingText !== null
+
   const handleSend = useCallback(() => {
     const msg = input.trim()
-    if (!msg) return
-    if (!connected) {
-      // Queue the message — it'll be sent when connected
-      pendingMsgRef.current = msg
+    const hasAttachments = attachedFiles.length > 0
+    if (!msg && !hasAttachments) return
+    setSkillQuery(null)
+    const fullMsg = hasAttachments
+      ? `${msg}${msg ? '\n\n' : ''}[Attached ${attachedFiles.length} file${attachedFiles.length > 1 ? 's' : ''}: ${attachedFiles.map(f => f.name).join(', ')}]`
+      : msg
+
+    if (isActive && onSteer) {
+      // Agent is working — steer it instead of starting a new chat
+      onSteer(fullMsg)
+    } else if (!connected) {
+      pendingMsgRef.current = fullMsg
     } else {
-      onChat(msg)
+      onChat(fullMsg)
     }
     setInput('')
-  }, [input, connected, onChat])
+    setAttachedFiles([])
+  }, [input, connected, onChat, onSteer, attachedFiles, isActive])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (skillQuery !== null && filteredSkills.length > 0) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); setSelectedSkillIdx(i => Math.min(filteredSkills.length - 1, i + 1)); return }
+      if (e.key === 'ArrowUp') { e.preventDefault(); setSelectedSkillIdx(i => Math.max(0, i - 1)); return }
+      if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); insertSkill(filteredSkills[selectedSkillIdx].name); return }
+      if (e.key === 'Escape') { e.preventDefault(); setSkillQuery(null); return }
+    }
     if (e.key === 'Enter') handleSend()
-  }, [handleSend])
-
-  const isActive = thinking || streamingText !== null
+  }, [handleSend, skillQuery, filteredSkills, selectedSkillIdx, insertSkill])
 
   // Pre-compute last assistant index once instead of O(n²) in render
   const lastAssistantIndex = React.useMemo(() => {
@@ -386,7 +456,21 @@ export function ChatPane({ messages, streamingText, thinking, toolLabel, connect
   }, [messages])
 
   return (
-    <div className={cn("flex-1 bg-white dark:bg-neutral-950 flex flex-col overflow-hidden", className)}>
+    <div
+      className={cn("flex-1 bg-white dark:bg-neutral-950 flex flex-col overflow-hidden relative", className)}
+      onDragOver={(e) => { e.preventDefault(); setIsDragging(true) }}
+      onDragLeave={(e) => { if (e.currentTarget === e.target) setIsDragging(false) }}
+      onDrop={(e) => {
+        e.preventDefault()
+        setIsDragging(false)
+        if (e.dataTransfer.files.length > 0) processFiles(e.dataTransfer.files)
+      }}
+    >
+      {isDragging && (
+        <div className="absolute inset-0 z-40 bg-blue-50/80 dark:bg-blue-950/80 border-2 border-dashed border-blue-400 dark:border-blue-500 rounded-lg flex items-center justify-center pointer-events-none">
+          <p className="text-blue-600 dark:text-blue-400 font-medium text-[14px]">Drop files here</p>
+        </div>
+      )}
       <div className="px-7 py-5 border-b border-neutral-100 dark:border-neutral-800 flex items-center justify-between">
         <div>
           <p className="text-[10px] font-semibold text-neutral-400 dark:text-neutral-500 uppercase tracking-widest mb-0.5">
@@ -394,10 +478,17 @@ export function ChatPane({ messages, streamingText, thinking, toolLabel, connect
           </p>
           <h1 className="text-[19px] font-bold tracking-tight text-neutral-900 dark:text-neutral-100">Co-Agent</h1>
         </div>
-        <div
-          title={connected ? 'Connected' : 'Disconnected'}
-          className={cn('w-2 h-2 rounded-full', connected ? 'bg-emerald-400' : 'bg-red-400')}
-        />
+        <div className="flex items-center gap-2">
+          {lastHeartbeat && (
+            <span className="text-[10px] text-neutral-400 dark:text-neutral-500" title={`Last check: ${lastHeartbeat.time.toLocaleTimeString()}`}>
+              {lastHeartbeat.status === 'started' ? 'Checking...' : `Checked ${lastHeartbeat.time.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`}
+            </span>
+          )}
+          <div
+            title={connected ? 'Connected' : 'Disconnected'}
+            className={cn('w-2 h-2 rounded-full', connected ? 'bg-emerald-400' : 'bg-red-400')}
+          />
+        </div>
       </div>
 
       <ScrollArea className="flex-1">
@@ -475,19 +566,77 @@ export function ChatPane({ messages, streamingText, thinking, toolLabel, connect
         </div>
       </ScrollArea>
 
-      <div className="px-7 py-4 border-t border-neutral-100 dark:border-neutral-800 flex gap-2.5 items-center">
-        <Input
-          className="flex-1 text-[13.5px] dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500"
-          placeholder={connected ? 'Ask Co-Agent anything…' : 'Starting up…'}
-          value={input}
-          onChange={e => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-          disabled={isActive}
-        />
-        <Button size="sm" onClick={handleSend} disabled={isActive || !input.trim()}>
-          <Send size={14} className="mr-1.5" />
-          Send
-        </Button>
+      <div className="relative px-7 py-4 border-t border-neutral-100 dark:border-neutral-800">
+        {/* Skill autocomplete dropdown */}
+        {skillQuery !== null && filteredSkills.length > 0 && (
+          <div className="absolute bottom-full left-7 right-7 mb-1 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg shadow-lg overflow-hidden z-10">
+            {filteredSkills.map((skill, i) => (
+              <button
+                key={skill.name}
+                className={cn(
+                  'w-full text-left px-3 py-2 flex items-center gap-2 text-[13px] transition-colors',
+                  i === selectedSkillIdx
+                    ? 'bg-neutral-100 dark:bg-neutral-700'
+                    : 'hover:bg-neutral-50 dark:hover:bg-neutral-750'
+                )}
+                onMouseDown={(e) => { e.preventDefault(); insertSkill(skill.name) }}
+              >
+                <span className="font-medium text-neutral-800 dark:text-neutral-200">@{skill.name}</span>
+                <span className="text-neutral-400 dark:text-neutral-500 truncate">{skill.description}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        {/* Attached files preview */}
+        {attachedFiles.length > 0 && (
+          <div className="flex gap-2 mb-2 flex-wrap">
+            {attachedFiles.map((f, i) => (
+              <div key={i} className="flex items-center gap-1.5 bg-neutral-100 dark:bg-neutral-800 rounded-md px-2 py-1 text-[12px]">
+                <Paperclip size={11} className="text-neutral-400" />
+                <span className="text-neutral-600 dark:text-neutral-300 truncate max-w-[150px]">{f.name}</span>
+                <button onClick={() => setAttachedFiles(prev => prev.filter((_, j) => j !== i))} className="text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300">
+                  <X size={11} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="flex gap-2.5 items-center">
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            className="hidden"
+            onChange={(e) => { if (e.target.files) processFiles(e.target.files); e.target.value = '' }}
+          />
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={isActive}
+            className="p-1.5 rounded-md text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors disabled:opacity-30"
+            title="Attach file"
+          >
+            <Paperclip size={16} />
+          </button>
+          <Input
+            ref={inputRef}
+            className="flex-1 text-[13.5px] dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500"
+            placeholder={isActive ? 'Type to steer the agent…' : connected ? 'Ask Co-Agent anything… (type @ for skills)' : 'Starting up…'}
+            value={input}
+            onChange={e => handleInputChange(e.target.value)}
+            onKeyDown={handleKeyDown}
+          />
+          {isActive && !input.trim() ? (
+            <Button size="sm" variant="outline" onClick={onStop}>
+              <Square size={10} className="mr-1.5" />
+              Stop
+            </Button>
+          ) : (
+            <Button size="sm" onClick={handleSend} disabled={!input.trim() && attachedFiles.length === 0}>
+              <Send size={14} className="mr-1.5" />
+              {isActive ? 'Steer' : 'Send'}
+            </Button>
+          )}
+        </div>
       </div>
     </div>
   )

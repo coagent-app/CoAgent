@@ -83,7 +83,8 @@ export interface FileEntry {
 }
 
 export type WSClientMessage =
-  | { type: 'chat'; message: string }
+  | { type: 'chat'; message: string; fileIds?: string[] }
+  | { type: 'steer'; message: string }
   | { type: 'get_queue' }
   | { type: 'approve'; id: string }
   | { type: 'reject'; id: string }
@@ -150,6 +151,9 @@ export type WSServerMessage =
   | { type: 'auth_status'; status: AuthStatus }
   | { type: 'relay_status'; active: boolean; model: string | null; usage: RelayUsage | null }
   | { type: 'api_keys_status'; keys: { anthropic: boolean; composio: boolean; openai: boolean } }
+  | { type: 'heartbeat'; status: 'started' | 'done' | 'skipped' | 'escalated'; summary?: string }
+  | { type: 'skills_update'; skills: { name: string; description: string }[] }
+  | { type: 'file_ingested'; id: string; filename: string }
 
 export interface RelayUsage {
   inputTokens: number

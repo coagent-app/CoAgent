@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { convertFileSrc } from '@tauri-apps/api/core'
 import { Trash2, FileText, Sheet, Image, File, Folder, Pencil, LayoutGrid, List, ArrowUpDown, ArrowUp, ArrowDown, Search, X } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import type { FileEntry } from '@coagent/shared'
@@ -113,10 +112,45 @@ function isImage(filename: string): boolean {
   return IMAGE_EXTS.has(`.${ext}`)
 }
 
+// Module-level cache for image thumbnails: path → data URL
+const imageThumbnailCache = new Map<string, string>()
+
 function ImageThumbnail({ path, filename, size }: { path: string; filename: string; size: 'grid' | 'list' }) {
+  const [dataUrl, setDataUrl] = useState<string | null>(imageThumbnailCache.get(path) ?? null)
   const [error, setError] = useState(false)
-  useEffect(() => { setError(false) }, [path])
-  const src = convertFileSrc(path)
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (imageThumbnailCache.has(path)) return
+    const el = containerRef.current
+    if (!el) return
+
+    let cancelled = false
+    const observer = new IntersectionObserver(
+      async (entries) => {
+        if (!entries[0]?.isIntersecting) return
+        observer.disconnect()
+        try {
+          const bytes: number[] = await invoke('read_file_bytes', { path })
+          const ext = filename.split('.').pop()?.toLowerCase() ?? 'png'
+          const mimeMap: Record<string, string> = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp' }
+          const mime = mimeMap[ext] ?? 'image/png'
+          const blob = new Blob([new Uint8Array(bytes)], { type: mime })
+          const url = URL.createObjectURL(blob)
+          if (!cancelled) {
+            imageThumbnailCache.set(path, url)
+            setDataUrl(url)
+          }
+        } catch {
+          if (!cancelled) setError(true)
+        }
+      },
+      { threshold: 0.1 }
+    )
+    observer.observe(el)
+    return () => { cancelled = true; observer.disconnect() }
+  }, [path, filename])
+
   const cls = size === 'grid'
     ? 'w-full h-full object-cover rounded-lg'
     : 'w-full h-full object-cover rounded'
@@ -130,13 +164,13 @@ function ImageThumbnail({ path, filename, size }: { path: string; filename: stri
     )
   }
   return (
-    <img
-      src={src}
-      alt={filename}
-      className={cls}
-      onError={() => setError(true)}
-      draggable={false}
-    />
+    <div ref={containerRef} className="w-full h-full">
+      {dataUrl ? (
+        <img src={dataUrl} alt={filename} className={cls} draggable={false} />
+      ) : (
+        <div className="w-full h-full rounded bg-neutral-100 dark:bg-neutral-800 animate-pulse" />
+      )}
+    </div>
   )
 }
 
@@ -226,6 +260,63 @@ function PdfThumbnail({ fileId, path, size }: { fileId: string; path: string; si
       ) : loading ? (
         <div className="w-full h-full rounded bg-neutral-100 dark:bg-neutral-800 animate-pulse" />
       ) : null}
+    </div>
+  )
+}
+
+const TEXT_EXTS = new Set(['.md', '.txt', '.json', '.csv', '.yml', '.yaml', '.xml', '.html', '.css', '.js', '.ts', '.py', '.sh', '.log'])
+
+function isTextFile(filename: string): boolean {
+  const ext = filename.split('.').pop()?.toLowerCase() ?? ''
+  return TEXT_EXTS.has(`.${ext}`)
+}
+
+// Module-level cache for text previews: path → first lines
+const textPreviewCache = new Map<string, string>()
+
+function TextPreview({ path, size }: { path: string; size: 'grid' | 'list' }) {
+  const [text, setText] = useState<string | null>(textPreviewCache.get(path) ?? null)
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (textPreviewCache.has(path)) return
+    const el = containerRef.current
+    if (!el) return
+
+    let cancelled = false
+    const observer = new IntersectionObserver(
+      async (entries) => {
+        if (!entries[0]?.isIntersecting) return
+        observer.disconnect()
+        try {
+          const bytes: number[] = await invoke('read_file_bytes', { path })
+          const decoder = new TextDecoder()
+          const content = decoder.decode(new Uint8Array(bytes)).slice(0, 500)
+          if (!cancelled) {
+            textPreviewCache.set(path, content)
+            setText(content)
+          }
+        } catch {
+          // Ignore — fall back to empty
+        }
+      },
+      { threshold: 0.1 }
+    )
+    observer.observe(el)
+    return () => { cancelled = true; observer.disconnect() }
+  }, [path])
+
+  const fontSize = size === 'grid' ? 'text-[5px]' : 'text-[6px]'
+
+  return (
+    <div ref={containerRef} className={`w-full h-full overflow-hidden p-1.5 bg-white dark:bg-neutral-900 rounded ${size === 'grid' ? 'rounded-lg' : ''}`}>
+      {text !== null ? (
+        <p className={`${fontSize} leading-[1.3] text-neutral-400 dark:text-neutral-500 whitespace-pre-wrap break-all font-mono`}>
+          {text}
+        </p>
+      ) : (
+        <div className="w-full h-full rounded bg-neutral-100 dark:bg-neutral-800 animate-pulse" />
+      )}
     </div>
   )
 }
@@ -852,6 +943,8 @@ export function FilesPane({
             <ImageThumbnail path={file.path} filename={file.filename} size="grid" />
           ) : isPdf(file.filename) ? (
             <PdfThumbnail fileId={file.id} path={file.path} size="grid" />
+          ) : isTextFile(file.filename) ? (
+            <TextPreview path={file.path} size="grid" />
           ) : (
             <div className={`w-full h-full flex items-center justify-center rounded-xl ${fileIconBg(file.filename)}`}>
               <Icon size={22} className={fileIconColor(file.filename)} />
@@ -916,6 +1009,8 @@ export function FilesPane({
             <ImageThumbnail path={file.path} filename={file.filename} size="list" />
           ) : isPdf(file.filename) ? (
             <PdfThumbnail fileId={file.id} path={file.path} size="list" />
+          ) : isTextFile(file.filename) ? (
+            <TextPreview path={file.path} size="list" />
           ) : (
             <Icon size={16} className={fileIconColor(file.filename)} />
           )}

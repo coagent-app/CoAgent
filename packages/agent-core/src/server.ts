@@ -170,7 +170,16 @@ agent.onDocumentStream = (event) => {
   }
 }
 
-startScheduler(agent, DATA_DIR)
+agent.onSkillsChanged = async () => {
+  const skills = await agent.getSkills()
+  broadcast({ type: 'skills_update', skills })
+}
+
+startScheduler(agent, DATA_DIR, {
+  onHeartbeat: (status, summary) => {
+    broadcast({ type: 'heartbeat', status, summary })
+  }
+})
 
 const relay = new RelayClient(DATA_DIR)
 
@@ -271,9 +280,22 @@ wss.on('connection', (ws) => {
   readSettings(DATA_DIR).then(settings => send(ws, { type: 'settings_update', settings })).catch(console.error)
   sendRelayStatus(ws).catch(console.error)
   send(ws, { type: 'api_keys_status', keys: getApiKeyStatus() })
+  agent.getSkills().then(skills => send(ws, { type: 'skills_update', skills })).catch(console.error)
 
   ws.on('message', async (raw) => {
     const msg: WSClientMessage = JSON.parse(raw.toString())
+
+    if (msg.type === 'stop_agent') {
+      console.log('[Server] Stop agent requested')
+      agent.stop()
+      return
+    }
+
+    if (msg.type === 'steer') {
+      console.log(`[Server] Steer received: ${msg.message}`)
+      agent.steer(msg.message)
+      return
+    }
 
     if (msg.type === 'chat') {
       if (!process.env.ANTHROPIC_API_KEY) {
@@ -285,14 +307,22 @@ wss.on('connection', (ws) => {
       }
       send(ws, { type: 'agent_thinking' })
       try {
+        let streamed = ''
+        let wasToolCall = false
         const response = await agent.chat(
           msg.message,
-          (chunk) => send(ws, { type: 'chat_chunk', text: chunk }),
-          (tool, label) => send(ws, { type: 'tool_start', tool, label })
+          (chunk) => {
+            if (wasToolCall && streamed) { streamed += '\n\n'; wasToolCall = false }
+            streamed += chunk
+            send(ws, { type: 'chat_chunk', text: chunk })
+          },
+          (tool, label) => { wasToolCall = true; send(ws, { type: 'tool_start', tool, label }) },
+          msg.fileIds
         )
+        // Use the full streamed text so step-by-step updates are preserved
         send(ws, {
           type: 'chat_response',
-          message: { role: 'assistant', content: response, timestamp: new Date().toISOString() }
+          message: { role: 'assistant', content: streamed || response, timestamp: new Date().toISOString() }
         })
         send(ws, { type: 'queue_update', items: agent.queue.getPending() })
         send(ws, { type: 'done_update', items: agent.queue.getDone() })
@@ -448,7 +478,8 @@ wss.on('connection', (ws) => {
     if (msg.type === 'ingest_file') {
       try {
         const buffer = Buffer.from(msg.data, 'base64')
-        await ingestFile(DATA_DIR, msg.filename, buffer, msg.mimeType)
+        const entry = await ingestFile(DATA_DIR, msg.filename, buffer, msg.mimeType)
+        send(ws, { type: 'file_ingested', id: entry.id, filename: entry.filename })
         await sendFilesAndFolders(ws)
       } catch (err: any) {
         send(ws, { type: 'error', message: `Failed to ingest file: ${err.message}` })

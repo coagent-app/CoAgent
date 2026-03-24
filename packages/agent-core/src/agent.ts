@@ -9,10 +9,62 @@ import { searchEventStore, markEventsDone } from './relay-client.js'
 import { readSettings, writeSettings } from './settings.js'
 import type { AgentSettings } from './settings.js'
 import type { AgentTrigger } from '@coagent/shared'
-import { searchFiles, readFileContent, deleteFileEntry, getStorageStats, createDocument, updateDocumentContent, readDocumentContent, listFiles } from './file-store.js'
+import { searchFiles, readFileContent, readFileBase64, deleteFileEntry, getStorageStats, createDocument, updateDocumentContent, readDocumentContent, listFiles } from './file-store.js'
+import { embedTools, searchToolsByEmbedding, clearToolEmbeddings, setToolEmbeddingsDir } from './tool-embeddings.js'
 import { getRelayConfig } from './auth.js'
 
 const HISTORY_WINDOW = 50        // total pool — recent + TF-IDF ranked
+
+// --- Skills ---
+interface Skill { name: string; description: string; instructions: string }
+
+async function skillsDir(dataDir: string): Promise<string> {
+  const dir = join(dataDir, 'skills')
+  if (!existsSync(dir)) await mkdir(dir, { recursive: true })
+  return dir
+}
+
+async function loadSkill(dataDir: string, name: string): Promise<Skill | null> {
+  const path = join(await skillsDir(dataDir), `${name}.json`)
+  if (!existsSync(path)) return null
+  try { return JSON.parse(await readFile(path, 'utf-8')) } catch { return null }
+}
+
+async function saveSkill(dataDir: string, skill: Skill): Promise<void> {
+  const path = join(await skillsDir(dataDir), `${skill.name}.json`)
+  await writeFile(path, JSON.stringify(skill, null, 2))
+}
+
+async function listSkills(dataDir: string): Promise<Skill[]> {
+  const dir = await skillsDir(dataDir)
+  const { readdirSync } = await import('fs')
+  return readdirSync(dir)
+    .filter(f => f.endsWith('.json'))
+    .map(f => { try { return JSON.parse(require('fs').readFileSync(join(dir, f), 'utf-8')) } catch { return null } })
+    .filter((s): s is Skill => s !== null)
+}
+
+async function deleteSkill(dataDir: string, name: string): Promise<boolean> {
+  const path = join(await skillsDir(dataDir), `${name}.json`)
+  if (!existsSync(path)) return false
+  const { unlink } = await import('fs/promises')
+  await unlink(path)
+  return true
+}
+
+async function resolveSkillMentions(dataDir: string, message: string): Promise<string> {
+  const mentions = message.match(/@([\w-]+)/g)
+  if (!mentions) return message
+  let resolved = message
+  for (const mention of mentions) {
+    const name = mention.slice(1)
+    const skill = await loadSkill(dataDir, name)
+    if (skill) {
+      resolved = resolved.replace(mention, `[Skill: ${skill.name}]\n${skill.instructions}\n[/Skill]`)
+    }
+  }
+  return resolved
+}
 const RECENT_KEEP = 15           // always keep this many recent messages (protects tool chains)
 const MAX_RANKED = 10            // max older messages TF-IDF can add from the remaining pool
 
@@ -273,6 +325,33 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
       required: ['id']
     }
   },
+  {
+    name: 'save_skill',
+    description: 'Create or update a reusable skill. Users invoke skills with @skill-name.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        name: { type: 'string', description: 'Lowercase kebab-case name (e.g. "weekly-report")' },
+        description: { type: 'string', description: 'One-line description shown when listing skills' },
+        instructions: { type: 'string', description: 'Full instructions/prompt the agent follows when this skill is invoked' },
+      },
+      required: ['name', 'description', 'instructions']
+    }
+  },
+  {
+    name: 'list_skills',
+    description: 'List all saved skills.',
+    input_schema: { type: 'object' as const, properties: {} }
+  },
+  {
+    name: 'delete_skill',
+    description: 'Delete a skill by name.',
+    input_schema: {
+      type: 'object' as const,
+      properties: { name: { type: 'string' } },
+      required: ['name']
+    }
+  },
 ]
 
 // --- Tool filtering by trigger context ---
@@ -296,8 +375,32 @@ const TOOL_LABELS: Record<string, string> = {
   update_document: 'Updating document',
 }
 
+// "GMAIL_FETCH_EMAILS" → "Gmail: Fetch emails"
+function humanizeToolName(name: string): string {
+  const prefixMap: Record<string, string> = {
+    GMAIL: 'Gmail', GOOGLECALENDAR: 'Calendar', GOOGLE_CALENDAR: 'Calendar',
+    GITHUB: 'GitHub', LINKEDIN: 'LinkedIn', MAILCHIMP: 'Mailchimp',
+    CALENDLY: 'Calendly', GOOGLESHEETS: 'Sheets', GOOGLE_SHEETS: 'Sheets',
+    GOOGLESLIDES: 'Slides', GOOGLE_SLIDES: 'Slides', EXCEL: 'Excel',
+    FIGMA: 'Figma', GOOGLE_MAPS: 'Maps', COMPOSIO: 'Composio',
+  }
+  let service = ''
+  let rest = name
+  for (const [key, label] of Object.entries(prefixMap)) {
+    if (name.startsWith(key + '_')) {
+      service = label
+      rest = name.slice(key.length + 1)
+      break
+    }
+  }
+  // "FETCH_EMAILS" → "Fetch emails"
+  const words = rest.toLowerCase().replace(/_/g, ' ').trim()
+  const humanized = words.charAt(0).toUpperCase() + words.slice(1)
+  return service ? `${service}: ${humanized}` : humanized
+}
+
 const HEARTBEAT_TOOLS = new Set([
-  'search_tools', 'add_done_item', 'add_todo', 'complete_todo', 'list_todos',
+  'add_done_item', 'add_todo', 'complete_todo', 'list_todos', 'queue_approval', 'list_skills',
 ])
 
 function getInternalTools(context: ToolContext): Anthropic.Tool[] {
@@ -353,61 +456,6 @@ const ALWAYS_QUEUE_TOOLS = [
   'POST_MESSAGE',                                       // Slack/Teams posting
 ]
 
-// Common intent → keyword expansions so "email" also matches gmail tools, etc.
-const SYNONYMS: Record<string, string[]> = {
-  email: ['gmail', 'mail', 'inbox', 'message', 'send', 'reply', 'fetch'],
-  calendar: ['event', 'schedule', 'meeting', 'appointment', 'gcal', 'googlecalendar'],
-  file: ['drive', 'document', 'upload', 'folder'],
-  contact: ['people', 'lead', 'client', 'crm'],
-}
-
-function expandQuery(query: string): string[] {
-  const words = query.toLowerCase().replace(/_/g, ' ').split(/\s+/).filter(w => w.length > 2)
-  const expanded = new Set(words)
-  for (const word of words) {
-    for (const [key, synonyms] of Object.entries(SYNONYMS)) {
-      // Only expand on exact key match, not substring (prevents "google" → calendar)
-      if (word === key) synonyms.forEach(s => expanded.add(s))
-      if (synonyms.includes(word)) {
-        expanded.add(key)
-        synonyms.forEach(s => expanded.add(s))
-      }
-    }
-  }
-  return Array.from(expanded)
-}
-
-function scoreTools(query: string, tools: Anthropic.Tool[], limit = 8): Anthropic.Tool[] {
-  const words = expandQuery(query)
-  if (words.length === 0) return tools.slice(0, limit)
-
-  // Build a compact prefix from the query: "Google Sheets" → "googlesheets", "Google Maps" → "googlemaps"
-  const compactQuery = query.toLowerCase().replace(/[\s_-]+/g, '')
-
-  const scored = tools.map(tool => {
-    const name = tool.name.toLowerCase().replace(/_/g, ' ')
-    const compactName = tool.name.toLowerCase().replace(/[_\s-]+/g, '')
-    const desc = (tool.description ?? '').toLowerCase()
-    let score = 0
-
-    // Strongest signal: tool prefix matches the compact query exactly
-    // e.g. "googlesheets" matches GOOGLESHEETS_ADD_SHEET
-    if (compactName.startsWith(compactQuery)) score += 20
-
-    for (const w of words) {
-      if (name.includes(w)) score += 4
-      else if (name.split(' ').some(n => n.startsWith(w) || w.startsWith(n))) score += 2
-      if (desc.includes(w)) score += 1
-    }
-    return { tool, score }
-  })
-
-  return scored
-    .filter(s => s.score >= 3)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit)
-    .map(s => s.tool)
-}
 
 function buildSystemPrompt(connectedServices: string[], agentProfilePath: string, settings: AgentSettings): string {
   const isFirstRun = !existsSync(agentProfilePath)
@@ -466,6 +514,10 @@ Current settings:
 
 File references: When listing files from list_files or search_files, show them as a plain text list (e.g. "- report.md — summary"). Do NOT use coagent-file: links for listings. Only use [filename](coagent-file:FILE_ID) when the user asks to open or view a specific single file. Don't paste file content unless asked.
 
+File attachments: To attach files to emails/messages, add "coagent_file_ids": ["FILE_ID"] to the tool input. The system resolves these to base64 automatically.
+
+Skills: Users invoke skills with @skill-name. When invoked, the skill's instructions appear in the message. You can create skills with save_skill when the user asks (e.g. "make a skill that drafts weekly reports"). Keep skill instructions clear and specific.
+
 Document tools: Use create_document for substantial content (emails, reports). Use update_document to revise — always pushes to the editing panel. Don't use for short answers.
 
 ${serviceSection}
@@ -491,7 +543,7 @@ Read these on startup and heartbeats. When the user shares anything worth rememb
 
 Routine tasks: act, then add_done_item. High-stakes actions: queue_approval instead.
 When queuing emails/messages: put the full draft body in "detail", and put recipient, subject, etc. in "metadata" so the user can review everything before approving.
-On heartbeat: check due tasks, search events. If nothing needs attention, reply "All clear." immediately.
+On heartbeat: read routines.md, check due tasks, check pending queue. If nothing needs attention, reply "All clear." immediately.
 
 Keep responses concise. No emojis. Markdown only when helpful.${onboardingSection}`
 }
@@ -514,6 +566,32 @@ export class Agent {
   private agentProfilePath: string
   private dataDir: string
   private runLoopPromise: Promise<string> | null = null
+  private activeStream: { abort: () => void } | null = null
+  private stopped = false
+  private missedEvents: { source: string; payload: unknown; time: string }[] = []
+  private steeringQueue: string[] = []
+  public onSkillsChanged?: () => void
+
+  async getSkills(): Promise<{ name: string; description: string }[]> {
+    return (await listSkills(this.dataDir)).map(s => ({ name: s.name, description: s.description }))
+  }
+
+  steer(message: string): void {
+    this.steeringQueue.push(message)
+    // Abort the current stream so the steer is picked up immediately
+    if (this.activeStream) {
+      this.activeStream.abort()
+      console.log(`[Agent] Steering — aborting current stream: "${message.slice(0, 80)}"`)
+    }
+  }
+
+  stop(): void {
+    this.stopped = true
+    if (this.activeStream) {
+      this.activeStream.abort()
+      console.log('[Agent] Stop requested')
+    }
+  }
 
   constructor(mcpConfigs: MCPServerConfig[], dataDir: string) {
     this.anthropic = this.createClient()
@@ -525,6 +603,7 @@ export class Agent {
     this.agentProfilePath = join(dataDir, 'memory', 'agent.md')
     this.mcpManager.connect(mcpConfigs).catch(console.error)
     this.loadHistory().catch(console.error)
+    setToolEmbeddingsDir(dataDir)
   }
 
   private createClient(): Anthropic {
@@ -581,15 +660,40 @@ export class Agent {
   }
 
   async handleTrigger(trigger: AgentTrigger & { content?: string }): Promise<void> {
+    const isHeartbeat = trigger.source === 'heartbeat'
+    const isCleanup = trigger.source === 'memory_cleanup'
+
+    // If agent is busy, queue webhook/incoming events for later — don't drop them
     if (this.runLoopPromise) {
-      console.log('[Agent] Skipping trigger — agent is busy')
+      if (!isHeartbeat && !isCleanup) {
+        this.missedEvents.push({
+          source: trigger.source,
+          payload: trigger.payload,
+          time: new Date().toISOString()
+        })
+        console.log(`[Agent] Queued missed event (${trigger.source}) — ${this.missedEvents.length} pending`)
+      } else {
+        console.log(`[Agent] Skipping ${trigger.source} — agent is busy`)
+      }
       return
     }
-    const context: ToolContext = trigger.source === 'heartbeat' ? 'heartbeat'
-      : trigger.source === 'memory_cleanup' ? 'cleanup'
+
+    const context: ToolContext = isHeartbeat ? 'heartbeat'
+      : isCleanup ? 'cleanup'
       : trigger.source === 'webhook' ? 'webhook'
       : 'chat'
-    const message = trigger.content ?? this.buildTriggerMessage(trigger)
+
+    // On heartbeat, include any missed events in the triage prompt
+    let message = trigger.content ?? this.buildTriggerMessage(trigger)
+    if (isHeartbeat && this.missedEvents.length > 0) {
+      const missed = this.missedEvents.map(e =>
+        `- [${e.time}] ${e.source}: ${JSON.stringify(e.payload)}`
+      ).join('\n')
+      message += `\n\nMissed events since last check (${this.missedEvents.length}):\n${missed}`
+      this.missedEvents = []
+      console.log(`[Agent] Heartbeat includes ${this.missedEvents.length} missed events`)
+    }
+
     this.conversationHistory.push({ role: 'user', content: message })
     this.runLoopPromise = this.runLoop(undefined, context)
     try {
@@ -611,9 +715,34 @@ export class Agent {
   async chat(
     message: string,
     onChunk?: (text: string) => void,
-    onToolCall?: (tool: string, label: string) => void
+    onToolCall?: (tool: string, label: string) => void,
+    fileIds?: string[]
   ): Promise<string> {
-    this.conversationHistory.push({ role: 'user', content: message })
+    const resolved = await resolveSkillMentions(this.dataDir, message)
+
+    // If files were attached, build a multi-part content block so Claude can see them
+    if (fileIds?.length) {
+      const contentParts: any[] = []
+      for (const fid of fileIds) {
+        try {
+          const { base64, filename, mimeType } = await readFileBase64(this.dataDir, fid)
+          if (mimeType === 'application/pdf') {
+            contentParts.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } })
+          } else if (mimeType.startsWith('image/')) {
+            contentParts.push({ type: 'image', source: { type: 'base64', media_type: mimeType, data: base64 } })
+          } else {
+            const text = await readFileContent(this.dataDir, fid)
+            contentParts.push({ type: 'text', text: `[File: ${filename}]\n${text}` })
+          }
+        } catch (err) {
+          console.warn(`[Agent] Could not attach file ${fid}:`, (err as Error).message)
+        }
+      }
+      contentParts.push({ type: 'text', text: resolved })
+      this.conversationHistory.push({ role: 'user', content: contentParts })
+    } else {
+      this.conversationHistory.push({ role: 'user', content: resolved })
+    }
     const prev = this.runLoopPromise ?? Promise.resolve('')
     const next: Promise<string> = prev.catch(() => '').then(() => this.runLoop(onChunk, 'chat', onToolCall))
     this.runLoopPromise = next
@@ -634,6 +763,9 @@ export class Agent {
     const memoryTools = allExternalTools.filter(t => serverMap.get(t.name) === 'memory')
     const searchableTools = allExternalTools.filter(t => serverMap.get(t.name) !== 'memory')
     const connectedServices = Array.from(new Set(searchableTools.map(t => serverMap.get(t.name)!)))
+
+    // Embed tool names for semantic search (no-op if already cached or no OpenAI key)
+    embedTools(searchableTools).catch(err => console.warn('[Agent] Tool embedding failed:', err.message))
     const settings = await readSettings(this.dataDir)
     const systemPrompt = buildSystemPrompt(connectedServices, this.agentProfilePath, settings)
 
@@ -650,7 +782,7 @@ export class Agent {
     const userText = typeof lastUserMsg?.content === 'string' ? lastUserMsg.content : ''
     const preloaded = (context === 'heartbeat' || context === 'cleanup')
       ? []
-      : userText ? scoreTools(userText, searchableTools, 5) : []
+      : userText ? await searchToolsByEmbedding(userText, searchableTools, 5) : []
 
     // Cache the stable prefix (system prompt + memory tools + internal tools).
     // Preloaded tools are dynamic — they come after the cache boundary.
@@ -678,9 +810,32 @@ export class Agent {
 
     let finalText = ''
     let turn = 0
+    let lastText = ''
     const filenameLookup = new Map((await listFiles(this.dataDir)).map(f => [f.id, f.filename]))
 
+    this.stopped = false
+
     while (true) {
+      // Check for stop
+      if (this.stopped) {
+        console.log('[Agent] Stopped by user')
+        this.activeStream = null
+        return lastText || '_Stopped._'
+      }
+
+      // Check for steering — inject into history and continue loop
+      if (this.steeringQueue.length > 0) {
+        const steering = this.steeringQueue.splice(0)
+        const combined = steering.join('\n')
+        if (lastText) {
+          this.conversationHistory.push({ role: 'assistant', content: lastText })
+        }
+        this.conversationHistory.push({ role: 'user', content: `[User changed direction]: ${combined}` })
+        console.log(`[Agent] Steering injected: "${combined.slice(0, 80)}"`)
+        onChunk?.(`\n\n_Redirecting: ${combined}_\n\n`)
+        lastText = ''
+      }
+
       let response: Anthropic.Message
       let retryDelay = 60000
 
@@ -702,6 +857,7 @@ export class Agent {
             messages: this.sanitizeHistory(this.selectHistory(userText)) as any,
             ...(isBackground ? {} : { cache_control: { type: 'ephemeral', ttl: '1h' } as any }),
           } as any)
+          this.activeStream = stream
           stream.on('text', (text) => {
             try { onChunk?.(text) } catch (err) { console.error('[Agent] onChunk error:', err) }
           })
@@ -763,6 +919,7 @@ export class Agent {
           })
 
           response = await stream.finalMessage()
+          this.activeStream = null
           const u = response.usage as any
           const cacheHit = u.cache_read_input_tokens ?? 0
           const cacheWrite = u.cache_creation_input_tokens ?? 0
@@ -770,6 +927,13 @@ export class Agent {
           console.log(`[Agent] Turn ${turn} — ${response.stop_reason} — ${Date.now() - t0}ms — ${response.usage.input_tokens} in${cacheInfo} / ${response.usage.output_tokens} out tokens`)
           break
         } catch (err: any) {
+          this.activeStream = null
+          // Aborted by steer() or stop() — loop back to outer while to check
+          if (err?.name === 'APIUserAbortError' || err?.message?.includes('abort')) {
+            console.log('[Agent] Stream aborted, checking steering/stop...')
+            response = null as any
+            break
+          }
           const isRateLimit = err?.status === 429 || err?.error?.error?.type === 'rate_limit_error'
           const isOverloaded = err?.status === 529 || err?.error?.error?.type === 'overloaded_error'
           if (isRateLimit || isOverloaded) {
@@ -785,7 +949,14 @@ export class Agent {
         }
       }
 
+      // If stream was aborted, loop back to check steering/stop
+      if (!response) continue
+
       this.conversationHistory.push({ role: 'assistant', content: response.content })
+
+      // Track text for abort recovery
+      const turnText = response.content.filter(b => b.type === 'text').map(b => (b as { type: 'text'; text: string }).text).join('\n')
+      if (turnText) lastText = turnText
 
       if (response.stop_reason === 'end_turn') {
         finalText = response.content
@@ -805,7 +976,7 @@ export class Agent {
           if (block.type !== 'tool_use') continue
 
           if (onToolCall) {
-            const label = TOOL_LABELS[block.name] ?? block.name.replace(/_/g, ' ')
+            const label = TOOL_LABELS[block.name] ?? humanizeToolName(block.name)
             onToolCall(block.name, label)
           }
 
@@ -821,7 +992,7 @@ export class Agent {
               continue
             }
             const query = (block.input as { query: string }).query
-            const matches = scoreTools(query, searchableTools)
+            const matches = await searchToolsByEmbedding(query, searchableTools)
 
             if (matches.length === 0) {
               result = `No tools found matching "${query}". Available services: ${connectedServices.join(', ')}`
@@ -980,16 +1151,64 @@ export class Agent {
               result = `Error updating document: ${err.message}`
             }
 
+          } else if (block.name === 'save_skill') {
+            const { name, description, instructions } = block.input as { name: string; description: string; instructions: string }
+            const safeName = name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-')
+            await saveSkill(this.dataDir, { name: safeName, description, instructions })
+            result = `Skill saved: @${safeName} — "${description}"`
+            this.onSkillsChanged?.()
+
+          } else if (block.name === 'list_skills') {
+            const skills = await listSkills(this.dataDir)
+            result = skills.length === 0
+              ? 'No skills saved yet.'
+              : skills.map(s => `@${s.name} — ${s.description}`).join('\n')
+
+          } else if (block.name === 'delete_skill') {
+            const { name } = block.input as { name: string }
+            const deleted = await deleteSkill(this.dataDir, name)
+            result = deleted ? `Skill @${name} deleted.` : `Skill @${name} not found.`
+            if (deleted) this.onSkillsChanged?.()
+
           } else {
             const serverName = serverMap.get(block.name)
             if (!serverName) {
               result = `Tool "${block.name}" is not loaded. Call search_tools first to find and load it.`
             } else {
-              const raw = await this.mcpManager.callTool(serverName, block.name, block.input as Record<string, unknown>)
-              const MAX_TOOL_RESULT = 4000
-              result = raw.length > MAX_TOOL_RESULT
-                ? raw.slice(0, MAX_TOOL_RESULT) + `\n\n[Truncated: ${raw.length - MAX_TOOL_RESULT} chars omitted from history to save context]`
-                : raw
+              // Resolve CoAgent file IDs → base64 attachments before calling external tools
+              const toolInput = { ...(block.input as Record<string, unknown>) }
+              const attachFileIds = toolInput.coagent_file_ids as string[] | undefined
+              if (attachFileIds && Array.isArray(attachFileIds) && attachFileIds.length > 0) {
+                delete toolInput.coagent_file_ids
+                try {
+                  const attachments = await Promise.all(
+                    attachFileIds.map(id => readFileBase64(this.dataDir, id))
+                  )
+                  // Composio Gmail/Outlook: expects attachment_content_type, attachment_name, attachment_content (base64)
+                  // If tool already has an attachments field, append; otherwise set common attachment fields
+                  if (attachments.length === 1) {
+                    toolInput.attachment_name = attachments[0].filename
+                    toolInput.attachment_content = attachments[0].base64
+                    toolInput.attachment_content_type = attachments[0].mimeType
+                  }
+                  // Also set generic attachments array for tools that accept it
+                  toolInput.attachments = attachments.map(a => ({
+                    filename: a.filename,
+                    content: a.base64,
+                    content_type: a.mimeType
+                  }))
+                  console.log(`[Agent] Resolved ${attachments.length} file attachment(s): ${attachments.map(a => a.filename).join(', ')}`)
+                } catch (err: any) {
+                  console.error(`[Agent] Failed to resolve file attachments:`, err.message)
+                }
+              }
+              {
+                const raw = await this.mcpManager.callTool(serverName, block.name, toolInput)
+                const MAX_TOOL_RESULT = 4000
+                result = raw.length > MAX_TOOL_RESULT
+                  ? raw.slice(0, MAX_TOOL_RESULT) + `\n\n[Truncated: ${raw.length - MAX_TOOL_RESULT} chars omitted from history to save context]`
+                  : raw
+              }
             }
           }
 
@@ -1001,6 +1220,7 @@ export class Agent {
         }
 
         this.conversationHistory.push(toolResults)
+
         continue
       }
 
@@ -1028,7 +1248,7 @@ export class Agent {
       const dueSection = due.length > 0
         ? `\n\nDue tasks:\n${due.map(t => `- [${t.id}] ${t.task}${t.due ? ` (due: ${t.due})` : ''}`).join('\n')}`
         : ''
-      return `[Heartbeat triage — ${time}] You are triaging. DO NOT take action — only assess and report.\n\n1. Read routines.md — check what's expected at this time of day.\n2. Read agent.md and contacts.md for context.\n3. Search for incoming events: search_events("unread messages urgent follow-up").\n4. Check due tasks.${dueSection}\n\nIf nothing needs attention, reply exactly "All clear."\nOtherwise, reply with a brief summary of what needs to be done (who to respond to, what actions to take, what's due). Do NOT take action yourself — a more capable model will handle it.`
+      return `[Heartbeat triage — ${time}] You are triaging. DO NOT take action — only assess and report.\n\n1. Read routines.md for what's expected at this time.\n2. Read agent.md for user context.\n3. Check due tasks.${dueSection}\n4. Check pending queue items.\n\nIf nothing needs attention, reply exactly "All clear."\nOtherwise, reply with a brief summary of what needs to be done. Do NOT take action yourself — a more capable model will handle it.`
     }
     if (trigger.source === 'memory_cleanup') return `[Memory cleanup — ${time}] Review all memory files with list_memories, then read each one. Delete or rewrite files that are stale, resolved, or no longer relevant. Consolidate duplicates. Keep only what is actively useful. Reply with a brief summary of what you cleaned up.`
     if (trigger.source === 'webhook') return `[Webhook — ${time}] Event received: ${JSON.stringify(trigger.payload)}. Search memory and handle it.`

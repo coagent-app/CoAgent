@@ -20,7 +20,11 @@ function updateCaffeinate(active: boolean): void {
   }
 }
 
-export function startScheduler(agent: Agent, dataDir: string): void {
+export interface SchedulerCallbacks {
+  onHeartbeat?: (status: 'started' | 'done' | 'skipped' | 'escalated', summary?: string) => void
+}
+
+export function startScheduler(agent: Agent, dataDir: string, callbacks?: SchedulerCallbacks): void {
   // Check active hours and manage caffeinate on startup + every minute
   async function syncCaffeinate() {
     const settings = await readSettings(dataDir).catch(() => null)
@@ -39,6 +43,7 @@ export function startScheduler(agent: Agent, dataDir: string): void {
     const settings = await readSettings(dataDir)
     if (!isActiveNow(settings)) {
       console.log('[Scheduler] Outside active hours — skipping heartbeat')
+      callbacks?.onHeartbeat?.('skipped')
       return
     }
 
@@ -46,6 +51,13 @@ export function startScheduler(agent: Agent, dataDir: string): void {
       console.error('[Scheduler] Purge failed:', err.message)
     )
 
-    agent.handleTrigger({ source: 'heartbeat' })
+    callbacks?.onHeartbeat?.('started')
+    try {
+      await agent.handleTrigger({ source: 'heartbeat' })
+      callbacks?.onHeartbeat?.('done')
+    } catch (err: any) {
+      console.error('[Scheduler] Heartbeat error:', err.message)
+      callbacks?.onHeartbeat?.('done')
+    }
   })
 }

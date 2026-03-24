@@ -11,12 +11,14 @@ export function useAgent() {
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const reconnectDelay = useRef(RECONNECT_BASE)
   const pollIntervals = useRef<ReturnType<typeof setInterval>[]>([])
+  const recentIngestedFiles = useRef<{ id: string; filename: string }[]>([])
   const [queue, setQueue] = useState<ApprovalItem[]>([])
   const [done, setDone] = useState<DoneItem[]>([])
   const [todos, setTodos] = useState<TodoItem[]>([])
   const [messages, setMessages] = useState<AgentMessage[]>([])
   const [streamingText, setStreamingText] = useState<string | null>(null)
   const [thinking, setThinking] = useState(false)
+  const [processing, setProcessing] = useState(false)
   const [connected, setConnected] = useState(false)
   const [integrations, setIntegrations] = useState<Integration[]>([])
   const [settings, setSettings] = useState<AgentSettings | null>(null)
@@ -26,6 +28,8 @@ export function useAgent() {
   const [searchResults, setSearchResults] = useState<FileEntry[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [toolLabel, setToolLabel] = useState<string | null>(null)
+  const [lastHeartbeat, setLastHeartbeat] = useState<{ time: Date; status: string } | null>(null)
+  const [skills, setSkills] = useState<{ name: string; description: string }[]>([])
   const [activeDocument, setActiveDocument] = useState<{ id: string; filename: string; content: string } | null>(null)
   const [pendingFields, setPendingFields] = useState<{ slug: string; fields: { name: string; displayName: string; description: string }[] } | null>(null)
   const [relayActive, setRelayActive] = useState<boolean>(false)
@@ -83,6 +87,13 @@ export function useAgent() {
           setToolLabel(null)
         }
         if (msg.type === 'tool_start') {
+          // Snapshot current streaming text as a completed bubble
+          setStreamingText(current => {
+            if (current?.trim()) {
+              setMessages(prev => [...prev, { role: 'assistant' as const, content: current, timestamp: new Date().toISOString() }].slice(-100))
+            }
+            return null
+          })
           setToolLabel(msg.label)
           setThinking(true)
         }
@@ -92,10 +103,16 @@ export function useAgent() {
           setStreamingText(prev => (prev ?? '') + msg.text)
         }
         if (msg.type === 'chat_response') {
+          // Snapshot any remaining streaming text as a final bubble
+          setStreamingText(current => {
+            if (current?.trim()) {
+              setMessages(prev => [...prev, { role: 'assistant' as const, content: current, timestamp: new Date().toISOString() }].slice(-100))
+            }
+            return null
+          })
           setThinking(false)
-          setStreamingText(null)
           setToolLabel(null)
-          setMessages(prev => [...prev, msg.message].slice(-100))
+          setProcessing(false)
         }
         if (msg.type === 'chat_history') setMessages(msg.messages)
         if (msg.type === 'integrations_update') setIntegrations(msg.integrations)
@@ -126,6 +143,9 @@ export function useAgent() {
           setRelayUsage(msg.usage)
         }
         if (msg.type === 'api_keys_status') setApiKeyStatus(msg.keys)
+        if (msg.type === 'file_ingested') recentIngestedFiles.current.push({ id: msg.id, filename: msg.filename })
+        if (msg.type === 'heartbeat') setLastHeartbeat({ time: new Date(), status: msg.status })
+        if (msg.type === 'skills_update') setSkills(msg.skills)
         if (msg.type === 'error') { setError(msg.message); setTimeout(() => setError(null), 5000) }
         if (msg.type === 'integration_needs_fields') {
           setPendingFields({ slug: msg.slug, fields: msg.fields })
@@ -191,8 +211,39 @@ export function useAgent() {
   }, [])
 
   const chat = useCallback((message: string) => {
+    setProcessing(true)
     setMessages(prev => [...prev, { role: 'user' as const, content: message, timestamp: new Date().toISOString() }].slice(-100))
-    send({ type: 'chat', message })
+    const fileIds = recentIngestedFiles.current.map(f => f.id)
+    recentIngestedFiles.current = []
+    send({ type: 'chat', message, ...(fileIds.length ? { fileIds } : {}) })
+  }, [send])
+
+  const steer = useCallback((message: string) => {
+    // Snapshot current streaming text as a completed message, then show the steer
+    setStreamingText(current => {
+      if (current) {
+        setMessages(prev => [
+          ...prev,
+          { role: 'assistant' as const, content: current, timestamp: new Date().toISOString() },
+          { role: 'user' as const, content: message, timestamp: new Date().toISOString() }
+        ].slice(-100))
+      } else {
+        setMessages(prev => [
+          ...prev,
+          { role: 'user' as const, content: message, timestamp: new Date().toISOString() }
+        ].slice(-100))
+      }
+      return null
+    })
+    send({ type: 'steer', message })
+  }, [send])
+
+  const stopAgent = useCallback(() => {
+    send({ type: 'stop_agent' })
+    setThinking(false)
+    setStreamingText(null)
+    setToolLabel(null)
+    setProcessing(false)
   }, [send])
 
   const approve = useCallback((id: string) => send({ type: 'approve', id }), [send])
@@ -290,5 +341,5 @@ export function useAgent() {
     setActiveDocument(null)
   }, [send])
 
-  return { queue, done, todos, messages, streamingText, thinking, toolLabel, connected, integrations, settings, authStatus, files, folders, searchResults, error, activeDocument, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, apiKeyStatus, pendingFields, setPendingFields, updateApiKeys, setModel, chat, approve, reject, editQueueItem, completeTodo, deleteTodo, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, openDocument, updateDocument, closeDocument }
+  return { queue, done, todos, messages, streamingText, thinking, processing, toolLabel, connected, lastHeartbeat, skills, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, activeDocument, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, apiKeyStatus, pendingFields, setPendingFields, updateApiKeys, setModel, chat, approve, reject, editQueueItem, completeTodo, deleteTodo, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, openDocument, updateDocument, closeDocument }
 }
