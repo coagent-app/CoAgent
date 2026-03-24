@@ -19,7 +19,7 @@ jobs:
             rust-target: aarch64-apple-darwin
             bun-target: bun-darwin-arm64
             label: macOS (Apple Silicon)
-          - platform: macos-15
+          - platform: macos-13
             rust-target: x86_64-apple-darwin
             bun-target: bun-darwin-x64
             label: macOS (Intel)
@@ -72,6 +72,7 @@ jobs:
 
       # Compile sidecar binaries
       - name: Compile coagent-server sidecar
+        shell: bash
         run: bun build packages/agent-core/dist/server.js --compile --target=${{ matrix.bun-target }} --outfile apps/desktop/src-tauri/binaries/coagent-server-${{ matrix.rust-target }}
 
       - name: Compile coagent-memory sidecar

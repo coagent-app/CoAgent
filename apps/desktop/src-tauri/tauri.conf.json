@@ -33,7 +33,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.icns", "icons/icon.png"],
+    "icon": ["icons/icon.icns", "icons/icon.ico", "icons/icon.png"],
     "externalBin": [
       "binaries/coagent-server",
       "binaries/coagent-memory"
