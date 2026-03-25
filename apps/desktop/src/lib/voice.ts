@@ -3,8 +3,16 @@ import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 
 let mediaRecorder: MediaRecorder | null = null
 let audioChunks: Blob[] = []
+let recordingStartTime = 0
+let speechDetected = false
+let audioCtx: AudioContext | null = null
+let analyser: AnalyserNode | null = null
+let speechCheckInterval: ReturnType<typeof setInterval> | null = null
 let fnUnlisteners: UnlistenFn[] = []
 let currentHotkey: string | null = null
+let locked = false // double-tap fn locks listening on
+let lastFnPressTime = 0
+let volumeEmitInterval: ReturnType<typeof setInterval> | null = null
 
 // State callback — tells the UI what's happening
 let onStateChange: ((state: 'listening' | 'thinking' | 'hidden', summary?: string) => void) | null = null
@@ -14,12 +22,26 @@ function updatePill(state: string, summary?: string) {
   emitTo('voice-pill', 'voice-state', { state, summary }).catch(() => {})
 }
 
-async function hidePill() {
-  updatePill('hidden')
-  setTimeout(async () => {
-    const win = await WebviewWindow.getByLabel('voice-pill')
-    if (win) win.hide().catch(() => {})
-  }, 300)
+// Emit current volume level to the pill for mic animation
+function startVolumeEmit() {
+  stopVolumeEmit()
+  volumeEmitInterval = setInterval(() => {
+    if (!analyser) return
+    const dataArray = new Uint8Array(analyser.fftSize)
+    analyser.getByteTimeDomainData(dataArray)
+    const peak = dataArray.reduce((max, v) => Math.max(max, Math.abs(v - 128)), 0)
+    const normalized = Math.min(peak / 80, 1) // 0-1 range, 80 is loud speech
+    emitTo('voice-pill', 'voice-volume', { level: normalized }).catch(() => {})
+  }, 60)
+}
+
+function stopVolumeEmit() {
+  if (volumeEmitInterval) { clearInterval(volumeEmitInterval); volumeEmitInterval = null }
+  emitTo('voice-pill', 'voice-volume', { level: 0 }).catch(() => {})
+}
+
+function hidePill() {
+  updatePill('hidden') // VoicePill treats 'hidden' as 'idle' — stays visible as small mic
 }
 
 async function startRecording() {
@@ -28,9 +50,28 @@ async function startRecording() {
     updatePill('listening')
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
     audioChunks = []
+    speechDetected = false
+
+    // Monitor audio level to detect actual speech
+    audioCtx = new AudioContext()
+    const source = audioCtx.createMediaStreamSource(stream)
+    analyser = audioCtx.createAnalyser()
+    analyser.fftSize = 512
+    source.connect(analyser)
+    const dataArray = new Uint8Array(analyser.fftSize)
+    speechCheckInterval = setInterval(() => {
+      if (!analyser) return
+      analyser.getByteTimeDomainData(dataArray)
+      // Check if any sample deviates significantly from silence (128)
+      const peak = dataArray.reduce((max, v) => Math.max(max, Math.abs(v - 128)), 0)
+      if (peak > 15) speechDetected = true // threshold: ~12% above silence
+    }, 50)
+
     mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' })
     mediaRecorder.ondataavailable = (e) => audioChunks.push(e.data)
     mediaRecorder.start()
+    recordingStartTime = Date.now()
+    startVolumeEmit()
     console.log('[Voice] Recording started')
   } catch (err) {
     console.error('[Voice] Failed to start recording:', err)
@@ -44,6 +85,7 @@ async function stopRecordingAndSend(
 ): Promise<void> {
   if (!mediaRecorder || mediaRecorder.state === 'inactive') {
     onStateChange?.('hidden')
+    hidePill()
     return
   }
 
@@ -56,7 +98,14 @@ async function stopRecordingAndSend(
     mediaRecorder!.stop()
   })
 
-  if (blob.size < 1000) {
+  // Clean up audio monitoring
+  stopVolumeEmit()
+  if (speechCheckInterval) { clearInterval(speechCheckInterval); speechCheckInterval = null }
+  if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; analyser = null }
+
+  const duration = Date.now() - recordingStartTime
+  if (blob.size < 1000 || duration < 600 || !speechDetected) {
+    console.log(`[Voice] Skipped — no speech (${duration}ms, ${blob.size}b, speech=${speechDetected})`)
     onStateChange?.('hidden')
     hidePill()
     return
@@ -80,6 +129,7 @@ export function showVoiceSummary(_summary: string) {
   // Keep showing whatever was last displayed, then hide after a short delay
   responseAccum = ''
   onStateChange?.('hidden')
+  ;(window as any).__voiceActive = false // voice session done
   setTimeout(() => hidePill(), 2000)
 }
 
@@ -108,6 +158,22 @@ export function showVoiceResponse(chunk: string) {
 export function resetVoiceResponse() {
   responseAccum = ''
   responseLocked = false
+}
+
+export function cancelVoice() {
+  locked = false
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stream.getTracks().forEach(t => t.stop())
+    mediaRecorder.stop()
+    mediaRecorder = null
+  }
+  stopVolumeEmit()
+  if (speechCheckInterval) { clearInterval(speechCheckInterval); speechCheckInterval = null }
+  if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; analyser = null }
+  onStateChange?.('hidden')
+  ;(window as any).__voiceActive = false
+  hidePill()
+  console.log('[Voice] Cancelled')
 }
 
 export function speakText(text: string): void {
@@ -140,7 +206,11 @@ export async function registerVoiceHotkey(
       console.log('[Voice] fn released — stopping recording')
       await stopRecordingAndSend(onAudioReady)
     })
-    fnUnlisteners = [pressUn, releaseUn]
+    const cancelUn = await listen('voice-cancel', () => {
+      console.log('[Voice] fn+Control — cancelling')
+      cancelVoice()
+    })
+    fnUnlisteners = [pressUn, releaseUn, cancelUn]
     console.log('[Voice] fn key listeners registered')
   } else {
     // Fallback to global shortcut plugin for custom hotkeys
@@ -155,6 +225,7 @@ export async function registerVoiceHotkey(
 
 export async function unregisterVoiceHotkey() {
   onStateChange = null
+  locked = false
   if (fnUnlisteners.length > 0) {
     fnUnlisteners.forEach(fn => fn())
     fnUnlisteners = []

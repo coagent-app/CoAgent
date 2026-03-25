@@ -6,7 +6,7 @@ import { Agent } from './agent.js'
 import { MCPServerConfig } from './mcp-manager.js'
 import { setupComposioMcp } from './composio-setup.js'
 import { INTEGRATIONS, getIntegrationStatuses, generateAuthUrl, getRequiredFields, disconnectIntegration, getConnectedSlugs, subscribeTriggersForSlug, purgeExpiredAccounts } from './composio-integrations.js'
-import { startScheduler } from './scheduler.js'
+import { startScheduler, onHeartbeatSettingsChanged } from './scheduler.js'
 import { readSettings, writeSettings } from './settings.js'
 
 import { listFiles, listFolders, ingestFile, deleteFileEntry, createFolder, moveFile, moveFolder, renameFile, renameFolder, deleteFolder, saveFolderOrder, searchFiles, updateDocumentContent, readDocumentContent, finalizeDocument } from './file-store.js'
@@ -56,8 +56,7 @@ const DATA_DIR = join(homedir(), '.coagent')
 
 // --- Default memory files (written on first run, never overwritten) ---
 
-const MEMORY_FILES: Record<string, string> = {
-  'setup.md': `# About CoAgent
+const SETUP_MD_STATIC = `# About CoAgent
 
 CoAgent is a personal AI assistant that runs privately on your computer. Nothing leaves your machine except calls to Claude (the AI) and the tools you've connected. No data is stored in the cloud.
 
@@ -86,29 +85,35 @@ I keep notes in \`~/.coagent/memory/\`. These are my brain — I read them on ev
 
 I create and update these as we work together. You can also edit them directly.
 
-## Connected tools
-
-I can connect to your apps to take action on your behalf — reading emails, creating calendar events, looking up contacts, etc.
-
-Apps with live alerts (I get notified when something happens):
-- Gmail, Outlook — new emails
-- Google Calendar — new events, upcoming meetings
-- Google Drive — new or shared files
-- HubSpot — new contacts, deal updates
-- Slack — messages and DMs
-- Notion — new pages and comments
-
-Apps where I can take action but don't get live alerts:
-- Google Sheets, Google Docs, Google Meet, Google Maps
-- Microsoft Teams, SharePoint, Excel
-- Salesforce, Shopify, ClickUp, Monday
-- Dropbox, Dropbox Sign, LinkedIn
-- GitHub
-
 ## What I can always do
 
-Even without any apps connected, I can help with writing, research, math, analysis, and general questions. I can also run Python code for calculations or data work.
-`,
+Even without any apps connected, I can help with writing, research, math, analysis, and general questions.`
+
+function buildSetupMd(connectedSlugs: string[]): string {
+  if (connectedSlugs.length === 0) {
+    return SETUP_MD_STATIC + '\n\n## Connected tools\n\nNo integrations connected yet. The user can connect apps in Settings.\n'
+  }
+  const slugNames: Record<string, string> = {
+    gmail: 'Gmail', googlecalendar: 'Google Calendar', slack: 'Slack',
+    github: 'GitHub', linkedin: 'LinkedIn', youtube: 'YouTube',
+    calendly: 'Calendly', googlesheets: 'Google Sheets', excel: 'Excel',
+    google_maps: 'Google Maps', googledrive: 'Google Drive', notion: 'Notion',
+    hubspot: 'HubSpot', outlook: 'Outlook', teams: 'Microsoft Teams',
+    salesforce: 'Salesforce', shopify: 'Shopify', clickup: 'ClickUp',
+    dropbox: 'Dropbox', zoom: 'Zoom', monday: 'Monday',
+  }
+  const names = connectedSlugs.map(s => slugNames[s] ?? s)
+  return SETUP_MD_STATIC + `\n\n## Connected tools\n\nCurrently connected: ${names.join(', ')}\n`
+}
+
+async function updateSetupMd(connectedSlugs: string[]): Promise<void> {
+  const memDir = join(DATA_DIR, 'memory')
+  await mkdir(memDir, { recursive: true })
+  await writeFile(join(memDir, 'setup.md'), buildSetupMd(connectedSlugs), 'utf-8')
+}
+
+const MEMORY_FILES: Record<string, string> = {
+  'setup.md': buildSetupMd([]),
 
   'routines.md': `# Routines
 
@@ -173,6 +178,7 @@ agent.onDocumentStream = (event) => {
 agent.onSettingsChanged = async () => {
   const settings = await readSettings(DATA_DIR)
   broadcast({ type: 'settings_update', settings })
+  onHeartbeatSettingsChanged(DATA_DIR).catch(() => {})
 }
 
 agent.onSkillsChanged = async () => {
@@ -204,6 +210,7 @@ async function refreshComposioMcp(slugs: string[]): Promise<void> {
   await agent.mcpManager.connect(buildMcpConfigs())
   await agent.mcpManager.connectHttp('composio', url, apiKey)
   currentMcpSlugs = mergedSlugs
+  updateSetupMd(mergedSlugs).catch(err => console.error('[Server] Failed to update setup.md:', err.message))
   console.log('[Composio] MCP refreshed with toolkits:', mergedSlugs.join(', '))
 }
 
@@ -219,6 +226,7 @@ if (process.env.COMPOSIO_API_KEY) {
     const { url, apiKey } = await setupComposioMcp(process.env.COMPOSIO_API_KEY!, toolkits)
     await agent.mcpManager.connectHttp('composio', url, apiKey)
     currentMcpSlugs = userToolkits
+    updateSetupMd(slugs).catch(err => console.error('[Server] Failed to update setup.md:', err.message))
     console.log('[Composio] MCP connected with toolkits:', toolkits.join(', '))
     // Subscribe triggers for all currently connected integrations
     for (const slug of slugs) {
@@ -377,8 +385,8 @@ wss.on('connection', (ws) => {
           send(ws, { type: 'chat_response', message: { role: 'assistant', content: 'I need an Anthropic API key to respond.', timestamp: new Date().toISOString() } })
           return
         }
-        // Show transcribed text in chat UI as user message
-        broadcast({ type: 'voice_transcribed', text })
+        // Show transcribed text immediately, then process
+        send(ws, { type: 'voice_transcribed', text })
         send(ws, { type: 'agent_thinking' })
         let streamed = ''
         let wasToolCall = false
@@ -387,9 +395,9 @@ wss.on('connection', (ws) => {
           (chunk) => {
             if (wasToolCall && streamed) { streamed += '\n\n'; wasToolCall = false }
             streamed += chunk
-            broadcast({ type: 'chat_chunk', text: chunk })
+            send(ws, { type: 'chat_chunk', text: chunk })
           },
-          (tool, label) => { wasToolCall = true; broadcast({ type: 'tool_start', tool, label }) }
+          (tool, label) => { wasToolCall = true; send(ws, { type: 'tool_start', tool, label }) }
         )
         send(ws, { type: 'chat_response', message: { role: 'assistant', content: streamed || response, timestamp: new Date().toISOString() } })
         send(ws, { type: 'queue_update', items: agent.queue.getPending() })
@@ -421,9 +429,9 @@ wss.on('connection', (ws) => {
           (chunk) => {
             if (wasToolCall && streamed) { streamed += '\n\n'; wasToolCall = false }
             streamed += chunk
-            broadcast({ type: 'chat_chunk', text: chunk })
+            send(ws, { type: 'chat_chunk', text: chunk })
           },
-          (tool, label) => { wasToolCall = true; broadcast({ type: 'tool_start', tool, label }) }
+          (tool, label) => { wasToolCall = true; send(ws, { type: 'tool_start', tool, label }) }
         )
         // Use the full streamed text so step-by-step updates are preserved
         send(ws, {
@@ -569,6 +577,10 @@ wss.on('connection', (ws) => {
       try {
         const settings = await writeSettings(DATA_DIR, msg.patch)
         send(ws, { type: 'settings_update', settings })
+        // If heartbeat interval or active hours changed, reschedule the wake
+        if (msg.patch.heartbeat_interval !== undefined || msg.patch.active_hours !== undefined || msg.patch.active_days !== undefined) {
+          onHeartbeatSettingsChanged(DATA_DIR).catch(() => {})
+        }
       } catch (err: any) {
         send(ws, { type: 'error', message: err.message })
       }

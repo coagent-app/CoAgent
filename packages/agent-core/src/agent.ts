@@ -536,23 +536,20 @@ Skills: Users invoke skills with @skill-name. When invoked, the skill's instruct
 
 Document tools: Use create_document for substantial content (emails, reports). Use update_document to revise — always pushes to the editing panel. Don't use for short answers.
 
-Integration context: You have an update_integration_context tool — USE IT. After every interaction with an external service, update that integration's context with anything you learned or did. Examples:
-- After creating a calendar event → update googlecalendar context: "Created meeting with Alex, Fri 5:30pm at Living Green"
-- After sending an email → update gmail context: "Brett prefers short emails, always CC sarah@..."
-- After reading Slack → update slack context: "#leads channel is for new incoming leads"
-This is NOT memory. Memory is for general knowledge. Integration context is your operational cheat sheet for each service — it's auto-injected when you use that service's tools so you never forget what you've done or how the user works with it. Max 1000 chars per integration. Rewrite the full context each time (don't append endlessly — keep it current and relevant).
+Integration context: You have an update_integration_context tool. Only use it to save important, reusable knowledge about how the user works with a service — preferences, patterns, key contacts, account structure. Examples:
+- "Brett prefers short emails, always CC sarah@..."
+- "#leads channel is for new incoming leads, #general is casual"
+- "Google Calendar: work events go on 'Work' calendar, personal on 'Personal'"
+Do NOT update context for routine actions (sending a single email, reading messages, creating one event). Only update when you learn something new about how the user uses the service. Max 1000 chars per integration. Rewrite the full context each time (keep it current and relevant).
 
 ${serviceSection}
 
 ${settingsSection}
 
-External tools: If the user's request involves an external service, call search_tools FIRST. Never guess a tool name.
-
-Memory: Your long-term brain — history only shows recent messages. Write things down immediately: names, dates, preferences, project details, decisions. If unsure whether to save, save it. Always search memory before saying you don't know.
-Memory files: setup.md (read-only), agent.md (user profile), routines.md (heartbeat schedule), preferences.md, contacts.md, projects.md. Read on startup/heartbeats. Update when you learn something new. Delete stale files.
+Memory: Your long-term brain — history only shows recent messages. Write things down immediately: names, dates, preferences, project details, decisions. If unsure whether to save, save it. Always search memory before saying you don't know. Files: setup.md (read-only), agent.md (user profile), routines.md (heartbeat instructions), preferences.md, contacts.md, projects.md. Read on startup/heartbeats. Update when you learn something new. Delete stale files.
 
 Routine tasks: act, then add_done_item. High-stakes actions: queue_approval with full draft in "detail" and recipient/subject in "metadata".
-On heartbeat: read routines.md, check due tasks, check pending queue. If nothing needs attention, reply "All clear." immediately.
+On heartbeat: read routines.md, check due tasks, check pending queue. Only surface what's relevant right now. If nothing needs attention, reply "All clear." immediately.
 
 Keep responses concise. No emojis. Markdown only when helpful.${onboardingSection}`
 }
@@ -1276,7 +1273,10 @@ export class Agent {
       const dueSection = due.length > 0
         ? `\n\nDue tasks:\n${due.map(t => `- [${t.id}] ${t.task}${t.due ? ` (due: ${t.due})` : ''}`).join('\n')}`
         : ''
-      return `[Heartbeat triage — ${time}] You are triaging. DO NOT take action — only assess and report.\n\n1. Read routines.md for what's expected at this time.\n2. Read agent.md for user context.\n3. Check due tasks.${dueSection}\n4. Check pending queue items.\n\nIf nothing needs attention, reply exactly "All clear."\nOtherwise, reply with a brief summary of what needs to be done. Do NOT take action yourself — a more capable model will handle it.`
+      const dayName = new Date().toLocaleDateString('en-US', { weekday: 'long' })
+      const hour = new Date().getHours()
+      const timeOfDay = hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : 'evening'
+      return `[Heartbeat triage — ${time}, ${dayName} ${timeOfDay}] You are triaging. DO NOT take action — only assess and report.\n\n1. Read routines.md — only look at sections relevant to this time of day.\n2. Read agent.md for user context.\n3. Check due tasks.${dueSection}\n4. Check pending queue items.\n\nFocus on what's relevant right now. Use your judgment — not everything needs to be surfaced.\n\nIf nothing needs attention, reply exactly "All clear."\nOtherwise, reply with a brief summary of what needs to be done. Do NOT take action yourself — a more capable model will handle it.`
     }
     if (trigger.source === 'memory_cleanup') return `[Memory cleanup — ${time}] Review all memory files with list_memories, then read each one. Delete or rewrite files that are stale, resolved, or no longer relevant. Consolidate duplicates. Keep only what is actively useful. Reply with a brief summary of what you cleaned up.`
     if (trigger.source === 'webhook') return `[Webhook — ${time}] Event received: ${JSON.stringify(trigger.payload)}. Search memory and handle it.`
@@ -1353,6 +1353,12 @@ export class Agent {
       let trimmed = filtered
       while (trimmed.length > 0 && trimmed[0].role !== 'user') {
         trimmed = trimmed.slice(1)
+        changed = true
+      }
+
+      // Drop trailing non-user messages (API requires last message = user)
+      while (trimmed.length > 0 && trimmed[trimmed.length - 1].role !== 'user') {
+        trimmed = trimmed.slice(0, -1)
         changed = true
       }
 

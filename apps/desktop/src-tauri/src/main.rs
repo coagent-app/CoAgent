@@ -68,10 +68,14 @@ unsafe fn create_nsstring(s: &str) -> *mut c_void {
 
 // Whether fn key is currently held (for press/release edge detection in callback)
 static FN_DOWN: AtomicBool = AtomicBool::new(false);
+static CTRL_DOWN: AtomicBool = AtomicBool::new(false);
+static SYSTEM_SLEEPING: AtomicBool = AtomicBool::new(false);
+static ROOT_PORT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 const FN_FLAG: u64 = 0x800000;
+const CTRL_FLAG: u64 = 0x40000; // kCGEventFlagMaskControl
 
 #[derive(Clone, Copy)]
-enum FnKeyEvent { Pressed, Released }
+enum FnKeyEvent { Pressed, Released, Cancel }
 
 // Channel sender — callback sends events here (non-blocking, nanoseconds)
 static FN_SENDER: std::sync::OnceLock<std::sync::mpsc::Sender<FnKeyEvent>> = std::sync::OnceLock::new();
@@ -145,6 +149,58 @@ mod ax {
     }
 }
 
+// IOKit power management — sleep/wake notifications
+#[cfg(target_os = "macos")]
+mod iokit {
+    use std::ffi::c_void;
+    pub const SYSTEM_WILL_SLEEP: u32 = 0xe0000280;
+    pub const SYSTEM_HAS_POWERED_ON: u32 = 0xe0000300;
+    pub const CAN_SYSTEM_SLEEP: u32 = 0xe0000240;
+
+    #[link(name = "IOKit", kind = "framework")]
+    extern "C" {
+        pub fn IORegisterForSystemPower(
+            refcon: *mut c_void,
+            notify_port: *mut *mut c_void,
+            callback: extern "C" fn(*mut c_void, u32, u32, *mut c_void),
+            notifier: *mut u32,
+        ) -> u32;
+        pub fn IOAllowPowerChange(kernel_port: u32, notification_id: isize) -> u32;
+        pub fn IONotificationPortGetRunLoopSource(notify_port: *mut c_void) -> *mut c_void;
+    }
+}
+
+#[cfg(target_os = "macos")]
+extern "C" fn power_callback(
+    _refcon: *mut c_void, _service: u32, msg_type: u32, msg_arg: *mut c_void,
+) {
+    let root_port = ROOT_PORT.load(Ordering::Relaxed);
+    match msg_type {
+        iokit::SYSTEM_WILL_SLEEP => {
+            log("[Power] System sleeping — disabling event tap");
+            SYSTEM_SLEEPING.store(true, Ordering::Release);
+            let tap = EVENT_TAP.load(Ordering::Relaxed);
+            if !tap.is_null() {
+                unsafe { cg::CGEventTapEnable(tap, false); }
+            }
+            unsafe { iokit::IOAllowPowerChange(root_port, msg_arg as isize); }
+        }
+        iokit::SYSTEM_HAS_POWERED_ON => {
+            log("[Power] System woke — re-enabling event tap");
+            SYSTEM_SLEEPING.store(false, Ordering::Release);
+            let tap = EVENT_TAP.load(Ordering::Relaxed);
+            if !tap.is_null() {
+                unsafe { cg::CGEventTapEnable(tap, true); }
+            }
+        }
+        iokit::CAN_SYSTEM_SLEEP => {
+            // Allow idle sleep — don't block it
+            unsafe { iokit::IOAllowPowerChange(root_port, msg_arg as isize); }
+        }
+        _ => {}
+    }
+}
+
 static EVENT_TAP: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static APP_HANDLE: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
 
@@ -160,7 +216,21 @@ extern "C" fn fn_key_callback(
     }
     let flags = unsafe { cg::CGEventGetFlags(event) };
     let is_fn = (flags & FN_FLAG) != 0;
+    let is_ctrl = (flags & CTRL_FLAG) != 0;
     let was_down = FN_DOWN.load(Ordering::Relaxed);
+    let ctrl_was_down = CTRL_DOWN.load(Ordering::Relaxed);
+
+    // Detect Control press while fn is held → cancel voice
+    if is_ctrl && !ctrl_was_down {
+        CTRL_DOWN.store(true, Ordering::Release);
+        if was_down || is_fn {
+            // fn is held + Control just pressed → cancel
+            if let Some(tx) = FN_SENDER.get() { let _ = tx.send(FnKeyEvent::Cancel); }
+            return std::ptr::null_mut();
+        }
+    } else if !is_ctrl && ctrl_was_down {
+        CTRL_DOWN.store(false, Ordering::Release);
+    }
 
     if is_fn && !was_down {
         FN_DOWN.store(true, Ordering::Release);
@@ -279,10 +349,9 @@ fn main() {
 
             let _ = APP_HANDLE.set(app.handle().clone());
 
-            // Ensure voice-pill is hidden on startup + force transparent background
+            // Voice pill: force transparent background, position at bottom center, show idle
             #[cfg(target_os = "macos")]
             if let Some(pill_win) = app.get_webview_window("voice-pill") {
-                let _ = pill_win.hide();
                 let _ = pill_win.with_webview(|wv| {
                     unsafe {
                         let wkwebview: *mut c_void = wv.inner().cast();
@@ -297,8 +366,24 @@ fn main() {
                         objc_msg_1(ns_window, sel("setBackgroundColor:"), clear_color);
                         objc_msg_bool(ns_window, sel("setOpaque:"), false);
                         objc_msg_bool(ns_window, sel("setHasShadow:"), false);
+
+                        // Make transparent areas click-through
+                        objc_msg_bool(ns_window, sel("setIgnoresMouseEvents:"), true);
                     }
                 });
+
+                // Position at bottom center and show (idle state — small mic icon)
+                if let Ok(Some(monitor)) = pill_win.primary_monitor() {
+                    let screen = monitor.size();
+                    let scale = monitor.scale_factor();
+                    let logical_w = screen.width as f64 / scale;
+                    let logical_h = screen.height as f64 / scale;
+                    let pill_w = 440.0;
+                    let x = (logical_w - pill_w) / 2.0;
+                    let y = logical_h - 170.0;
+                    let _ = pill_win.set_position(tauri::LogicalPosition::new(x, y));
+                }
+                let _ = pill_win.show();
             }
 
             // Check Accessibility permission — prompt user if missing
@@ -347,15 +432,34 @@ fn main() {
                     let rl = cg::CFRunLoopGetCurrent();
                     cg::CFRunLoopAddSource(rl, src, cg::kCFRunLoopCommonModes);
                     cg::CGEventTapEnable(tap, true);
+
+                    // Register for system sleep/wake so we disable the tap before sleep
+                    let mut notify_port: *mut c_void = std::ptr::null_mut();
+                    let mut notifier: u32 = 0;
+                    let root_port = iokit::IORegisterForSystemPower(
+                        std::ptr::null_mut(),
+                        &mut notify_port,
+                        power_callback,
+                        &mut notifier,
+                    );
+                    if root_port != 0 {
+                        ROOT_PORT.store(root_port, Ordering::Release);
+                        let power_src = iokit::IONotificationPortGetRunLoopSource(notify_port);
+                        cg::CFRunLoopAddSource(rl, power_src, cg::kCFRunLoopCommonModes);
+                        log("[Power] Registered for sleep/wake notifications");
+                    } else {
+                        log("[Power] Failed to register for sleep/wake notifications");
+                    }
+
                     cg::CFRunLoopRun();
                 }
             });
 
             // Thread 2: Blocks on channel — zero CPU when idle, instant wake on fn key.
-            // recv_timeout(500ms) also lets us periodically re-enable the tap if macOS killed it.
+            // recv_timeout(10s) periodically re-enables the tap if macOS killed it.
             std::thread::spawn(move || {
                 loop {
-                    match rx.recv_timeout(std::time::Duration::from_millis(500)) {
+                    match rx.recv_timeout(std::time::Duration::from_secs(10)) {
                         Ok(evt) => {
                             let Some(handle) = APP_HANDLE.get() else { continue; };
                             match evt {
@@ -382,9 +486,15 @@ fn main() {
                                     let _ = handle.emit("voice-fn-release", ());
                                     // Don't hide pill here — voice.ts hides it after showing response
                                 }
+                                FnKeyEvent::Cancel => {
+                                    log("[Voice] fn+Control — cancel");
+                                    let _ = handle.emit("voice-cancel", ());
+                                }
                             }
                         }
                         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            // Skip health check while system is sleeping
+                            if SYSTEM_SLEEPING.load(Ordering::Relaxed) { continue; }
                             // Periodic health check: re-enable tap if macOS disabled it
                             let tap = EVENT_TAP.load(Ordering::Relaxed);
                             if !tap.is_null() && !unsafe { cg::CGEventTapIsEnabled(tap) } {

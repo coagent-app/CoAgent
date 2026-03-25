@@ -122,6 +122,11 @@ export function useAgent() {
           setThinking(false)
           setToolLabel(null)
           setProcessing(false)
+          // Dismiss voice pill if it was active (covers both normal completion and stop)
+          if ((window as any).__voiceActive) {
+            ;(window as any).__voiceActive = false
+            import('@/lib/voice').then(v => v.showVoiceSummary(''))
+          }
         }
         if (msg.type === 'chat_history') setMessages(msg.messages)
         if (msg.type === 'integrations_update') setIntegrations(msg.integrations)
@@ -156,9 +161,12 @@ export function useAgent() {
         if (msg.type === 'heartbeat') setLastHeartbeat({ time: new Date(), status: msg.status })
         if (msg.type === 'skills_update') setSkills(msg.skills)
         if (msg.type === 'voice_transcribed') {
-          // Show the user's voice input in chat
-          setMessages(prev => [...prev, { role: 'user' as const, content: msg.text, timestamp: new Date().toISOString() }].slice(-100))
-          // Reset voice response accumulator for fresh response
+          // Show the user's voice input in chat (dedupe in case of multiple connections)
+          setMessages(prev => {
+            const last = prev[prev.length - 1]
+            if (last?.role === 'user' && last.content === msg.text) return prev
+            return [...prev, { role: 'user' as const, content: msg.text, timestamp: new Date().toISOString() }].slice(-100)
+          })
           import('@/lib/voice').then(v => v.resetVoiceResponse())
         }
         if (msg.type === 'voice_summary') {
