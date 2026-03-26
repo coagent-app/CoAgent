@@ -1,7 +1,7 @@
 import React from 'react'
 import {
-  Inbox, MessageSquare, CheckCircle2, Settings, ListTodo,
-  ChevronRight, FolderOpen, Sun, Moon
+  Inbox, MessageSquare, Settings,
+  ChevronRight, FolderOpen, Sun, Moon, Calendar as CalendarIcon
 } from 'lucide-react'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
@@ -9,13 +9,12 @@ import { Separator } from '@/components/ui/separator'
 import { cn } from '@/lib/utils'
 import type { Integration } from '@coagent/shared'
 
-export type View = 'chat' | 'queue' | 'todos' | 'done' | 'settings' | 'files'
+export type View = 'chat' | 'calendar' | 'queue' | 'files' | 'settings'
 
 interface SidebarProps {
   view: View
   onViewChange: (v: View) => void
   queueCount: number
-  todoCount: number
   integrations: Integration[]
   onConnect: (slug: string) => void
   onDisconnect: (slug: string) => void
@@ -101,7 +100,7 @@ function IntegrationItem({
   )
 }
 
-export function Sidebar({ view, onViewChange, queueCount, todoCount, integrations, onConnect, onDisconnect, onOpenModal, userName, dark, toggleTheme }: SidebarProps) {
+export function Sidebar({ view, onViewChange, queueCount, integrations, onConnect, onDisconnect, onOpenModal, userName, dark, toggleTheme }: SidebarProps) {
 
   return (
     <div className="w-52 bg-[#FAFAFA] dark:bg-neutral-900 border-r border-neutral-200 dark:border-neutral-800 flex flex-col py-4 px-3 flex-shrink-0">
@@ -113,9 +112,8 @@ export function Sidebar({ view, onViewChange, queueCount, todoCount, integration
 
       <div className="flex flex-col gap-0.5 mb-2">
         <NavItem icon={MessageSquare} label="Chat" active={view === 'chat'} onClick={() => onViewChange('chat')} />
-        <NavItem icon={ListTodo} label="To-Do" active={view === 'todos'} onClick={() => onViewChange('todos')} badge={todoCount} />
+        <NavItem icon={CalendarIcon} label="Calendar" active={view === 'calendar'} onClick={() => onViewChange('calendar')} />
         <NavItem icon={Inbox} label="Queue" active={view === 'queue'} onClick={() => onViewChange('queue')} badge={queueCount} />
-        <NavItem icon={CheckCircle2} label="Done" active={view === 'done'} onClick={() => onViewChange('done')} />
         <NavItem icon={FolderOpen} label="Files" active={view === 'files'} onClick={() => onViewChange('files')} />
       </div>
 
@@ -168,7 +166,7 @@ export function Sidebar({ view, onViewChange, queueCount, todoCount, integration
       >
         <Avatar className="h-6 w-6">
           <AvatarFallback className="text-[10px] font-semibold bg-neutral-200 text-neutral-600 dark:bg-neutral-700 dark:text-neutral-300">
-            {userName ? userName.slice(0, 2).toUpperCase() : 'ME'}
+            {userName ? userName.split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase() : 'ME'}
           </AvatarFallback>
         </Avatar>
         <span className="text-[13px] font-medium text-neutral-600 dark:text-neutral-400">{userName || 'Settings'}</span>

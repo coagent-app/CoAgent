@@ -1,53 +1,47 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { CheckCircle2, Circle, Trash2 } from 'lucide-react'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import { Button } from '@/components/ui/button'
 import { Sidebar } from '@/components/Sidebar'
 import type { View } from '@/components/Sidebar'
 import { QueuePane } from '@/components/QueuePane'
 import { DetailPane } from '@/components/DetailPane'
 import { ChatPane } from '@/components/ChatPane'
+import { CalendarPane } from '@/components/CalendarPane'
 import { IntegrationsModal } from '@/components/IntegrationsModal'
 import { SettingsPane } from '@/components/SettingsPane'
 import { FilesPane } from '@/components/FilesPane'
-import { DocumentPanel } from '@/components/DocumentPanel'
 import { useAgent } from '@/hooks/useAgent'
 import { useTheme } from '@/hooks/useTheme'
 import { cn } from '@/lib/utils'
-import { registerVoiceHotkey, unregisterVoiceHotkey } from '@/lib/voice'
+import { registerVoiceHotkey, unregisterVoiceHotkey, cancelVoice } from '@/lib/voice'
+import { emit } from '@tauri-apps/api/event'
 import type { ApprovalItem } from '@coagent/shared'
 
-function formatDue(due: string): string {
-  const hasTime = due.includes('T')
-  const date = new Date(hasTime ? due : due + 'T00:00:00')
-  if (hasTime) {
-    return date.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
-  }
-  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-}
-
 export default function App() {
-  const { queue, done, todos, messages, streamingText, thinking, processing, toolLabel, connected, lastHeartbeat, skills, steer, stopAgent, integrations, error, chat, approve, reject, editQueueItem, completeTodo, deleteTodo, connectIntegration, disconnectIntegration, settings, updateSettings, authStatus, updateAuth, verifyAuth, files, folders, searchResults, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, openDocument, activeDocument, updateDocument, closeDocument, relayActive, relayModel, setRelayModel, relayUsage, activateRelay, refreshRelayStatus, apiKeyStatus, pendingFields, setPendingFields, updateApiKeys, setModel } = useAgent()
+  const { queue, done, todos, messages, streamingText, thinking, processing, toolLabel, connected, lastHeartbeat, skills, steer, stopAgent, integrations, error, chat, approve, reject, editQueueItem, completeTodo, deleteTodo, connectIntegration, disconnectIntegration, settings, updateSettings, authStatus, updateAuth, verifyAuth, files, folders, searchResults, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, relayActive, relayModel, setRelayModel, relayUsage, activateRelay, refreshRelayStatus, apiKeyStatus, pendingFields, setPendingFields, updateApiKeys, setModel, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry } = useAgent()
   const { dark, toggle: toggleTheme } = useTheme()
   const [view, setView] = useState<View>('chat')
   const [selectedItem, setSelectedItem] = useState<ApprovalItem | null>(null)
   const [modalOpen, setModalOpen] = useState(false)
-  const [lastDocumentId, setLastDocumentId] = useState<string | null>(null)
 
+  // Voice: register/unregister based on voice_enabled setting
+  const voiceEnabled = settings?.voice_enabled ?? false
   useEffect(() => {
-    if (activeDocument) setLastDocumentId(activeDocument.id)
-  }, [activeDocument])
+    // Tell Rust to enable/disable fn key interception and pill visibility
+    emit('set-voice-mode', { enabled: voiceEnabled }).catch(() => {})
 
-  // Voice: register fn key for recording, Rust handles pill show/hide
-  useEffect(() => {
-    registerVoiceHotkey('fn', (base64) => {
-      ;(window as any).__voiceActive = true // active only during voice interaction
-      window.dispatchEvent(new CustomEvent('coagent-ws-send', {
-        detail: { type: 'voice_audio', data: base64 }
-      }))
-    }, () => {})
+    if (voiceEnabled) {
+      registerVoiceHotkey('fn', (base64) => {
+        ;(window as any).__voiceActive = true
+        window.dispatchEvent(new CustomEvent('coagent-ws-send', {
+          detail: { type: 'voice_audio', data: base64 }
+        }))
+      }, () => {})
+    } else {
+      cancelVoice()
+      unregisterVoiceHotkey()
+    }
     return () => { unregisterVoiceHotkey() }
-  }, [])
+  }, [voiceEnabled])
 
 
   function handleApprove(id: string) {
@@ -73,7 +67,6 @@ export default function App() {
           view={view}
           onViewChange={setView}
           queueCount={queue.length}
-          todoCount={todos.length}
           integrations={integrations}
           onConnect={connectIntegration}
           onDisconnect={disconnectIntegration}
@@ -85,15 +78,16 @@ export default function App() {
 
         {view === 'chat' && (
           <div className="relative flex-1 flex overflow-hidden">
-            <ChatPane messages={messages} streamingText={streamingText} thinking={thinking} processing={processing} toolLabel={toolLabel} connected={connected} onChat={chat} onSteer={steer} onStop={stopAgent} onIngestFile={ingestFile} files={files} onOpenDocument={openDocument} activeDocumentId={lastDocumentId} apiKeyStatus={apiKeyStatus} onNavigateToSettings={() => setView('settings')} lastHeartbeat={lastHeartbeat} skills={skills} className="flex-1" />
-            {activeDocument && (
-              <DocumentPanel
-                document={activeDocument}
-                onUpdate={updateDocument}
-                onClose={closeDocument}
-              />
-            )}
+            <ChatPane messages={messages} streamingText={streamingText} thinking={thinking} processing={processing} toolLabel={toolLabel} connected={connected} onChat={chat} onSteer={steer} onStop={stopAgent} onIngestFile={ingestFile} files={files} apiKeyStatus={apiKeyStatus} onNavigateToSettings={() => setView('settings')} lastHeartbeat={lastHeartbeat} skills={skills} className="flex-1" />
           </div>
+        )}
+
+        {view === 'calendar' && (
+          <CalendarPane
+            entries={calendarEntries}
+            onComplete={completeCalendarEntry}
+            onDelete={deleteCalendarEntry}
+          />
         )}
 
         {view === 'queue' && (
@@ -101,39 +95,6 @@ export default function App() {
             <QueuePane queue={queue} done={done} selectedId={selectedItem?.id ?? null} onSelect={setSelectedItem} />
             <DetailPane item={selectedItem} onApprove={handleApprove} onReject={handleReject} onEdit={editQueueItem} />
           </>
-        )}
-
-        {view === 'todos' && (
-          <ScrollArea className="flex-1 bg-white dark:bg-neutral-950">
-            <div className="px-8 py-7">
-              <p className="text-[10px] font-semibold text-neutral-400 dark:text-neutral-500 uppercase tracking-widest mb-1">Tasks</p>
-              <h1 className="text-[19px] font-bold tracking-tight text-neutral-900 dark:text-neutral-100 mb-6">To-Do</h1>
-              {todos.length === 0 ? (
-                <p className="text-[14px] text-neutral-400 dark:text-neutral-500">No tasks yet. Ask Co-Agent to add one.</p>
-              ) : (
-                <div className="flex flex-col divide-y divide-neutral-100 dark:divide-neutral-800">
-                  {todos.map(item => (
-                    <div key={item.id} className="flex items-start gap-3 py-3 group">
-                      <button onClick={() => completeTodo(item.id)} className="mt-0.5 flex-shrink-0 text-neutral-300 dark:text-neutral-600 hover:text-emerald-500 transition-colors">
-                        <Circle size={15} strokeWidth={1.75} />
-                      </button>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-[14px] text-neutral-800 dark:text-neutral-200 leading-relaxed">{item.task}</p>
-                        {item.due && (
-                          <p className={cn('text-[12px] mt-0.5', new Date(item.due.includes('T') ? item.due : item.due + 'T23:59:59') < new Date() ? 'text-red-500' : 'text-neutral-400 dark:text-neutral-500')}>
-                            {formatDue(item.due)}
-                          </p>
-                        )}
-                      </div>
-                      <button onClick={() => deleteTodo(item.id)} className="opacity-0 group-hover:opacity-100 transition-opacity text-neutral-300 dark:text-neutral-600 hover:text-red-500 flex-shrink-0 mt-0.5">
-                        <Trash2 size={13} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </ScrollArea>
         )}
 
         {view === 'settings' && (
@@ -149,6 +110,8 @@ export default function App() {
             apiKeyStatus={apiKeyStatus}
             onUpdateApiKeys={updateApiKeys}
             onSetModel={setModel}
+            usage={usage}
+            onRefreshUsage={refreshUsage}
           />
         )}
 
@@ -168,28 +131,9 @@ export default function App() {
             onReorderFolders={reorderFolders}
             onMoveFolder={moveFolder}
             onSearchFiles={searchFilesUI}
+            organizing={organizing}
+            onAutoOrganize={autoOrganize}
           />
-        )}
-
-        {view === 'done' && (
-          <ScrollArea className="flex-1 bg-white dark:bg-neutral-950">
-            <div className="px-8 py-7">
-              <p className="text-[10px] font-semibold text-neutral-400 dark:text-neutral-500 uppercase tracking-widest mb-1">Completed</p>
-              <h1 className="text-[19px] font-bold tracking-tight text-neutral-900 dark:text-neutral-100 mb-6">Activity log</h1>
-              {done.length === 0 ? (
-                <p className="text-[14px] text-neutral-400 dark:text-neutral-500">Nothing completed yet.</p>
-              ) : (
-                <div className="flex flex-col divide-y divide-neutral-100 dark:divide-neutral-800">
-                  {done.map(item => (
-                    <div key={item.id} className="flex items-start gap-3 py-3">
-                      <CheckCircle2 size={15} strokeWidth={1.75} className="text-emerald-500 flex-shrink-0 mt-0.5" />
-                      <span className="text-[14px] text-neutral-600 dark:text-neutral-400 leading-relaxed">{item.description}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </ScrollArea>
         )}
       </div>
 

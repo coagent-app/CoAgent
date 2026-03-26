@@ -19,6 +19,7 @@
     "@tauri-apps/plugin-shell": "^2.3.5",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "date-fns": "^4.1.0",
     "lucide-react": "^0.575.0",
     "pdfjs-dist": "^5.4.624",
     "react": "^18.3.0",

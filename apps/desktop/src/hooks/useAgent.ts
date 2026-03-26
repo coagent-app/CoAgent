@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { open } from '@tauri-apps/plugin-shell'
-import type { ApprovalItem, DoneItem, TodoItem, AgentMessage, WSServerMessage, WSClientMessage, Integration, AgentSettings, FileEntry, AuthStatus, AuthMethod, RelayUsage } from '@coagent/shared'
+import type { ApprovalItem, DoneItem, TodoItem, AgentMessage, WSServerMessage, WSClientMessage, Integration, AgentSettings, FileEntry, AuthStatus, AuthMethod, RelayUsage, UsageSummary, CalendarEntry } from '@coagent/shared'
 
 const WS_URL = 'ws://localhost:7830'
 const RECONNECT_BASE = 250
@@ -30,29 +30,15 @@ export function useAgent() {
   const [toolLabel, setToolLabel] = useState<string | null>(null)
   const [lastHeartbeat, setLastHeartbeat] = useState<{ time: Date; status: string } | null>(null)
   const [skills, setSkills] = useState<{ name: string; description: string }[]>([])
-  const [activeDocument, setActiveDocument] = useState<{ id: string; filename: string; content: string } | null>(null)
   const [pendingFields, setPendingFields] = useState<{ slug: string; fields: { name: string; displayName: string; description: string }[] } | null>(null)
   const [relayActive, setRelayActive] = useState<boolean>(false)
   const [relayModel, setRelayModel] = useState<string | null>(null)
   const [relayUsage, setRelayUsage] = useState<RelayUsage | null>(null)
   const [apiKeyStatus, setApiKeyStatus] = useState<{ anthropic: boolean; composio: boolean; openai: boolean } | null>(null)
   const [voiceSummary, setVoiceSummary] = useState<string | null>(null)
-
-  // Document streaming — buffer chunks in ref, flush to React state each frame
-  const docStreamBuf = useRef('')
-  const docRafId = useRef<number | null>(null)
-
-  function docStreamFlush() {
-    const content = docStreamBuf.current
-    setActiveDocument(prev => prev?.id === '_streaming' ? { ...prev, content } : prev)
-    docRafId.current = null
-  }
-
-  function docStreamSchedule() {
-    if (docRafId.current === null) {
-      docRafId.current = requestAnimationFrame(docStreamFlush)
-    }
-  }
+  const [usage, setUsage] = useState<UsageSummary | null>(null)
+  const [organizing, setOrganizing] = useState(false)
+  const [calendarEntries, setCalendarEntries] = useState<CalendarEntry[]>([])
 
   useEffect(() => {
     let unmounted = false
@@ -87,17 +73,25 @@ export function useAgent() {
           setStreamingText(null)
           setToolLabel(null)
         }
-        if (msg.type === 'tool_start') {
-          // Snapshot current streaming text as a completed bubble
+        if (msg.type === 'chat_segment_end') {
           setStreamingText(current => {
             if (current?.trim()) {
               setMessages(prev => [...prev, { role: 'assistant' as const, content: current, timestamp: new Date().toISOString() }].slice(-100))
             }
             return null
           })
+        }
+        if (msg.type === 'tool_start') {
+          if (!(window as any).__voiceActive) {
+            setStreamingText(current => {
+              if (current?.trim()) {
+                setMessages(prev => [...prev, { role: 'assistant' as const, content: current, timestamp: new Date().toISOString() }].slice(-100))
+              }
+              return null
+            })
+          }
           setToolLabel(msg.label)
           setThinking(true)
-          // Forward tool label to voice pill if voice is active
           if ((window as any).__voiceActive) {
             import('@/lib/voice').then(v => v.showVoiceToolLabel(msg.label))
           }
@@ -112,6 +106,10 @@ export function useAgent() {
           }
         }
         if (msg.type === 'chat_response') {
+          // Server-injected user message (e.g. todo fired) — add directly
+          if (msg.message.role === 'user') {
+            setMessages(prev => [...prev, msg.message].slice(-100))
+          }
           // Snapshot any remaining streaming text as a final bubble
           setStreamingText(current => {
             if (current?.trim()) {
@@ -135,22 +133,6 @@ export function useAgent() {
         if (msg.type === 'files_update') setFiles(msg.files)
         if (msg.type === 'folders_update') setFolders(msg.folders)
         if (msg.type === 'files_search_result') setSearchResults(msg.files)
-        if (msg.type === 'document_stream_start') {
-          docStreamBuf.current = ''
-          if (docRafId.current !== null) { cancelAnimationFrame(docRafId.current); docRafId.current = null }
-          setActiveDocument({ id: '_streaming', filename: msg.filename, content: '' })
-        }
-        if (msg.type === 'document_stream_chunk') {
-          docStreamBuf.current += msg.text
-          docStreamSchedule()
-        }
-        if (msg.type === 'document_opened') {
-          if (docRafId.current !== null) { cancelAnimationFrame(docRafId.current); docRafId.current = null }
-          docStreamBuf.current = ''
-          setActiveDocument({ id: msg.id, filename: msg.filename, content: msg.content })
-        }
-        if (msg.type === 'document_updated') setActiveDocument(prev => prev?.id === msg.id ? { ...prev, content: msg.content } : prev)
-        if (msg.type === 'document_closed') setActiveDocument(null)
         if (msg.type === 'relay_status') {
           setRelayActive(msg.active)
           setRelayModel(msg.model)
@@ -174,6 +156,9 @@ export function useAgent() {
           // Show summary in pill, then auto-hide after delay
           import('@/lib/voice').then(v => v.showVoiceSummary(msg.summary))
         }
+        if (msg.type === 'usage_update') setUsage(msg.usage)
+        if (msg.type === 'auto_organize_done') setOrganizing(false)
+        if (msg.type === 'calendar_update') setCalendarEntries(msg.entries)
         if (msg.type === 'error') { setError(msg.message); setTimeout(() => setError(null), 5000) }
         if (msg.type === 'integration_needs_fields') {
           setPendingFields({ slug: msg.slug, fields: msg.fields })
@@ -370,16 +355,20 @@ export function useAgent() {
     send({ type: 'search_files_ui', query })
   }, [send])
 
-  const updateDocument = useCallback((id: string, content: string) => {
-    send({ type: 'update_document', id, content })
+  const refreshUsage = useCallback(() => { send({ type: 'get_usage' }) }, [send])
+
+  const autoOrganize = useCallback(() => {
+    setOrganizing(true)
+    send({ type: 'auto_organize' })
   }, [send])
 
-  const openDocument = useCallback((id: string) => send({ type: 'open_document', id }), [send])
-
-  const closeDocument = useCallback(() => {
-    send({ type: 'close_document' })
-    setActiveDocument(null)
+  const completeCalendarEntry = useCallback((id: string) => {
+    send({ type: 'complete_calendar_entry', id })
   }, [send])
 
-  return { queue, done, todos, messages, streamingText, thinking, processing, toolLabel, connected, lastHeartbeat, skills, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, activeDocument, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, apiKeyStatus, pendingFields, setPendingFields, updateApiKeys, setModel, chat, approve, reject, editQueueItem, completeTodo, deleteTodo, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, openDocument, updateDocument, closeDocument, voiceSummary }
+  const deleteCalendarEntry = useCallback((id: string) => {
+    send({ type: 'delete_calendar_entry', id })
+  }, [send])
+
+  return { queue, done, todos, messages, streamingText, thinking, processing, toolLabel, connected, lastHeartbeat, skills, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, apiKeyStatus, pendingFields, setPendingFields, updateApiKeys, setModel, chat, approve, reject, editQueueItem, completeTodo, deleteTodo, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry }
 }
