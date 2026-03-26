@@ -32,7 +32,7 @@ export interface AgentSettings {
   voice_hotkey: string     // shortcut string e.g. "Control+Space"
 }
 
-export type TriggerSource = 'heartbeat' | 'webhook' | 'manual' | 'memory_cleanup'
+export type TriggerSource = 'heartbeat' | 'webhook' | 'manual' | 'memory_cleanup' | 'todo_due' | 'routine' | 'task_due'
 
 export interface AgentTrigger {
   source: TriggerSource
@@ -43,7 +43,7 @@ export type ApprovalStatus = 'pending' | 'approved' | 'rejected'
 
 export interface ApprovalItem {
   id: string
-  type: 'task' | 'document' | 'message' | 'request' | 'other'
+  type: 'task' | 'message' | 'request' | 'other'
   title: string
   description: string
   detail: string
@@ -59,6 +59,23 @@ export interface TodoItem {
   task: string
   due?: string        // ISO date string
   priority: 'high' | 'normal' | 'low'
+  context?: string    // agent notes — background info needed to execute the task when it fires
+  createdAt: string
+}
+
+export type CalendarEntryType = 'routine' | 'task' | 'event'
+
+export interface CalendarEntry {
+  id: string
+  type: CalendarEntryType
+  label: string
+  cron?: string         // routine: "0 9 * * 1-5"
+  due?: string          // task: ISO datetime "2026-03-28T14:30:00"
+  start?: string        // event: ISO datetime
+  end?: string          // event: ISO datetime
+  instruction?: string  // what the agent executes (routines, tasks)
+  enabled: boolean
+  completed?: boolean   // for tasks
   createdAt: string
 }
 
@@ -76,7 +93,7 @@ export interface Integration {
 
 export interface FileEntry {
   id: string
-  type: 'upload' | 'document'
+  type: 'upload'
   filename: string
   path: string          // absolute path on disk
   addedAt: string       // ISO timestamp
@@ -117,9 +134,6 @@ export type WSClientMessage =
   | { type: 'search_files_ui'; query: string }
   | { type: 'trigger_heartbeat' }
   | { type: 'add_test_queue_item'; item: Omit<ApprovalItem, 'id' | 'status' | 'createdAt'> }
-  | { type: 'update_document'; id: string; content: string }
-  | { type: 'close_document' }
-  | { type: 'open_document'; id: string }
   | { type: 'update_auth'; method: AuthMethod; credential: string }
   | { type: 'verify_auth' }
   | { type: 'relay_activate'; token: string; relayUrl: string }
@@ -129,6 +143,11 @@ export type WSClientMessage =
   | { type: 'get_api_keys' }
   | { type: 'voice_chat'; message: string }
   | { type: 'voice_audio'; data: string }
+  | { type: 'get_usage' }
+  | { type: 'auto_organize' }
+  | { type: 'get_calendar' }
+  | { type: 'complete_calendar_entry'; id: string }
+  | { type: 'delete_calendar_entry'; id: string }
 
 export type WSServerMessage =
   | { type: 'queue_update'; items: ApprovalItem[] }
@@ -136,6 +155,7 @@ export type WSServerMessage =
   | { type: 'todo_update'; items: TodoItem[] }
   | { type: 'chat_response'; message: AgentMessage }
   | { type: 'chat_chunk'; text: string }
+  | { type: 'chat_segment_end' }
   | { type: 'agent_thinking' }
   | { type: 'error'; message: string }
   | { type: 'integrations_update'; integrations: Integration[] }
@@ -149,11 +169,6 @@ export type WSServerMessage =
   | { type: 'files_update'; files: FileEntry[] }
   | { type: 'folders_update'; folders: string[] }
   | { type: 'files_search_result'; files: FileEntry[] }
-  | { type: 'document_opened'; id: string; filename: string; content: string }
-  | { type: 'document_updated'; id: string; content: string }
-  | { type: 'document_closed' }
-  | { type: 'document_stream_start'; filename: string }
-  | { type: 'document_stream_chunk'; text: string }
   | { type: 'auth_status'; status: AuthStatus }
   | { type: 'relay_status'; active: boolean; model: string | null; usage: RelayUsage | null }
   | { type: 'api_keys_status'; keys: { anthropic: boolean; composio: boolean; openai: boolean } }
@@ -162,6 +177,9 @@ export type WSServerMessage =
   | { type: 'file_ingested'; id: string; filename: string }
   | { type: 'voice_summary'; summary: string }
   | { type: 'voice_transcribed'; text: string }
+  | { type: 'usage_update'; usage: UsageSummary }
+  | { type: 'auto_organize_done'; folders: string[]; moved: number }
+  | { type: 'calendar_update'; entries: CalendarEntry[] }
 
 export interface RelayUsage {
   inputTokens: number
@@ -179,4 +197,32 @@ export interface DoneItem {
   id: string
   description: string
   completedAt: string
+}
+
+export type UsageCategory = 'chat' | 'file_ingestion' | 'nightly_job'
+
+export interface UsageEntry {
+  category: UsageCategory
+  model: string
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheCreationTokens: number
+  timestamp: string
+}
+
+export interface UsageSummary {
+  periodStart: string
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalCacheReadTokens: number
+  totalCacheCreationTokens: number
+  estimatedCostUsd: number
+  byCategory: Record<UsageCategory, {
+    inputTokens: number
+    outputTokens: number
+    cacheReadTokens: number
+    cacheCreationTokens: number
+    costUsd: number
+  }>
 }
