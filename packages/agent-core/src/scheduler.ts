@@ -2,8 +2,11 @@ import cron from 'node-cron'
 import { execSync, spawn } from 'child_process'
 import { writeFileSync, unlinkSync } from 'fs'
 import type { Agent } from './agent.js'
-import { hasUnreadEvents, purgeEventStore } from './relay-client.js'
+import { purgeEventStore } from './relay-client.js'
 import { readSettings, isActiveNow } from './settings.js'
+import { TodoList } from './todo.js'
+import { extractInsights } from './service-logger.js'
+import { pruneOldEntries } from './usage-tracker.js'
 
 // ── Platform wake scheduling ────────────────────────────────────────────────
 // Instead of preventing sleep 24/7, we let the machine sleep and schedule it
@@ -180,52 +183,113 @@ function keepAwakeDuring<T>(promise: Promise<T>): Promise<T> {
 
 export interface SchedulerCallbacks {
   onHeartbeat?: (status: 'started' | 'done' | 'skipped' | 'escalated', summary?: string) => void
+  onTodoStream?: (type: 'start' | 'chunk' | 'tool' | 'done', data?: any) => void
 }
 
-/** Call when heartbeat_interval or active hours change — reschedules the next wake immediately */
-export async function onHeartbeatSettingsChanged(dataDir: string): Promise<void> {
-  const settings = await readSettings(dataDir).catch(() => null)
-  if (!settings) return
+export interface SchedulerHandle {
+  rescheduleHeartbeat: () => void
+}
 
-  const interval = settings.heartbeat_interval ?? 60
-  if (interval <= 0 || !isActiveNow(settings)) {
-    cancelScheduledWake()
-    console.log('[Scheduler] Wake cancelled — heartbeat disabled or outside active hours')
-    return
+export function startScheduler(agent: Agent, dataDir: string, callbacks?: SchedulerCallbacks): SchedulerHandle {
+  // ── 3 AM: memory updates + cleanup (single Haiku call) ──
+
+  // Schedule a wake so the Mac doesn't sleep through the 3 AM job
+  function scheduleNightlyWake(): void {
+    const now = new Date()
+    const next3am = new Date(now)
+    next3am.setHours(3, 0, 0, 0)
+    if (next3am <= now) next3am.setDate(next3am.getDate() + 1)
+    scheduleWake(next3am)
   }
+  scheduleNightlyWake()
 
-  // Reschedule from now with the new interval
-  scheduleWake(new Date(Date.now() + interval * 60 * 1000))
-  console.log(`[Scheduler] Rescheduled — next wake in ${interval} min`)
-}
-
-export function startScheduler(agent: Agent, dataDir: string, callbacks?: SchedulerCallbacks): void {
-  // Daily memory cleanup — 3am
-  cron.schedule('0 3 * * *', () => {
-    agent.handleTrigger({ source: 'memory_cleanup' })
+  cron.schedule('0 3 * * *', async () => {
+    try {
+      const { tools: allTools, serverMap } = await agent.mcpManager.getAllTools()
+      const memoryTools = allTools.filter(t => serverMap.get(t.name) === 'memory')
+      const callMemoryTool = (tool: string, args: Record<string, unknown>) =>
+        agent.mcpManager.callTool('memory', tool, args)
+      await keepAwakeDuring(extractInsights(dataDir, memoryTools, callMemoryTool))
+      await pruneOldEntries(dataDir)
+      console.log('[Scheduler] 3 AM job complete (memory updates + cleanup)')
+    } catch (err: any) {
+      console.error('[Scheduler] 3 AM job failed:', err.message)
+    }
+    // Schedule tomorrow's wake
+    scheduleNightlyWake()
   })
 
-  // Configurable heartbeat — check every minute, fire when interval elapsed
-  let lastHeartbeat = 0
-  cron.schedule('* * * * *', async () => {
+  // ── Todo timer: fires at exact due time, no polling ────────────────────────
+
+  let todoTimer: ReturnType<typeof setTimeout> | null = null
+  const firedTodos = new Set<string>()
+
+  async function fireDueTodos(): Promise<void> {
+    // Todos always fire regardless of active hours — if you set a reminder, it fires.
+
+    const todos = new TodoList(dataDir)
+    const due = todos.getDue().filter(i => i.due)
+    for (const item of due) {
+      if (firedTodos.has(item.id)) continue
+      firedTodos.add(item.id)
+      console.log(`[Scheduler] Todo due — firing: "${item.task}" (${item.id})`)
+      // Notify UI: inject the trigger as a user message and stream the response
+      callbacks?.onTodoStream?.('start', { task: item.task, due: item.due, context: (item as any).context })
+      try {
+        let streamed = ''
+        await keepAwakeDuring(
+          agent.handleTrigger(
+            {
+              source: 'todo_due',
+              payload: { todoId: item.id, task: item.task, due: item.due, context: (item as any).context }
+            },
+            (chunk) => {
+              streamed += chunk
+              callbacks?.onTodoStream?.('chunk', { text: chunk })
+            },
+            (tool, label) => {
+              callbacks?.onTodoStream?.('tool', { tool, label })
+            }
+          )
+        )
+        callbacks?.onTodoStream?.('done', { response: streamed })
+      } catch (err: any) {
+        console.error(`[Scheduler] Todo execution error (${item.id}):`, err.message)
+      }
+    }
+    // After firing, reschedule for the next due todo
+    scheduleTodoTimer()
+  }
+
+  function scheduleTodoTimer(): void {
+    if (todoTimer) clearTimeout(todoTimer)
+    todoTimer = null
+
+    const todos = new TodoList(dataDir)
+    const next = todos.getNextDueTime()
+    if (!next) return
+
+    const delay = Math.max(next.getTime() - Date.now(), 0)
+    console.log(`[Scheduler] Next todo fires in ${Math.round(delay / 1000)}s at ${next.toLocaleString()}`)
+    todoTimer = setTimeout(() => fireDueTodos(), delay)
+    scheduleWake(next)
+  }
+
+  // ── Heartbeat timer: fires at exact interval, no polling ───────────────────
+
+  let heartbeatTimer: ReturnType<typeof setTimeout> | null = null
+
+  async function fireHeartbeat(): Promise<void> {
     const settings = await readSettings(dataDir)
     const interval = settings.heartbeat_interval ?? 60
-    if (interval <= 0) {
-      cancelScheduledWake()
-      return
-    }
-
-    const now = Date.now()
-    if (now - lastHeartbeat < interval * 60 * 1000) return
-
+    if (interval <= 0) { cancelScheduledWake(); return }
     if (!isActiveNow(settings)) {
       console.log('[Scheduler] Outside active hours — skipping heartbeat')
       cancelScheduledWake()
       callbacks?.onHeartbeat?.('skipped')
+      scheduleHeartbeatTimer()
       return
     }
-
-    lastHeartbeat = now
 
     await purgeEventStore(dataDir).catch((err) =>
       console.error('[Scheduler] Purge failed:', err.message)
@@ -240,18 +304,51 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
       callbacks?.onHeartbeat?.('done')
     }
 
-    // Schedule machine to wake for the next heartbeat
-    scheduleWake(new Date(now + interval * 60 * 1000))
-  })
+    scheduleHeartbeatTimer()
+  }
 
-  // On startup: schedule first wake if active
-  ;(async () => {
-    const settings = await readSettings(dataDir).catch(() => null)
-    if (settings && isActiveNow(settings)) {
+  function scheduleHeartbeatTimer(): void {
+    if (heartbeatTimer) clearTimeout(heartbeatTimer)
+    heartbeatTimer = null
+
+    readSettings(dataDir).then(settings => {
       const interval = settings.heartbeat_interval ?? 60
-      if (interval > 0) {
-        scheduleWake(new Date(Date.now() + interval * 60 * 1000))
-      }
-    }
+      if (interval <= 0) return
+
+      const delay = interval * 60 * 1000
+      const wakeAt = new Date(Date.now() + delay)
+      console.log(`[Scheduler] Next heartbeat in ${interval}min at ${wakeAt.toLocaleString()}`)
+      heartbeatTimer = setTimeout(() => fireHeartbeat(), delay)
+
+      // Wake at whichever is sooner: heartbeat, next todo, or 3 AM nightly job
+      const todos = new TodoList(dataDir)
+      const nextTodo = todos.getNextDueTime()
+      const now = new Date()
+      const next3am = new Date(now)
+      next3am.setHours(3, 0, 0, 0)
+      if (next3am <= now) next3am.setDate(next3am.getDate() + 1)
+      const candidates = [wakeAt, next3am]
+      if (nextTodo) candidates.push(nextTodo)
+      const earliestWake = candidates.reduce((a, b) => a < b ? a : b)
+      scheduleWake(earliestWake)
+    }).catch(() => {})
+  }
+
+  // ── Exports for external callers (settings change, todo change) ────────────
+
+  // Exposed via onCalendarChanged callback on Agent
+  const origOnCalendarChanged = agent.onCalendarChanged
+  agent.onCalendarChanged = () => {
+    origOnCalendarChanged?.()
+    scheduleTodoTimer()
+  }
+
+  // ── Startup: fire any overdue todos, then schedule timers ──────────────────
+
+  ;(async () => {
+    await fireDueTodos()
+    scheduleHeartbeatTimer()
   })()
+
+  return { rescheduleHeartbeat: scheduleHeartbeatTimer }
 }

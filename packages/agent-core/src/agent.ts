@@ -4,19 +4,21 @@ import { existsSync } from 'fs'
 import { join } from 'path'
 import { MCPManager, MCPServerConfig } from './mcp-manager.js'
 import { ApprovalQueue } from './queue.js'
-import { TodoList } from './todo.js'
+import { CalendarStore } from './calendar-store.js'
 import { searchEventStore, markEventsDone } from './relay-client.js'
 import { readSettings, writeSettings } from './settings.js'
 import type { AgentSettings } from './settings.js'
 import type { AgentTrigger } from '@coagent/shared'
-import { searchFiles, readFileContent, readFileBase64, deleteFileEntry, getStorageStats, createDocument, updateDocumentContent, readDocumentContent, listFiles } from './file-store.js'
+import { searchFiles, readFileContent, readFileBase64, deleteFileEntry, getStorageStats, listFiles } from './file-store.js'
 import { embedTools, searchToolsByEmbedding, clearToolEmbeddings, setToolEmbeddingsDir } from './tool-embeddings.js'
-import { readIntegrationContext, writeIntegrationContext, readAllIntegrationContexts } from './integration-context.js'
+import { logToolCall, extractIntegration, searchToolLogs } from './service-logger.js'
+import { recordUsage } from './usage-tracker.js'
 import { getRelayConfig } from './auth.js'
 
 const HISTORY_WINDOW = 50        // total pool — recent + TF-IDF ranked
 
 // --- Skills ---
+const DEFAULT_SKILL_NAMES = new Set(['skill-creator'])
 interface Skill { name: string; description: string; instructions: string }
 
 async function skillsDir(dataDir: string): Promise<string> {
@@ -67,7 +69,7 @@ async function resolveSkillMentions(dataDir: string, message: string): Promise<s
   return resolved
 }
 const RECENT_KEEP = 15           // always keep this many recent messages (protects tool chains)
-const MAX_RANKED = 10            // max older messages TF-IDF can add from the remaining pool
+const MAX_RANKED = 0             // disabled — memory tools handle long-term context
 
 // --- TF-IDF history ranking ---
 
@@ -128,7 +130,7 @@ function rankByRelevance(
   })
 
   return scored
-    .filter(s => s.score > 0)
+    .filter(s => s.score > 0.1)
     .sort((a, b) => b.score - a.score)
     .slice(0, maxPick)
     .map(s => s.msg)
@@ -136,12 +138,19 @@ function rankByRelevance(
 
 const INTERNAL_TOOLS: Anthropic.Tool[] = [
   {
+    name: 'get_current_time',
+    description: 'Get the current date and time.',
+    input_schema: { type: 'object' as const, properties: {}, required: [] }
+  },
+  {
     name: 'search_tools',
-    description: 'Find tools by description. Use before calling any external service.',
+    description: 'Find tools by description. Use before calling any external service. Optionally search recent activity and memory for context.',
     input_schema: {
       type: 'object' as const,
       properties: {
-        query: { type: 'string', description: 'e.g. "send email", "create calendar event"' }
+        query: { type: 'string', description: 'e.g. "send email", "create calendar event"' },
+        context: { type: 'string', description: 'Semantic search recent tool logs, e.g. "real estate meeting" or "email from Alex"' },
+        memory_context: { type: 'string', description: 'Search long-term memory for context, e.g. "Brett project deadlines" or "Alex Morris contact"' }
       },
       required: ['query']
     }
@@ -153,12 +162,9 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
       type: 'object' as const,
       properties: {
         type: { type: 'string', enum: ['task', 'document', 'message', 'request', 'other'] },
-        title: { type: 'string' },
-        description: { type: 'string' },
-        detail: { type: 'string' },
-        notes: { type: 'string' },
-        action: { type: 'string' },
-        metadata: { type: 'object' }
+        title: { type: 'string' }, description: { type: 'string' },
+        detail: { type: 'string' }, notes: { type: 'string' },
+        action: { type: 'string' }, metadata: { type: 'object' }
       },
       required: ['type', 'title', 'description', 'notes', 'action']
     }
@@ -168,43 +174,8 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
     description: 'Log a completed action.',
     input_schema: {
       type: 'object' as const,
-      properties: {
-        description: { type: 'string' }
-      },
+      properties: { description: { type: 'string' } },
       required: ['description']
-    }
-  },
-  {
-    name: 'add_todo',
-    description: 'Add a task to the to-do list.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        task: { type: 'string' },
-        due: { type: 'string', description: 'YYYY-MM-DD or YYYY-MM-DDTHH:MM' },
-        priority: { type: 'string', enum: ['high', 'normal', 'low'] }
-      },
-      required: ['task']
-    }
-  },
-  {
-    name: 'complete_todo',
-    description: 'Complete a to-do item by ID.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        id: { type: 'string' }
-      },
-      required: ['id']
-    }
-  },
-  {
-    name: 'list_todos',
-    description: 'List all current to-do items.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {},
-      required: []
     }
   },
   {
@@ -213,181 +184,125 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
     input_schema: {
       type: 'object' as const,
       properties: {
-        name: { type: 'string' },
-        email: { type: 'string' },
-        timezone: { type: 'string' },
-        role: { type: 'string' },
-        active_hours: {
-          type: 'object',
-          properties: { start: { type: 'number' }, end: { type: 'number' } }
-        },
-        active_days: {
-          type: 'array',
-          items: { type: 'string', enum: ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] }
-        },
+        name: { type: 'string' }, email: { type: 'string' },
+        timezone: { type: 'string' }, role: { type: 'string' },
+        active_hours: { type: 'object', properties: { start: { type: 'number' }, end: { type: 'number' } } },
+        active_days: { type: 'array', items: { type: 'string', enum: ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] } },
         autonomy: { type: 'string', enum: ['ask_first', 'balanced', 'autonomous'] },
-        heartbeat_interval: { type: 'number', description: 'Minutes between heartbeats (0 to disable, e.g. 15, 30, 60, 120, 240)' }
+        heartbeat_interval: { type: 'number', description: 'Minutes between heartbeats (0 to disable)' }
       }
     }
   },
   {
-    name: 'list_files',
-    description: 'List all files, optionally filtered by folder. Returns id, filename, folder, and summary for each file.',
+    name: 'files',
+    description: 'Manage user files. Actions: list (optionally by folder), search (by query), read (by id), delete (by id), stats.',
     input_schema: {
       type: 'object' as const,
       properties: {
-        folder: { type: 'string', description: 'Filter by folder name (e.g. "Reports" or "Reports/Q1"). Omit to list all files.' }
-      }
-    }
-  },
-  {
-    name: 'search_files',
-    description: 'Search user files by query. Searches filenames, summaries, and folder names.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        query: { type: 'string' },
-        limit: { type: 'number' }
+        action: { type: 'string', enum: ['list', 'search', 'read', 'delete', 'stats'] },
+        id: { type: 'string', description: 'File ID (for read/delete)' },
+        query: { type: 'string', description: 'Search query (for search)' },
+        folder: { type: 'string', description: 'Filter by folder (for list)' },
+        limit: { type: 'number', description: 'Max results (for search)' }
       },
-      required: ['query']
+      required: ['action']
     }
   },
   {
-    name: 'read_file',
-    description: 'Read file content by ID.',
+    name: 'calendar',
+    description: 'Unified calendar for routines, tasks, and events. Actions: create (type+label+timing+instruction), update (id+fields), delete (id), complete (id — tasks only), list (optional type filter).',
     input_schema: {
       type: 'object' as const,
       properties: {
-        id: { type: 'string' }
+        action: { type: 'string', enum: ['create', 'update', 'delete', 'complete', 'list'] },
+        type: { type: 'string', enum: ['routine', 'task', 'event'], description: 'Entry type (for create)' },
+        id: { type: 'string', description: 'Entry ID (for update/delete/complete)' },
+        label: { type: 'string', description: 'Display name' },
+        cron: { type: 'string', description: 'Cron expression for routines, e.g. "0 9 * * 1-5"' },
+        due: { type: 'string', description: 'ISO datetime for tasks, e.g. "2026-03-28T14:30:00"' },
+        start: { type: 'string', description: 'ISO datetime for event start' },
+        end: { type: 'string', description: 'ISO datetime for event end' },
+        instruction: { type: 'string', description: 'What to execute when routine/task fires' },
+        enabled: { type: 'boolean', description: 'Enable/disable (default true)' },
+        filter_type: { type: 'string', enum: ['routine', 'task', 'event'], description: 'Filter for list action' },
       },
-      required: ['id']
+      required: ['action']
     }
   },
   {
-    name: 'delete_file',
-    description: 'Delete a file by ID. Only when user asks.',
+    name: 'skills',
+    description: 'Manage reusable skills. Actions: save (name/description/instructions required), list, delete (by name). Users invoke with @skill-name.',
     input_schema: {
       type: 'object' as const,
       properties: {
-        id: { type: 'string' }
+        action: { type: 'string', enum: ['save', 'list', 'delete'] },
+        name: { type: 'string', description: 'Kebab-case name (for save/delete)' },
+        description: { type: 'string', description: 'One-line description (for save)' },
+        instructions: { type: 'string', description: 'Full instructions (for save)' }
       },
-      required: ['id']
+      required: ['action']
     }
   },
   {
-    name: 'get_storage_stats',
-    description: 'Get file count, total size, largest files.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {},
-      required: []
-    }
-  },
-  {
-    name: 'create_document',
-    description: 'Create a document. Opens in side panel.',
+    name: 'memory',
+    description: 'Long-term memory. Prefer search (semantic) or grep (pattern match) over read (full file dump). Actions: search (by query), grep (file+pattern — returns matching lines), read (full file — use sparingly), write (file+content), edit (file+old_content+new_content), append (file+content), list, delete (by file).',
     input_schema: {
       type: 'object' as const,
       properties: {
-        title: { type: 'string' },
-        content: { type: 'string', description: 'Markdown content' },
-        group: { type: 'string' }
+        action: { type: 'string', enum: ['search', 'grep', 'read', 'write', 'edit', 'append', 'list', 'delete'] },
+        query: { type: 'string', description: 'Search query (for search)' },
+        pattern: { type: 'string', description: 'Text or regex pattern to match (for grep)' },
+        file: { type: 'string', description: 'Filename e.g. contacts.md (for grep/read/write/edit/append/delete)' },
+        content: { type: 'string', description: 'Content (for write/append)' },
+        old_content: { type: 'string', description: 'Content to replace (for edit)' },
+        new_content: { type: 'string', description: 'Replacement content (for edit)' },
+        category: { type: 'string', description: 'Filter category (for list)' },
+        top_k: { type: 'number', description: 'Number of results (for search, default 3)' }
       },
-      required: ['title', 'content']
-    }
-  },
-  {
-    name: 'open_document',
-    description: 'Open a document by ID.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        id: { type: 'string' }
-      },
-      required: ['id']
-    }
-  },
-  {
-    name: 'update_document',
-    description: 'Update a document. Pass "content" for full rewrite or "edits" for find-and-replace.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        id: { type: 'string' },
-        content: { type: 'string' },
-        edits: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: { old_text: { type: 'string' }, new_text: { type: 'string' } },
-            required: ['old_text', 'new_text']
-          }
-        }
-      },
-      required: ['id']
-    }
-  },
-  {
-    name: 'save_skill',
-    description: 'Create or update a reusable skill. Users invoke skills with @skill-name.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        name: { type: 'string', description: 'Lowercase kebab-case name (e.g. "weekly-report")' },
-        description: { type: 'string', description: 'One-line description shown when listing skills' },
-        instructions: { type: 'string', description: 'Full instructions/prompt the agent follows when this skill is invoked' },
-      },
-      required: ['name', 'description', 'instructions']
-    }
-  },
-  {
-    name: 'list_skills',
-    description: 'List all saved skills.',
-    input_schema: { type: 'object' as const, properties: {} }
-  },
-  {
-    name: 'delete_skill',
-    description: 'Delete a skill by name.',
-    input_schema: {
-      type: 'object' as const,
-      properties: { name: { type: 'string' } },
-      required: ['name']
-    }
-  },
-  {
-    name: 'update_integration_context',
-    description: 'Save or update your internal notes about a connected integration. These notes are automatically injected when you use that integration\'s tools, so you never forget how the user uses the service. Write freeform — whatever context will help you use the tools better (account info, contacts, preferences, patterns). Max 1000 chars.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        integration: { type: 'string', description: 'Integration slug e.g. "gmail", "slack", "googlesheets"' },
-        context: { type: 'string', description: 'Freeform notes about how the user uses this integration (max 1000 chars)' }
-      },
-      required: ['integration', 'context']
+      required: ['action']
     }
   },
 ]
 
+// Map consolidated memory actions → MCP tool names
+const MEMORY_MCP_MAP: Record<string, string> = {
+  search: 'search_memory', read: 'read_memory', write: 'write_memory',
+  edit: 'edit_memory', append: 'append_memory', list: 'list_memories', delete: 'delete_memory',
+}
+
+function mapMemoryParams(action: string, input: Record<string, unknown>): Record<string, unknown> {
+  switch (action) {
+    case 'search': return { query: input.query, topK: input.top_k ?? 3 }
+    case 'read': case 'delete': return { path: input.file }
+    case 'write': case 'append': return { path: input.file, content: input.content }
+    case 'edit': return { path: input.file, old_content: input.old_content, new_content: input.new_content }
+    case 'list': return input.category ? { category: input.category } : {}
+    default: return input
+  }
+}
+
 // --- Tool filtering by trigger context ---
 
-type ToolContext = 'heartbeat' | 'cleanup' | 'chat' | 'webhook'
+type ToolContext = 'heartbeat' | 'chat' | 'webhook'
 
 const TOOL_LABELS: Record<string, string> = {
+  get_current_time: 'Checking time',
   search_tools: 'Searching for tools',
   queue_approval: 'Adding to queue',
   add_done_item: 'Marking done',
-  add_todo: 'Adding to-do',
-  complete_todo: 'Completing to-do',
-  list_todos: 'Checking to-dos',
   update_settings: 'Updating settings',
-  update_integration_context: 'Saving integration notes',
-  search_files: 'Searching files',
-  read_file: 'Reading file',
-  delete_file: 'Deleting file',
-  get_storage_stats: 'Checking storage',
-  create_document: 'Creating document',
-  open_document: 'Opening document',
-  update_document: 'Updating document',
+  files: 'Managing files',
+  calendar: 'Managing calendar',
+  skills: 'Managing skills',
+  memory: 'Checking memory',
+}
+
+// Action-specific labels for consolidated tools
+const ACTION_LABELS: Record<string, Record<string, string>> = {
+  files: { list: 'Listing files', search: 'Searching files', read: 'Reading file', delete: 'Deleting file', stats: 'Checking storage' },
+  calendar: { create: 'Adding to calendar', update: 'Updating calendar entry', delete: 'Deleting calendar entry', complete: 'Completing task', list: 'Checking calendar' },
+  skills: { save: 'Saving skill', list: 'Listing skills', delete: 'Deleting skill' },
+  memory: { search: 'Searching memory', grep: 'Searching memory', read: 'Reading memory', write: 'Writing memory', edit: 'Editing memory', append: 'Updating memory', list: 'Listing memory', delete: 'Cleaning memory' },
 }
 
 // "GMAIL_FETCH_EMAILS" → "Gmail: Fetch emails"
@@ -415,44 +330,13 @@ function humanizeToolName(name: string): string {
 }
 
 const HEARTBEAT_TOOLS = new Set([
-  'add_done_item', 'add_todo', 'complete_todo', 'list_todos', 'queue_approval', 'list_skills', 'update_integration_context',
+  'get_current_time', 'add_done_item', 'calendar', 'queue_approval', 'skills', 'memory',
 ])
 
 function getInternalTools(context: ToolContext): Anthropic.Tool[] {
-  if (context === 'cleanup') return []
+
   if (context === 'heartbeat') return INTERNAL_TOOLS.filter(t => HEARTBEAT_TOOLS.has(t.name))
   return INTERNAL_TOOLS
-}
-
-function extractContentField(json: string, fieldName: string): string | null {
-  const marker = json.indexOf(`"${fieldName}"`)
-  if (marker === -1) return null
-  const colonPos = json.indexOf(':', marker + fieldName.length + 2)
-  if (colonPos === -1) return null
-  const quotePos = json.indexOf('"', colonPos + 1)
-  if (quotePos === -1) return null
-  return unescapePartialJsonString(json.slice(quotePos + 1))
-}
-
-function unescapePartialJsonString(s: string): string {
-  let result = '', i = 0
-  while (i < s.length) {
-    if (s[i] === '\\') {
-      if (i + 1 >= s.length) break
-      const c = s[i + 1]
-      if (c === 'n') { result += '\n'; i += 2 }
-      else if (c === 't') { result += '\t'; i += 2 }
-      else if (c === '"') { result += '"'; i += 2 }
-      else if (c === '\\') { result += '\\'; i += 2 }
-      else if (c === '/') { result += '/'; i += 2 }
-      else if (c === 'r') { result += '\r'; i += 2 }
-      else if (c === 'u' && i + 5 < s.length) {
-        result += String.fromCharCode(parseInt(s.slice(i + 2, i + 6), 16)); i += 6
-      } else break
-    } else if (s[i] === '"') break
-    else { result += s[i]; i++ }
-  }
-  return result
 }
 
 const AUTONOMY_DESCRIPTIONS: Record<string, string> = {
@@ -479,38 +363,9 @@ function buildSystemPrompt(connectedServices: string[], agentProfilePath: string
     ? `Connected external services: ${connectedServices.join(', ')}. Use search_tools to find the right tool before calling it.`
     : 'No external services are connected yet. If the user wants to connect tools, tell them to open Settings and connect their integrations.'
 
-  const connectedList = connectedServices.filter(s => s !== 'composio').join(', ')
-
-  const onboardingSection = isFirstRun ? `
-
-ONBOARDING — this user has not set up their profile yet.
-
-Start with this exact opening, then immediately ask the first question:
-"Hey, I'm CoAgent — your personal AI agent running privately on your machine. I work best once I know a bit about you, so let me ask a few quick questions.
-
-What do you do for work?"
-
-Then ask follow-up questions ONE AT A TIME based on what they share. Cover:
-1. What they do and who they work with (clients, team, solo?)
-2. What takes up most of their time or causes the most friction day-to-day
-3. What they'd most want an AI agent handling for them automatically${connectedList ? `\n4. Which of their connected tools (${connectedList}) they actually use daily and want monitored` : ''}
-5. How hands-off they want it — what should CoAgent just handle vs. always ask first
-
-Do NOT ask all questions at once. One question per message. Listen to their answers and ask smarter follow-ups — if they mention clients, ask about that. If they mention email overload, dig into that.
-
-When you have a clear picture, write their profile to agent.md and confirm you're set up:
-# [their name if given, otherwise "You"]
-**About**: [what they do, in their words]
-**Focus**: [top 1-2 things they want help with]
-
-## How I work
-- Handle automatically: [list]
-- Always ask first: [list]
-
-## What to monitor
-- [tool]: [what to watch for]
-
-End with: "Got it. I'll run in the background and surface anything that needs you."` : ''
+  const onboardingSection = isFirstRun
+    ? '\n\nONBOARDING: This is a new user. Read onboarding.md from memory and follow it exactly.'
+    : ''
 
   const formatHour = (h: number) => h === 24 ? 'midnight' : h === 0 ? '12am' : h < 12 ? `${h}am` : h === 12 ? '12pm' : `${h - 12}pm`
 
@@ -528,45 +383,29 @@ Current settings:
 
   return `You are CoAgent — a private AI agent running on the user's machine. Help with anything asked. Never refuse by saying something is outside your scope.
 
-File references: When listing files from list_files or search_files, show them as a plain text list (e.g. "- report.md — summary"). Do NOT use coagent-file: links for listings. Only use [filename](coagent-file:FILE_ID) when the user asks to open or view a specific single file. Don't paste file content unless asked.
-
-File attachments: To attach files to emails/messages, add "coagent_file_ids": ["FILE_ID"] to the tool input. The system resolves these to base64 automatically.
-
-Skills: Users invoke skills with @skill-name. When invoked, the skill's instructions appear in the message. You can create skills with save_skill when the user asks (e.g. "make a skill that drafts weekly reports"). Keep skill instructions clear and specific.
-
-Document tools: Use create_document for substantial content (emails, reports). Use update_document to revise — always pushes to the editing panel. Don't use for short answers.
-
-Integration context: You have an update_integration_context tool. Only use it to save important, reusable knowledge about how the user works with a service — preferences, patterns, key contacts, account structure. Examples:
-- "Brett prefers short emails, always CC sarah@..."
-- "#leads channel is for new incoming leads, #general is casual"
-- "Google Calendar: work events go on 'Work' calendar, personal on 'Personal'"
-Do NOT update context for routine actions (sending a single email, reading messages, creating one event). Only update when you learn something new about how the user uses the service. Max 1000 chars per integration. Rewrite the full context each time (keep it current and relevant).
-
 ${serviceSection}
-
 ${settingsSection}
+Skills: Users invoke with @skill-name. When invoked, the skill's instructions appear in the message.
 
-Memory: Your long-term brain — history only shows recent messages. Write things down immediately: names, dates, preferences, project details, decisions. If unsure whether to save, save it. Always search memory before saying you don't know. Files: setup.md (read-only), agent.md (user profile), routines.md (heartbeat instructions), preferences.md, contacts.md, projects.md. Read on startup/heartbeats. Update when you learn something new. Delete stale files.
+File listings: plain text (e.g. "- report.md — summary"). Only use [filename](coagent-file:FILE_ID) when asked to open a specific file. To attach files to emails, add "coagent_file_ids": ["FILE_ID"] to tool input.
+
+Memory: your long-term brain — history only shows recent messages. Use the memory tool directly (NOT search_tools). Prefer search (semantic) or grep (pattern match within a file) over read (dumps entire file). Only use read when you need the full file. Write things down immediately: names, dates, preferences, decisions. If unsure whether to save, save it. Always search memory before saying you don't know. Files: setup.md (read-only), agent.md, routines.md, preferences.md, contacts.md, projects.md. Update when you learn something new. Delete stale entries.
 
 Routine tasks: act, then add_done_item. High-stakes actions: queue_approval with full draft in "detail" and recipient/subject in "metadata".
-On heartbeat: read routines.md, check due tasks, check pending queue. Only surface what's relevant right now. If nothing needs attention, reply "All clear." immediately.
+On heartbeat: use memory tool (action: read, file: routines.md) to check routines, use calendar (action: list) to check routines and tasks, check queue. If nothing needs attention, reply "All clear." immediately.
 
-Keep responses concise. No emojis. Markdown only when helpful.${onboardingSection}`
+- **calendar** (create/update/delete/complete/list) — unified calendar for routines (recurring cron), tasks (one-time due), and events (informational).
+
+When you need multiple independent pieces of information, call all the tools in a single response (e.g. read memory + use calendar (action: list) to check routines and tasks + check time in one turn). This is faster and cheaper.
+
+Concise responses. No emojis. Markdown only when helpful.${onboardingSection}`
 }
 
 export class Agent {
   private anthropic: Anthropic
   public mcpManager: MCPManager
   public queue: ApprovalQueue
-  public todos: TodoList
-  public onDocumentEvent?: (event:
-    | { type: 'opened'; id: string; filename: string; content: string }
-    | { type: 'updated'; id: string; content: string }
-  ) => void
-  public onDocumentStream?: (event:
-    | { type: 'start'; filename: string }
-    | { type: 'chunk'; text: string }
-  ) => void
+  public calendar: CalendarStore
   private conversationHistory: Anthropic.MessageParam[] = []
   private historyPath: string
   private agentProfilePath: string
@@ -576,8 +415,10 @@ export class Agent {
   private stopped = false
   private missedEvents: { source: string; payload: unknown; time: string }[] = []
   private steeringQueue: string[] = []
+  // Briefings removed — context now provided via search_tools context param
   public onSkillsChanged?: () => void
   public onSettingsChanged?: () => void
+  public onCalendarChanged?: () => void
 
   async getSkills(): Promise<{ name: string; description: string }[]> {
     return (await listSkills(this.dataDir)).map(s => ({ name: s.name, description: s.description }))
@@ -604,7 +445,7 @@ export class Agent {
     this.anthropic = this.createClient()
     this.mcpManager = new MCPManager()
     this.queue = new ApprovalQueue(dataDir)
-    this.todos = new TodoList(dataDir)
+    this.calendar = new CalendarStore(dataDir)
     this.dataDir = dataDir
     this.historyPath = join(dataDir, 'conversation.json')
     this.agentProfilePath = join(dataDir, 'memory', 'agent.md')
@@ -666,13 +507,17 @@ export class Agent {
     return result
   }
 
-  async handleTrigger(trigger: AgentTrigger & { content?: string }): Promise<void> {
+  async handleTrigger(
+    trigger: AgentTrigger & { content?: string },
+    onChunk?: (text: string) => void,
+    onToolCall?: (tool: string, label: string) => void
+  ): Promise<void> {
     const isHeartbeat = trigger.source === 'heartbeat'
-    const isCleanup = trigger.source === 'memory_cleanup'
+    const isTodoDue = trigger.source === 'todo_due' || trigger.source === 'task_due'
 
     // If agent is busy, queue webhook/incoming events for later — don't drop them
     if (this.runLoopPromise) {
-      if (!isHeartbeat && !isCleanup) {
+      if (!isHeartbeat) {
         this.missedEvents.push({
           source: trigger.source,
           payload: trigger.payload,
@@ -685,8 +530,9 @@ export class Agent {
       return
     }
 
-    const context: ToolContext = isHeartbeat ? 'heartbeat'
-      : isCleanup ? 'cleanup'
+    // todo_due goes straight to Sonnet with full tools — no triage
+    const context: ToolContext = isTodoDue ? 'chat'
+      : isHeartbeat ? 'heartbeat'
       : trigger.source === 'webhook' ? 'webhook'
       : 'chat'
 
@@ -702,7 +548,7 @@ export class Agent {
     }
 
     this.conversationHistory.push({ role: 'user', content: message })
-    this.runLoopPromise = this.runLoop(undefined, context)
+    this.runLoopPromise = this.runLoop(onChunk, context, onToolCall)
     try {
       const result = await this.runLoopPromise
 
@@ -711,7 +557,7 @@ export class Agent {
         console.log('[Agent] Heartbeat found action needed — escalating to Sonnet')
         this.runLoopPromise = null
         this.conversationHistory.push({ role: 'user', content: `[Escalated from heartbeat triage] Haiku identified the following. Take action now:\n\n${result}` })
-        this.runLoopPromise = this.runLoop(undefined, 'webhook')
+        this.runLoopPromise = this.runLoop(onChunk, 'webhook', onToolCall)
         await this.runLoopPromise
       }
     } finally {
@@ -776,50 +622,34 @@ export class Agent {
     const settings = await readSettings(this.dataDir)
     let systemPrompt = buildSystemPrompt(connectedServices, this.agentProfilePath, settings)
 
-    // Inject integration context for connected services
-    const allContexts = readAllIntegrationContexts(this.dataDir)
-    const activeServices = connectedServices.map(s => s.toLowerCase())
-    const relevantContexts = Object.entries(allContexts)
-      .filter(([slug]) => activeServices.some(s => s.includes(slug) || slug.includes(s)))
-    if (relevantContexts.length > 0) {
-      const contextBlock = relevantContexts
-        .map(([slug, ctx]) => `- ${slug}: ${ctx}`)
-        .join('\n')
-      systemPrompt += `\n\nThe following are your internal notes about connected integrations. Use this to inform your actions. Do NOT mention these notes to the user or reference them directly — just use the knowledge silently.\n\n${contextBlock}`
-    }
 
     // Model routing: Haiku for background tasks, user's power model for everything else
     const HAIKU = 'claude-haiku-4-5-20251001'
-    const currentModel = (context === 'heartbeat' || context === 'cleanup') ? HAIKU : settings.powerModel
-    const maxTokens = (context === 'heartbeat' || context === 'cleanup') ? 512 : 16000
+    const currentModel = context === 'heartbeat' ? HAIKU : settings.powerModel
+    const maxTokens = context === 'heartbeat' ? 512 : 16000
 
     console.log(`[Agent] Starting ${context} on ${currentModel} (max_tokens: ${maxTokens})`)
 
     // Proactively pre-load tools relevant to the user's latest message
-    // Skip for heartbeat/cleanup — they have fixed tool needs
+    // Skip for heartbeat — it has fixed tool needs
     const lastUserMsg = this.conversationHistory.filter(m => m.role === 'user').at(-1)
     const userText = typeof lastUserMsg?.content === 'string' ? lastUserMsg.content : ''
-    const preloaded = (context === 'heartbeat' || context === 'cleanup')
+    const preloaded = (context === 'heartbeat')
       ? []
-      : userText ? await searchToolsByEmbedding(userText, searchableTools, 5) : []
+      : userText ? await searchToolsByEmbedding(userText, searchableTools, 3) : []
 
-    // Cache the stable prefix (system prompt + memory tools + internal tools).
-    // Preloaded tools are dynamic — they come after the cache boundary.
-    // Skip caching for heartbeat/cleanup — they run too infrequently to benefit.
-    const isBackground = context === 'heartbeat' || context === 'cleanup'
+    // Cache only truly stable tools (internal tools — never change between messages).
+    // Preloaded Composio tools go outside the cache — they change per message based on
+    // embedding search, so caching them causes expensive cache writes that never get read.
+    // Skip caching for heartbeat — runs too infrequently to benefit.
+    const isBackground = context === 'heartbeat'
     const contextTools = getInternalTools(context)
-    const stableTools = [
-      ...memoryTools,
-      ...(contextTools.length > 0
-        ? contextTools.map((t, i) =>
-            i === contextTools.length - 1 && !isBackground ? { ...t, cache_control: { type: 'ephemeral' as const, ttl: '1h' } } : t
-          )
-        : [])
-    ]
-    // If no internal tools, put cache boundary on last memory tool instead
-    if (!isBackground && contextTools.length === 0 && stableTools.length > 0) {
-      stableTools[stableTools.length - 1] = { ...stableTools[stableTools.length - 1], cache_control: { type: 'ephemeral' as const, ttl: '1h' } } as any
-    }
+    // Memory tools are now handled by the consolidated 'memory' internal tool — no raw MCP tools sent to Claude
+    const stableTools = contextTools.length > 0
+      ? contextTools.map((t, i) =>
+          i === contextTools.length - 1 && !isBackground ? { ...t, cache_control: { type: 'ephemeral' as const, ttl: '1h' } } : t
+        )
+      : []
     const dynamicTools: Anthropic.Tool[] = [...preloaded]
     const loadedToolNames = new Set([...stableTools, ...preloaded].map(t => t.name))
 
@@ -830,7 +660,6 @@ export class Agent {
     let finalText = ''
     let turn = 0
     let lastText = ''
-    const filenameLookup = new Map((await listFiles(this.dataDir)).map(f => [f.id, f.filename]))
 
     this.stopped = false
 
@@ -873,68 +702,12 @@ export class Agent {
               ? [{ type: 'text', text: systemPrompt }]
               : [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral', ttl: '1h' } as any }],
             tools: activeTools as any,
-            messages: this.sanitizeHistory(this.selectHistory(userText)) as any,
+            messages: this.compactToolResults(this.sanitizeHistory(this.selectHistory(userText))) as any,
             ...(isBackground ? {} : { cache_control: { type: 'ephemeral', ttl: '1h' } as any }),
           } as any)
           this.activeStream = stream
           stream.on('text', (text) => {
             try { onChunk?.(text) } catch (err) { console.error('[Agent] onChunk error:', err) }
-          })
-
-          // Document streaming — detect create/update tool blocks and stream content
-          let docBlockIndex = -1
-          let docJson = ''
-          let docContentSent = 0
-          let docStartSent = false
-
-          stream.on('streamEvent', (event: any) => {
-            if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
-              const name = event.content_block.name
-              console.log(`[DocStream] content_block_start: tool_use name=${name}`)
-              if (name === 'create_document' || name === 'update_document') {
-                docBlockIndex = event.index
-                docJson = ''
-                docContentSent = 0
-                docStartSent = false
-                // Open the panel immediately with a placeholder name
-                this.onDocumentStream?.({ type: 'start', filename: 'Document' })
-                docStartSent = true
-                console.log('[DocStream] Sent document_stream_start')
-              }
-            }
-
-            if (event.type === 'content_block_delta' &&
-                event.index === docBlockIndex &&
-                event.delta?.type === 'input_json_delta') {
-              docJson += event.delta.partial_json
-
-              // Refine the filename once we can extract title or id
-              if (docStartSent && docContentSent === 0) {
-                const titleField = extractContentField(docJson, 'title')
-                const idField = extractContentField(docJson, 'id')
-                if (titleField) {
-                  this.onDocumentStream?.({ type: 'start', filename: titleField + '.md' })
-                  console.log(`[DocStream] Refined filename: ${titleField}.md`)
-                } else if (idField) {
-                  const fn = filenameLookup.get(idField) ?? 'Document'
-                  this.onDocumentStream?.({ type: 'start', filename: fn })
-                  console.log(`[DocStream] Refined filename by id: ${fn}`)
-                }
-              }
-
-              const content = extractContentField(docJson, 'content')
-              if (content && content.length > docContentSent) {
-                const chunk = content.slice(docContentSent)
-                console.log(`[DocStream] Sending chunk: +${chunk.length} chars (total ${content.length})`)
-                this.onDocumentStream?.({ type: 'chunk', text: chunk })
-                docContentSent = content.length
-              }
-            }
-
-            if (event.type === 'content_block_stop' && event.index === docBlockIndex) {
-              console.log(`[DocStream] content_block_stop — total content streamed: ${docContentSent} chars`)
-              docBlockIndex = -1
-            }
           })
 
           response = await stream.finalMessage()
@@ -944,6 +717,15 @@ export class Agent {
           const cacheWrite = u.cache_creation_input_tokens ?? 0
           const cacheInfo = cacheHit > 0 ? ` (${cacheHit} cached)` : cacheWrite > 0 ? ` (${cacheWrite} cache write)` : ''
           console.log(`[Agent] Turn ${turn} — ${response.stop_reason} — ${Date.now() - t0}ms — ${response.usage.input_tokens} in${cacheInfo} / ${response.usage.output_tokens} out tokens`)
+          recordUsage(this.dataDir, {
+            category: 'chat',
+            model: currentModel,
+            inputTokens: response.usage.input_tokens,
+            outputTokens: response.usage.output_tokens,
+            cacheReadTokens: u.cache_read_input_tokens ?? 0,
+            cacheCreationTokens: u.cache_creation_input_tokens ?? 0,
+            timestamp: new Date().toISOString(),
+          }).catch(() => {})
           break
         } catch (err: any) {
           this.activeStream = null
@@ -995,13 +777,20 @@ export class Agent {
           if (block.type !== 'tool_use') continue
 
           if (onToolCall) {
-            const label = TOOL_LABELS[block.name] ?? humanizeToolName(block.name)
+            const inputAction = (block.input as Record<string, unknown>).action as string | undefined
+            const label = (inputAction && ACTION_LABELS[block.name]?.[inputAction])
+              ?? TOOL_LABELS[block.name]
+              ?? humanizeToolName(block.name)
             onToolCall(block.name, label)
           }
 
           let result: string
 
-          if (block.name === 'search_tools') {
+          if (block.name === 'get_current_time') {
+            const now = new Date()
+            result = now.toLocaleString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit', timeZoneName: 'short' })
+
+          } else if (block.name === 'search_tools') {
             searchToolCalls++
             if (searchToolCalls > 3) {
               result = 'You have enough tools loaded. Use what you have.'
@@ -1010,7 +799,8 @@ export class Agent {
               })
               continue
             }
-            const query = (block.input as { query: string }).query
+            const input = block.input as { query: string; context?: string; memory_context?: string }
+            const query = input.query
             const matches = await searchToolsByEmbedding(query, searchableTools)
 
             if (matches.length === 0) {
@@ -1025,7 +815,40 @@ export class Agent {
               result = `Found ${matches.length} tools for "${query}" — now available to call:\n` +
                 matches.map(t => `- ${t.name}: ${t.description ?? ''}`).join('\n')
             }
-            console.log(`[Agent] search_tools("${query}") → ${matches.map(t => t.name).join(', ')}`)
+
+            // Run context and memory_context searches in parallel
+            const [logResults, memResults] = await Promise.all([
+              input.context
+                ? searchToolLogs(this.dataDir, input.context)
+                : Promise.resolve(null),
+              input.memory_context
+                ? this.mcpManager.callTool('memory', 'search_memory', { query: input.memory_context, top_k: 3 })
+                    .then(raw => {
+                      // Trim each result to ~1 line for concise context
+                      return raw.split('\n\n')
+                        .filter((s: string) => s.trim().length > 0)
+                        .slice(0, 3)
+                        .map((s: string) => s.length > 150 ? s.slice(0, 150) + '…' : s)
+                    })
+                    .catch(() => null)
+                : Promise.resolve(null),
+            ])
+
+            if (logResults && logResults.length > 0) {
+              result += `\n\nRecent activity:\n` +
+                logResults.map(l => `- ${l}`).join('\n')
+            } else if (input.context) {
+              result += `\n\nNo recent activity matching "${input.context}".`
+            }
+
+            if (memResults && memResults.length > 0) {
+              result += `\n\nFrom memory:\n` +
+                memResults.map((m: string) => `- ${m}`).join('\n')
+            } else if (input.memory_context) {
+              result += `\n\nNo memory matches for "${input.memory_context}".`
+            }
+
+            console.log(`[Agent] search_tools("${query}"${input.context ? `, context: "${input.context}"` : ''}${input.memory_context ? `, memory: "${input.memory_context}"` : ''}) → ${matches.map(t => t.name).join(', ')}`)
 
           } else if (block.name === 'queue_approval') {
             this.queue.add(block.input as Parameters<ApprovalQueue['add']>[0])
@@ -1035,165 +858,173 @@ export class Agent {
             this.queue.addDone((block.input as { description: string }).description)
             result = 'Added to done list.'
 
-          } else if (block.name === 'add_todo') {
-            const input = block.input as { task: string; due?: string; priority?: 'high' | 'normal' | 'low' }
-            const item = this.todos.add({ task: input.task, due: input.due, priority: input.priority ?? 'normal' })
-            result = `Added to-do: "${item.task}" (id: ${item.id})`
-
-          } else if (block.name === 'complete_todo') {
-            const { id } = block.input as { id: string }
-            const item = this.todos.complete(id)
-            result = item ? `Completed: "${item.task}"` : `Todo ${id} not found.`
-
-          } else if (block.name === 'list_todos') {
-            const items = this.todos.getAll()
-            if (items.length === 0) {
-              result = 'No to-do items.'
-            } else {
-              result = items.map(t =>
-                `[${t.id}] ${t.task}${t.due ? ` (due: ${t.due})` : ''}${t.priority !== 'normal' ? ` [${t.priority}]` : ''}`
-              ).join('\n')
-            }
-
           } else if (block.name === 'update_settings') {
             const patch = block.input as Partial<AgentSettings>
             await writeSettings(this.dataDir, patch)
             result = 'Settings updated.'
             this.onSettingsChanged?.()
 
-          } else if (block.name === 'list_files') {
-            const { folder } = block.input as { folder?: string }
-            const files = await listFiles(this.dataDir)
-            const folderLower = folder?.toLowerCase()
-            const filtered = folderLower
-              ? files.filter(f => f.group.toLowerCase() === folderLower || f.group.toLowerCase().startsWith(`${folderLower}/`))
-              : files
-            console.log(`[Agent] list_files(folder=${folder ?? 'all'}) → ${filtered.length}/${files.length} files`)
-            if (filtered.length === 0) {
-              result = folder ? `No files in folder "${folder}". Available folders: ${[...new Set(files.map(f => f.group).filter(Boolean))].join(', ')}` : 'No files stored yet.'
+          } else if (block.name === 'calendar') {
+            const input = block.input as Record<string, any>
+            const action = input.action as string
+
+            if (action === 'create') {
+              const entry = this.calendar.create({
+                type: input.type || 'task',
+                label: input.label || 'Untitled',
+                cron: input.cron,
+                due: input.due,
+                start: input.start,
+                end: input.end,
+                instruction: input.instruction,
+                enabled: input.enabled ?? true,
+              })
+              result = `Created ${entry.type}: "${entry.label}" (${entry.id})`
+              this.onCalendarChanged?.()
+            } else if (action === 'update') {
+              const { id, action: _, ...patch } = input
+              const entry = this.calendar.update(id, patch)
+              result = entry ? `Updated: "${entry.label}"` : `Entry ${id} not found.`
+              this.onCalendarChanged?.()
+            } else if (action === 'delete') {
+              const ok = this.calendar.delete(input.id)
+              result = ok ? 'Deleted.' : `Entry ${input.id} not found.`
+              this.onCalendarChanged?.()
+            } else if (action === 'complete') {
+              const entry = this.calendar.complete(input.id)
+              result = entry ? `Completed: "${entry.label}"` : `Task ${input.id} not found.`
+              this.onCalendarChanged?.()
+            } else if (action === 'list') {
+              const entries = input.filter_type
+                ? this.calendar.getByType(input.filter_type)
+                : this.calendar.getAll()
+              if (entries.length === 0) {
+                result = 'No calendar entries.'
+              } else {
+                result = entries.map((e: any) => {
+                  const timing = e.cron || e.due || (e.start && e.end ? `${e.start} → ${e.end}` : e.start) || 'no time'
+                  const status = e.completed ? ' ✓' : e.enabled ? '' : ' (disabled)'
+                  return `[${e.type}] ${e.label} — ${timing}${status} (${e.id})`
+                }).join('\n')
+              }
             } else {
-              result = filtered.map(f =>
-                `[id:${f.id}] ${f.group ? f.group + '/' : ''}${f.filename} — ${f.summary}`
-              ).join('\n')
+              result = `Unknown calendar action: ${action}`
             }
 
-          } else if (block.name === 'search_files') {
-            const { query, limit } = block.input as { query: string; limit?: number }
-            const files = await searchFiles(this.dataDir, query, limit ?? 5)
-            if (files.length === 0) {
-              result = 'No files found matching that query.'
-            } else {
-              result = files.map(f =>
+          } else if (block.name === 'files') {
+            const input = block.input as { action: string; id?: string; query?: string; folder?: string; limit?: number }
+            if (input.action === 'list') {
+              const files = await listFiles(this.dataDir)
+              const folderLower = input.folder?.toLowerCase()
+              const filtered = folderLower
+                ? files.filter(f => f.group.toLowerCase() === folderLower || f.group.toLowerCase().startsWith(`${folderLower}/`))
+                : files
+              console.log(`[Agent] files(list, folder=${input.folder ?? 'all'}) → ${filtered.length}/${files.length} files`)
+              result = filtered.length === 0
+                ? (input.folder ? `No files in folder "${input.folder}". Available folders: ${[...new Set(files.map(f => f.group).filter(Boolean))].join(', ')}` : 'No files stored yet.')
+                : filtered.map(f => `[id:${f.id}] ${f.group ? f.group + '/' : ''}${f.filename} — ${f.summary}`).join('\n')
+            } else if (input.action === 'search') {
+              const files = await searchFiles(this.dataDir, input.query!, input.limit ?? 5)
+              result = files.length === 0 ? 'No files found matching that query.' : files.map(f =>
                 `[id:${f.id}] [${f.group}] ${f.filename} — ${f.summary}`
               ).join('\n')
+            } else if (input.action === 'read') {
+              try { result = await readFileContent(this.dataDir, input.id!) } catch (err: any) { result = `Error reading file: ${err.message}` }
+            } else if (input.action === 'delete') {
+              await deleteFileEntry(this.dataDir, input.id!)
+              result = 'File deleted.'
+            } else {
+              try {
+                const stats = await getStorageStats(this.dataDir)
+                const mb = (stats.totalBytes / 1024 / 1024).toFixed(1)
+                const largestPart = stats.largestFiles.length > 0
+                  ? `\nLargest: ${stats.largestFiles.map(f => `${f.filename} (${(f.sizeBytes / 1024).toFixed(0)}KB)`).join(', ')}`
+                  : ''
+                result = `${stats.totalFiles} files, ${mb} MB total.${largestPart}`
+              } catch (err: any) { result = `Error getting storage stats: ${err.message}` }
             }
 
-          } else if (block.name === 'read_file') {
-            const { id } = block.input as { id: string }
-            try {
-              result = await readFileContent(this.dataDir, id)
-            } catch (err: any) {
-              result = `Error reading file: ${err.message}`
-            }
-
-          } else if (block.name === 'delete_file') {
-            const { id } = block.input as { id: string }
-            await deleteFileEntry(this.dataDir, id)
-            result = 'File deleted.'
-
-          } else if (block.name === 'get_storage_stats') {
-            try {
-              const stats = await getStorageStats(this.dataDir)
-              const mb = (stats.totalBytes / 1024 / 1024).toFixed(1)
-              const largestPart = stats.largestFiles.length > 0
-                ? `\nLargest: ${stats.largestFiles.map(f => `${f.filename} (${(f.sizeBytes / 1024).toFixed(0)}KB)`).join(', ')}`
-                : ''
-              result = `${stats.totalFiles} files, ${mb} MB total.${largestPart}`
-            } catch (err: any) {
-              result = `Error getting storage stats: ${err.message}`
-            }
-
-          } else if (block.name === 'create_document') {
-            try {
-              const { title, content, group } = block.input as { title: string; content: string; group?: string }
-              const entry = await createDocument(this.dataDir, title, content, group)
-              const docContent = await readDocumentContent(this.dataDir, entry.id)
-              this.onDocumentEvent?.({ type: 'opened', id: entry.id, filename: entry.filename, content: docContent })
-              result = `Document created: ${entry.filename} (id: ${entry.id})`
-            } catch (err: any) {
-              result = `Error creating document: ${err.message}`
-            }
-
-          } else if (block.name === 'open_document') {
-            try {
-              const { id } = block.input as { id: string }
-              const docContent = await readDocumentContent(this.dataDir, id)
-              const files = await listFiles(this.dataDir)
-              const file = files.find(f => f.id === id)
-              this.onDocumentEvent?.({ type: 'opened', id, filename: file?.filename ?? 'Document', content: docContent })
-              result = `Opened document: ${file?.filename ?? id}`
-            } catch (err: any) {
-              result = `Error opening document: ${err.message}`
-            }
-
-          } else if (block.name === 'update_document') {
-            try {
-              const { id, content, edits } = block.input as { id: string; content?: string; edits?: { old_text: string; new_text: string }[] }
-              let finalContent: string
-              if (edits && edits.length > 0) {
-                // Surgical edit mode — read current content and apply find-and-replace
-                const current = await readDocumentContent(this.dataDir, id)
-                finalContent = current
-                let editError = ''
-                for (const edit of edits) {
-                  if (!finalContent.includes(edit.old_text)) {
-                    editError = `Edit failed: could not find "${edit.old_text.slice(0, 60)}..." in document`
-                    break
-                  }
-                  finalContent = finalContent.replace(edit.old_text, edit.new_text)
-                }
-                if (editError) {
-                  result = editError
-                } else {
-                  const entry = await updateDocumentContent(this.dataDir, id, finalContent)
-                  this.onDocumentEvent?.({ type: 'opened', id: entry.id, filename: entry.filename, content: finalContent })
-                  result = `Document updated (${edits.length} edit${edits.length > 1 ? 's' : ''} applied): ${entry.filename}`
-                }
-              } else if (content) {
-                finalContent = content
-                const entry = await updateDocumentContent(this.dataDir, id, finalContent)
-                this.onDocumentEvent?.({ type: 'opened', id: entry.id, filename: entry.filename, content: finalContent })
-                result = `Document updated: ${entry.filename}`
+          } else if (block.name === 'skills') {
+            const input = block.input as { action: string; name?: string; description?: string; instructions?: string }
+            if (input.action === 'save') {
+              const safeName = input.name!.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-')
+              if (DEFAULT_SKILL_NAMES.has(safeName)) {
+                result = `Cannot overwrite built-in skill @${safeName}. It ships with the app and is read-only.`
               } else {
-                result = 'Error: provide either "content" or "edits"'
+                await saveSkill(this.dataDir, { name: safeName, description: input.description!, instructions: input.instructions! })
+                result = `Skill saved: @${safeName} — "${input.description}"`
+                this.onSkillsChanged?.()
               }
-            } catch (err: any) {
-              result = `Error updating document: ${err.message}`
+            } else if (input.action === 'delete') {
+              if (DEFAULT_SKILL_NAMES.has(input.name!)) {
+                result = `Cannot delete built-in skill @${input.name}. It ships with the app and is read-only.`
+              } else {
+                const deleted = await deleteSkill(this.dataDir, input.name!)
+                result = deleted ? `Skill @${input.name} deleted.` : `Skill @${input.name} not found.`
+                if (deleted) this.onSkillsChanged?.()
+              }
+            } else {
+              const allSkills = await listSkills(this.dataDir)
+              result = allSkills.length === 0 ? 'No skills saved yet.' : allSkills.map(s => `@${s.name} — ${s.description}`).join('\n')
             }
 
-          } else if (block.name === 'save_skill') {
-            const { name, description, instructions } = block.input as { name: string; description: string; instructions: string }
-            const safeName = name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-')
-            await saveSkill(this.dataDir, { name: safeName, description, instructions })
-            result = `Skill saved: @${safeName} — "${description}"`
-            this.onSkillsChanged?.()
+          } else if (block.name === 'memory') {
+            const input = block.input as Record<string, unknown>
+            const action = input.action as string
 
-          } else if (block.name === 'list_skills') {
-            const skills = await listSkills(this.dataDir)
-            result = skills.length === 0
-              ? 'No skills saved yet.'
-              : skills.map(s => `@${s.name} — ${s.description}`).join('\n')
+            if (action === 'grep') {
+              // Pattern match within a memory file — returns matching lines + context
+              try {
+                const fullContent = await this.mcpManager.callTool('memory', 'read_memory', { path: input.file })
+                const pattern = input.pattern as string
+                const lines = fullContent.split('\n')
+                const regex = new RegExp(pattern, 'i')
+                const CONTEXT_LINES = 2
+                const matchedIndices = new Set<number>()
 
-          } else if (block.name === 'delete_skill') {
-            const { name } = block.input as { name: string }
-            const deleted = await deleteSkill(this.dataDir, name)
-            result = deleted ? `Skill @${name} deleted.` : `Skill @${name} not found.`
-            if (deleted) this.onSkillsChanged?.()
+                for (let i = 0; i < lines.length; i++) {
+                  if (regex.test(lines[i])) {
+                    for (let j = Math.max(0, i - CONTEXT_LINES); j <= Math.min(lines.length - 1, i + CONTEXT_LINES); j++) {
+                      matchedIndices.add(j)
+                    }
+                  }
+                }
 
-          } else if (block.name === 'update_integration_context') {
-            const { integration, context } = block.input as { integration: string; context: string }
-            writeIntegrationContext(this.dataDir, integration, context)
-            result = `Integration context updated for ${integration}.`
+                if (matchedIndices.size === 0) {
+                  result = `No matches for "${pattern}" in ${input.file}.`
+                } else {
+                  const sorted = [...matchedIndices].sort((a, b) => a - b)
+                  const chunks: string[] = []
+                  let chunk: string[] = []
+                  let lastIdx = -10
+                  for (const idx of sorted) {
+                    if (idx > lastIdx + 1 && chunk.length > 0) {
+                      chunks.push(chunk.join('\n'))
+                      chunk = []
+                    }
+                    chunk.push(lines[idx])
+                    lastIdx = idx
+                  }
+                  if (chunk.length > 0) chunks.push(chunk.join('\n'))
+                  result = chunks.join('\n---\n')
+                  console.log(`[Agent] memory grep "${pattern}" in ${input.file} — ${matchedIndices.size} lines matched (${result.length} chars vs ${fullContent.length} full)`)
+                }
+              } catch (err: any) {
+                result = `Memory error: ${err.message}`
+              }
+            } else {
+              const mcpTool = MEMORY_MCP_MAP[action]
+              if (!mcpTool) {
+                result = `Unknown memory action: ${action}`
+              } else {
+                try {
+                  const params = mapMemoryParams(action, input)
+                  result = await this.mcpManager.callTool('memory', mcpTool, params)
+                } catch (err: any) {
+                  result = `Memory error: ${err.message}`
+                }
+              }
+            }
 
           } else {
             const serverName = serverMap.get(block.name)
@@ -1233,6 +1064,11 @@ export class Agent {
                 result = raw.length > MAX_TOOL_RESULT
                   ? raw.slice(0, MAX_TOOL_RESULT) + `\n\n[Truncated: ${raw.length - MAX_TOOL_RESULT} chars omitted from history to save context]`
                   : raw
+                // Auto-log tool call for pattern extraction (3 AM)
+                logToolCall(this.dataDir, serverName, block.name, toolInput)
+
+                // Context for integrations is now provided via search_tools context param
+                // (greps tool logs) — no more briefing injection
               }
             }
           }
@@ -1269,44 +1105,100 @@ export class Agent {
   private buildTriggerMessage(trigger: AgentTrigger): string {
     const time = new Date().toLocaleString('en-US', { timeStyle: 'short', dateStyle: 'medium' })
     if (trigger.source === 'heartbeat') {
-      const due = this.todos.getDue()
+      // Only show overdue tasks. Future timed tasks have their own precise timers
+      // (task_due trigger) — don't let heartbeat surface them early.
+      const due = this.calendar.getTasksDue().filter(t => {
+        if (!t.due) return true // untimed tasks always show
+        // Only show if actually past due, not just "due today"
+        const dueTime = new Date(t.due)
+        return dueTime <= new Date()
+      })
       const dueSection = due.length > 0
-        ? `\n\nDue tasks:\n${due.map(t => `- [${t.id}] ${t.task}${t.due ? ` (due: ${t.due})` : ''}`).join('\n')}`
+        ? `\n\nOverdue/untimed tasks:\n${due.map(t => `- [${t.id}] ${t.label}${t.due ? ` (due: ${t.due})` : ''}`).join('\n')}`
         : ''
       const dayName = new Date().toLocaleDateString('en-US', { weekday: 'long' })
       const hour = new Date().getHours()
       const timeOfDay = hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : 'evening'
-      return `[Heartbeat triage — ${time}, ${dayName} ${timeOfDay}] You are triaging. DO NOT take action — only assess and report.\n\n1. Read routines.md — only look at sections relevant to this time of day.\n2. Read agent.md for user context.\n3. Check due tasks.${dueSection}\n4. Check pending queue items.\n\nFocus on what's relevant right now. Use your judgment — not everything needs to be surfaced.\n\nIf nothing needs attention, reply exactly "All clear."\nOtherwise, reply with a brief summary of what needs to be done. Do NOT take action yourself — a more capable model will handle it.`
+      return `[Heartbeat triage — Current time: ${time}, ${dayName} ${timeOfDay}]\n\nYou are triaging. DO NOT take action — only assess and report.\n\n1. Use memory tool (action: read, file: routines.md) — only look at sections relevant to this time of day (${timeOfDay}).\n2. Use calendar (action: list) — check for due tasks and active routines.${dueSection}\n3. Check pending queue items.\n\nThe current time is ${time}. Focus on what's relevant RIGHT NOW. Use your judgment — not everything needs to be surfaced.\n\nIf nothing needs attention, reply exactly "All clear."\nOtherwise, reply with a brief summary of what needs to be done. Do NOT take action yourself — a more capable model will handle it.`
     }
-    if (trigger.source === 'memory_cleanup') return `[Memory cleanup — ${time}] Review all memory files with list_memories, then read each one. Delete or rewrite files that are stale, resolved, or no longer relevant. Consolidate duplicates. Keep only what is actively useful. Reply with a brief summary of what you cleaned up.`
+    if (trigger.source === 'todo_due' || trigger.source === 'task_due') {
+      const payload = trigger.payload as any
+      const task = payload?.task ?? payload?.label ?? 'Unknown task'
+      const todoId = payload?.todoId ?? payload?.id ?? ''
+      const context = payload?.context ?? payload?.instruction ?? ''
+      const contextSection = context ? `\n\nContext notes:\n${context}` : ''
+      return `[Scheduled task — ${time}] A task is now due. Execute it immediately.\n\nTask: ${task}\nTask ID: ${todoId}${contextSection}\n\n1. Read agent.md and any relevant memory for additional context.\n2. Carry out the task fully — use all available tools.\n3. When done, mark it complete with the calendar tool (action: complete).\n4. Add a done item describing what you did.`
+    }
     if (trigger.source === 'webhook') return `[Webhook — ${time}] Event received: ${JSON.stringify(trigger.payload)}. Search memory and handle it.`
     return `[Manual — ${time}] ${trigger.payload?.message ?? ''}`
   }
 
 
 
+  /** Select history: just the most recent messages. Memory tools handle long-term context. */
+  private selectHistory(_currentQuery: string): Anthropic.MessageParam[] {
+    return this.conversationHistory.slice(-RECENT_KEEP)
+  }
+
   /**
-   * Select history messages: always keep the most recent RECENT_KEEP,
-   * then TF-IDF rank older messages and include only relevant ones.
+   * Compact tool results from older conversation turns to reduce token usage.
+   *
+   * Strategy: keep a 2-conversation-turn window of full-fidelity tool results.
+   * This covers the current tool loop AND the previous user exchange, so the agent
+   * can still reference data it recently fetched (e.g. "what was in that email?").
+   *
+   * Anything older gets truncated to 300 chars — the assistant's text response
+   * from that turn already contains the processed information.
    */
-  private selectHistory(currentQuery: string): Anthropic.MessageParam[] {
-    const all = this.conversationHistory
-    if (all.length <= RECENT_KEEP) return [...all]
+  private compactToolResults(messages: Anthropic.MessageParam[]): Anthropic.MessageParam[] {
+    if (messages.length <= 4) return messages
 
-    const recent = all.slice(-RECENT_KEEP)
-    const older = all.slice(-HISTORY_WINDOW, -RECENT_KEEP)
+    // Find the last TWO user messages that contain plain text (not just tool_results).
+    // These mark conversation turn boundaries. Everything before the second-to-last
+    // user turn is old enough to compact.
+    let userTurnCount = 0
+    let compactBefore = 0
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i]
+      if (msg.role === 'user') {
+        const isRealUserMsg = typeof msg.content === 'string' ||
+          (Array.isArray(msg.content) && (msg.content as any[]).some(b => b.type === 'text'))
+        if (isRealUserMsg) {
+          userTurnCount++
+          if (userTurnCount >= 2) { compactBefore = i; break }
+        }
+      }
+    }
 
-    if (older.length === 0) return recent
+    if (compactBefore === 0) return messages
 
-    const relevant = rankByRelevance(currentQuery, older, MAX_RANKED)
+    const TRUNCATE_AT = 300
+    let compactedCount = 0
+    let savedChars = 0
 
-    // Preserve chronological order by sorting by original index
-    const olderIndexMap = new Map(older.map((m, i) => [m, i]))
-    relevant.sort((a, b) => (olderIndexMap.get(a) ?? 0) - (olderIndexMap.get(b) ?? 0))
+    const result = messages.map((msg, idx) => {
+      if (idx >= compactBefore) return msg
+      if (msg.role !== 'user' || !Array.isArray(msg.content)) return msg
 
-    const selected = [...relevant, ...recent]
-    console.log(`[Agent] History: ${recent.length} recent + ${relevant.length}/${older.length} ranked = ${selected.length} messages (was ${Math.min(all.length, HISTORY_WINDOW)})`)
-    return selected
+      const hasToolResult = (msg.content as any[]).some(b => b.type === 'tool_result')
+      if (!hasToolResult) return msg
+
+      const compacted = (msg.content as any[]).map(block => {
+        if (block.type !== 'tool_result') return block
+        const content = typeof block.content === 'string' ? block.content : ''
+        if (content.length <= TRUNCATE_AT) return block
+        compactedCount++
+        savedChars += content.length - TRUNCATE_AT
+        return { ...block, content: content.slice(0, TRUNCATE_AT) + '\n[…truncated]' }
+      })
+      return { ...msg, content: compacted }
+    })
+
+    if (compactedCount > 0) {
+      console.log(`[Agent] Compacted ${compactedCount} tool result(s) — saved ~${savedChars} chars (~${Math.round(savedChars / 4)} tokens)`)
+    }
+
+    return result
   }
 
   /**

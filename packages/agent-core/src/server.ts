@@ -6,11 +6,12 @@ import { Agent } from './agent.js'
 import { MCPServerConfig } from './mcp-manager.js'
 import { setupComposioMcp } from './composio-setup.js'
 import { INTEGRATIONS, getIntegrationStatuses, generateAuthUrl, getRequiredFields, disconnectIntegration, getConnectedSlugs, subscribeTriggersForSlug, purgeExpiredAccounts } from './composio-integrations.js'
-import { startScheduler, onHeartbeatSettingsChanged } from './scheduler.js'
+import { startScheduler } from './scheduler.js'
 import { readSettings, writeSettings } from './settings.js'
 
-import { listFiles, listFolders, ingestFile, deleteFileEntry, createFolder, moveFile, moveFolder, renameFile, renameFolder, deleteFolder, saveFolderOrder, searchFiles, updateDocumentContent, readDocumentContent, finalizeDocument } from './file-store.js'
+import { listFiles, listFolders, ingestFile, deleteFileEntry, createFolder, moveFile, moveFolder, renameFile, renameFolder, deleteFolder, saveFolderOrder, searchFiles, autoOrganizeFiles } from './file-store.js'
 import { writeRelayCredentials, getRelayConfig, writeApiKeys, loadApiKeysToEnv, getApiKeyStatus } from './auth.js'
+import { getUsageSummary } from './usage-tracker.js'
 import { RelayClient } from './relay-client.js'
 import type { WSClientMessage, WSServerMessage } from '@coagent/shared'
 import { join } from 'path'
@@ -64,26 +65,52 @@ CoAgent is a personal AI assistant that runs privately on your computer. Nothing
 
 **I stay in the background.** I sit quietly until something needs attention or you talk to me directly.
 
-**I check in every hour.** I look at your connected tools (email, calendar, etc.) for anything that needs your attention. If nothing is going on, I skip it and wait.
+**I check in on a heartbeat.** At a configurable interval (default: every hour), I look at your connected tools (email, calendar, etc.) for anything that needs your attention. If nothing is going on, I skip it and wait.
 
-**Once a day I tidy my memory.** Every night at 3am I review my notes and clean out anything stale or resolved.
+**I log all tool calls.** When I use any connected tool, I log a summary of what was done. This helps me build context about your activity across all integrations.
+
+**Every night at 3 AM, a background job runs.** The machine is scheduled to wake from sleep for this. A single Haiku call handles two things:
+1. **Memory updates** — New contacts, projects, and relationships from the day's tool logs are added to memory. Only durable facts are stored (people, ongoing partnerships, recurring commitments). One-off events are not stored.
+2. **Memory cleanup** — Stale or resolved entries are pruned, duplicates consolidated, outdated info removed.
 
 **I ask before doing anything risky.** If I'm about to do something that can't be undone — like sending an email or deleting something — I'll queue it up for you to approve first.
 
-**I keep a to-do list.** I can add things to a to-do list and check them off when done. I'll remind you about them when they're due.
+**I keep a to-do list.** To-dos can have a specific due time. They fire at exactly their due time — no polling. A precise timer is set, and the machine is scheduled to wake from sleep if needed. Past-due times are rejected; all to-dos must be in the future. When a to-do fires, it appears in the chat as an auto-injected prompt and the response streams live.
+
+**I manage files.** Users can upload files (PDF, DOCX, XLSX, images, etc.) which are summarized and embedded for semantic search. An "Auto-organize" button clusters loose files into named folders using embeddings — files already in folders are left alone.
+
+**I track usage.** All API calls (chat, file ingestion, nightly job) are tracked with token counts and estimated costs, viewable in Settings → Usage.
+
+**Skills.** Users can create reusable automations (e.g. daily briefing, follow-ups, weekly recaps) with @skill-creator. Skills are invoked by typing @skill-name in chat.
+
+## My tools
+
+Consolidated tools — each handles multiple actions via an \`action\` parameter:
+- **memory** (search/grep/read/write/edit/append/list/delete) — long-term memory. Use directly, never via search_tools. Prefer search (semantic) or grep (pattern match within a file) over read.
+- **files** (list/search/read/delete/stats) — uploaded file management.
+- **todos** (add/complete/list) — to-do items with optional due times.
+- **skills** (save/list/delete) — reusable automations.
+- **search_tools** — find and load external service tools (Gmail, Calendar, Slack, etc.). Optional "context" param greps recent tool logs for activity context.
+- **queue_approval** / **add_done_item** — approval queue and activity log.
+
+When multiple independent tool calls are needed, batch them in a single response (e.g. memory read + todos list + get_current_time in one turn).
+
+**Token efficiency:** Old tool results are automatically compacted after 2 conversation turns — raw data gets truncated but my text responses (which contain the processed info) stay intact. This keeps history lean without losing context.
 
 ## My memory
 
-I keep notes in \`~/.coagent/memory/\`. These are my brain — I read them on every check-in.
+Notes in \`~/.coagent/memory/\` — my brain across conversations.
 
-- **setup.md** — this file. What CoAgent is and how it works.
-- **agent.md** — your profile: who you are, what you do, how you like things handled.
-- **routines.md** — my heartbeat schedule: what to check and when.
-- **preferences.md** — how you like things done (tone, format, behavior).
-- **contacts.md** — key people in your life and how to handle their messages.
-- **projects.md** — active projects, context, and deadlines.
+- **setup.md** — this file (read-only).
+- **agent.md** — user profile: who you are, preferences, how to handle things.
+- **routines.md** — heartbeat schedule: what to check and when.
+- **preferences.md** — tone, format, behavior preferences.
+- **contacts.md** — key people and how to handle their messages.
+- **projects.md** — active projects, context, deadlines.
 
-I create and update these as we work together. You can also edit them directly.
+Updated as we work together. User can edit directly.
+
+**Off-limits to the 3 AM job:** setup.md, agent.md, routines.md, preferences.md — only the user or main agent edits these.
 
 ## What I can always do
 
@@ -114,6 +141,53 @@ async function updateSetupMd(connectedSlugs: string[]): Promise<void> {
 
 const MEMORY_FILES: Record<string, string> = {
   'setup.md': buildSetupMd([]),
+
+  'onboarding.md': `# Onboarding
+
+This file exists because the user hasn't set up their profile yet. Follow these instructions, then delete this file when done.
+
+## Step 1: Introduction
+
+Start with this exact opening, then immediately ask the first question:
+
+"Hey, I'm CoAgent — your personal AI agent running privately on your machine. I work best once I know a bit about you, so let me ask a few quick questions.
+
+What do you do for work?"
+
+## Step 2: Get to know them
+
+Ask follow-up questions ONE AT A TIME based on what they share. Cover:
+1. What they do and who they work with (clients, team, solo?)
+2. What takes up most of their time or causes the most friction day-to-day
+3. What they'd most want an AI agent handling for them automatically
+4. Which of their connected tools (check setup.md for the list) they actually use daily and want monitored
+5. How hands-off they want it — what should CoAgent just handle vs. always ask first
+
+Do NOT ask all questions at once. One question per message. Listen and ask smarter follow-ups — if they mention clients, ask about that. If they mention email overload, dig into that.
+
+## Step 3: Write their profile
+
+When you have a clear picture, write their profile to agent.md:
+
+# [their name if given, otherwise "You"]
+**About**: [what they do, in their words]
+**Focus**: [top 1-2 things they want help with]
+
+## How I work
+- Handle automatically: [list]
+- Always ask first: [list]
+
+## What to monitor
+- [tool]: [what to watch for]
+
+## Step 4: Wrap up
+
+End with: "Got it. I'll run in the background and surface anything that needs you.
+
+Tip: type @skill-creator anytime to build custom automations — like a daily briefing, auto follow-ups, or weekly recaps."
+
+Then delete this file (onboarding.md) — onboarding is complete.
+`,
 
   'routines.md': `# Routines
 
@@ -157,40 +231,73 @@ async function writeMemoryFiles(): Promise<void> {
 
 writeMemoryFiles().catch(err => console.error('[Server] Failed to write memory files:', err.message))
 
+// ── Default skills (shipped with the app, read-only) ─────────────────────────
+const DEFAULT_SKILLS: Record<string, { name: string; description: string; instructions: string }> = {
+  'skill-creator': {
+    name: 'skill-creator',
+    description: 'Build custom skills to automate your workflows — @skill-creator to start',
+    instructions: `The user wants to create a custom skill. Ask what they want to automate (one question at a time), then build it with save_skill.
+
+A good skill has: a kebab-case name, a one-line description, and instructions that specify exactly which tools to call and in what order. Use actual tool names. No filler.
+
+After saving: "Done. Type @skill-name anytime to use it."
+
+Examples to suggest if they need ideas:
+- daily-briefing: Pull calendar, unread emails, Slack DMs, and to-dos. Present what needs action.
+- follow-up: Search Gmail/Slack for recent context with a person, draft a follow-up email. Queue for approval.
+- client-recap: Search all integrations for a client name over the last 7 days. Timeline + open items.
+- weekly-recap: Summarize the week across calendar, email, Slack, to-dos. End with loose ends.
+- schedule-meeting: Check calendar availability, suggest slots, draft invite email. Queue for approval.`
+  }
+}
+
+async function writeDefaultSkills(): Promise<void> {
+  const dir = join(DATA_DIR, 'skills')
+  await mkdir(dir, { recursive: true })
+  for (const [filename, skill] of Object.entries(DEFAULT_SKILLS)) {
+    const filePath = join(dir, `${filename}.json`)
+    // Always write defaults — they're read-only and ship with the app
+    await writeFile(filePath, JSON.stringify(skill, null, 2), 'utf-8')
+  }
+}
+
+writeDefaultSkills().catch(err => console.error('[Server] Failed to write default skills:', err.message))
+
 const agent = new Agent(buildMcpConfigs(), DATA_DIR)
 
-agent.onDocumentEvent = (event) => {
-  if (event.type === 'opened') {
-    broadcast({ type: 'document_opened', id: event.id, filename: event.filename, content: event.content })
-  } else if (event.type === 'updated') {
-    broadcast({ type: 'document_updated', id: event.id, content: event.content })
+const scheduler = startScheduler(agent, DATA_DIR, {
+  onHeartbeat: (status, summary) => {
+    broadcast({ type: 'heartbeat', status, summary })
+  },
+  onTodoStream: (type, data) => {
+    if (type === 'start') {
+      const label = `[To-do fired] ${data.task}`
+      broadcast({ type: 'chat_response', message: { role: 'user', content: label, timestamp: new Date().toISOString() } })
+      broadcast({ type: 'agent_thinking' })
+    } else if (type === 'chunk') {
+      broadcast({ type: 'chat_chunk', text: data.text })
+    } else if (type === 'tool') {
+      broadcast({ type: 'chat_segment_end' })
+      broadcast({ type: 'tool_start', tool: data.tool, label: data.label })
+    } else if (type === 'done') {
+      broadcast({ type: 'chat_response', message: { role: 'assistant', content: data.response, timestamp: new Date().toISOString() } })
+      broadcast({ type: 'queue_update', items: agent.queue.getPending() })
+      broadcast({ type: 'done_update', items: agent.queue.getDone() })
+      broadcast({ type: 'calendar_update', entries: agent.calendar.getAll() })
+    }
   }
-}
-
-agent.onDocumentStream = (event) => {
-  if (event.type === 'start') {
-    broadcast({ type: 'document_stream_start', filename: event.filename })
-  } else if (event.type === 'chunk') {
-    broadcast({ type: 'document_stream_chunk', text: event.text })
-  }
-}
+})
 
 agent.onSettingsChanged = async () => {
   const settings = await readSettings(DATA_DIR)
   broadcast({ type: 'settings_update', settings })
-  onHeartbeatSettingsChanged(DATA_DIR).catch(() => {})
+  scheduler.rescheduleHeartbeat()
 }
 
 agent.onSkillsChanged = async () => {
   const skills = await agent.getSkills()
   broadcast({ type: 'skills_update', skills })
 }
-
-startScheduler(agent, DATA_DIR, {
-  onHeartbeat: (status, summary) => {
-    broadcast({ type: 'heartbeat', status, summary })
-  }
-})
 
 const relay = new RelayClient(DATA_DIR)
 
@@ -206,8 +313,7 @@ async function refreshComposioMcp(slugs: string[]): Promise<void> {
   const mergedSlugs = [...new Set([...currentMcpSlugs, ...slugs])]
   const allToolkits = [...new Set([...ALWAYS_ON_TOOLKITS, ...mergedSlugs])]
   const { url, apiKey } = await setupComposioMcp(process.env.COMPOSIO_API_KEY!, allToolkits, 'default', true)
-  await agent.mcpManager.disconnectAll()
-  await agent.mcpManager.connect(buildMcpConfigs())
+  // Only reconnect the composio HTTP client — don't touch the memory MCP
   await agent.mcpManager.connectHttp('composio', url, apiKey)
   currentMcpSlugs = mergedSlugs
   updateSetupMd(mergedSlugs).catch(err => console.error('[Server] Failed to update setup.md:', err.message))
@@ -215,15 +321,18 @@ async function refreshComposioMcp(slugs: string[]): Promise<void> {
 }
 
 if (process.env.COMPOSIO_API_KEY) {
+  console.log('[Composio] API key present, initializing MCP connection...')
   // Clean up any stale expired accounts on boot to prevent duplicate buildup
   purgeExpiredAccounts(process.env.COMPOSIO_API_KEY)
     .catch(err => console.error('[Composio] Failed to purge expired accounts:', err.message))
 
   getConnectedSlugs(process.env.COMPOSIO_API_KEY).then(async (slugs) => {
+    console.log(`[Composio] Found ${slugs.length} connected integrations: ${slugs.join(', ') || 'none'}`)
     // Default to all supported integrations so tools are available even before user connects
     const userToolkits = slugs.length > 0 ? slugs : ['gmail', 'googlecalendar']
     const toolkits = [...new Set([...ALWAYS_ON_TOOLKITS, ...userToolkits])]
     const { url, apiKey } = await setupComposioMcp(process.env.COMPOSIO_API_KEY!, toolkits)
+    console.log('[Composio] MCP URL obtained, connecting HTTP client...')
     await agent.mcpManager.connectHttp('composio', url, apiKey)
     currentMcpSlugs = userToolkits
     updateSetupMd(slugs).catch(err => console.error('[Server] Failed to update setup.md:', err.message))
@@ -234,7 +343,24 @@ if (process.env.COMPOSIO_API_KEY) {
         .catch(err => console.error(`[Composio] Trigger subscribe failed for ${slug}:`, err.message))
     }
   }).catch(err => console.error('[Composio] Failed to connect MCP:', err.message))
+} else {
+  console.log('[Composio] No API key found, skipping MCP connection')
 }
+
+// Kill any stale process on the port before starting
+try {
+  const { execSync } = require('child_process')
+  const pids = execSync(`lsof -ti:${PORT}`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }).trim()
+  if (pids) {
+    // Don't kill ourselves
+    const myPid = String(process.pid)
+    const stale = pids.split('\n').filter((p: string) => p !== myPid)
+    if (stale.length > 0) {
+      execSync(`kill -9 ${stale.join(' ')}`, { stdio: 'ignore' })
+      console.log(`[Server] Killed stale process(es) on port ${PORT}: ${stale.join(', ')}`)
+    }
+  }
+} catch {}
 
 const wss = new WebSocketServer({ host: '127.0.0.1', port: PORT })
 
@@ -286,7 +412,7 @@ async function sendRelayStatus(ws: WebSocket): Promise<void> {
 wss.on('connection', (ws) => {
   send(ws, { type: 'queue_update', items: agent.queue.getPending() })
   send(ws, { type: 'done_update', items: agent.queue.getDone() })
-  send(ws, { type: 'todo_update', items: agent.todos.getAll() })
+  send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
   send(ws, { type: 'chat_history', messages: agent.getChatHistory() })
   sendIntegrations(ws).catch(console.error)
   sendFilesAndFolders(ws).catch(console.error)
@@ -321,25 +447,25 @@ wss.on('connection', (ws) => {
       send(ws, { type: 'agent_thinking' })
       try {
         let streamed = ''
-        let wasToolCall = false
         const response = await agent.chat(
           msg.message,
           (chunk) => {
-            if (wasToolCall && streamed) { streamed += '\n\n'; wasToolCall = false }
             streamed += chunk
             send(ws, { type: 'chat_chunk', text: chunk })
           },
-          (tool, label) => { wasToolCall = true; send(ws, { type: 'tool_start', tool, label }) },
+          (tool, label) => {
+            send(ws, { type: 'chat_segment_end' })
+            send(ws, { type: 'tool_start', tool, label })
+          },
           msg.fileIds
         )
-        // Use the full streamed text so step-by-step updates are preserved
         send(ws, {
           type: 'chat_response',
           message: { role: 'assistant', content: streamed || response, timestamp: new Date().toISOString() }
         })
         send(ws, { type: 'queue_update', items: agent.queue.getPending() })
         send(ws, { type: 'done_update', items: agent.queue.getDone() })
-        send(ws, { type: 'todo_update', items: agent.todos.getAll() })
+        send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
         sendFilesAndFolders(ws).catch(console.error)
       } catch (err: any) {
         console.error('[Server] chat error:', err.message)
@@ -389,20 +515,21 @@ wss.on('connection', (ws) => {
         send(ws, { type: 'voice_transcribed', text })
         send(ws, { type: 'agent_thinking' })
         let streamed = ''
-        let wasToolCall = false
         const response = await agent.chat(
           text,
           (chunk) => {
-            if (wasToolCall && streamed) { streamed += '\n\n'; wasToolCall = false }
             streamed += chunk
             send(ws, { type: 'chat_chunk', text: chunk })
           },
-          (tool, label) => { wasToolCall = true; send(ws, { type: 'tool_start', tool, label }) }
+          (tool, label) => {
+            send(ws, { type: 'chat_segment_end' })
+            send(ws, { type: 'tool_start', tool, label })
+          }
         )
         send(ws, { type: 'chat_response', message: { role: 'assistant', content: streamed || response, timestamp: new Date().toISOString() } })
         send(ws, { type: 'queue_update', items: agent.queue.getPending() })
         send(ws, { type: 'done_update', items: agent.queue.getDone() })
-        send(ws, { type: 'todo_update', items: agent.todos.getAll() })
+        send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
         sendFilesAndFolders(ws).catch(console.error)
         send(ws, { type: 'voice_summary', summary: 'Refer to Co-Agent for full details' })
       } catch (err: any) {
@@ -423,24 +550,24 @@ wss.on('connection', (ws) => {
       send(ws, { type: 'agent_thinking' })
       try {
         let streamed = ''
-        let wasToolCall = false
         const response = await agent.chat(
           msg.message,
           (chunk) => {
-            if (wasToolCall && streamed) { streamed += '\n\n'; wasToolCall = false }
             streamed += chunk
             send(ws, { type: 'chat_chunk', text: chunk })
           },
-          (tool, label) => { wasToolCall = true; send(ws, { type: 'tool_start', tool, label }) }
+          (tool, label) => {
+            send(ws, { type: 'chat_segment_end' })
+            send(ws, { type: 'tool_start', tool, label })
+          }
         )
-        // Use the full streamed text so step-by-step updates are preserved
         send(ws, {
           type: 'chat_response',
           message: { role: 'assistant', content: streamed || response, timestamp: new Date().toISOString() }
         })
         send(ws, { type: 'queue_update', items: agent.queue.getPending() })
         send(ws, { type: 'done_update', items: agent.queue.getDone() })
-        send(ws, { type: 'todo_update', items: agent.todos.getAll() })
+        send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
         sendFilesAndFolders(ws).catch(console.error)
         send(ws, { type: 'voice_summary', summary: 'Refer to Co-Agent for full details' })
       } catch (err: any) {
@@ -476,7 +603,7 @@ wss.on('connection', (ws) => {
           })
           send(ws, { type: 'queue_update', items: agent.queue.getPending() })
           send(ws, { type: 'done_update', items: agent.queue.getDone() })
-          send(ws, { type: 'todo_update', items: agent.todos.getAll() })
+          send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
           sendFilesAndFolders(ws).catch(console.error)
         } catch (err: any) {
           console.error('[Server] approve execution error:', err.message)
@@ -501,17 +628,17 @@ wss.on('connection', (ws) => {
     }
 
     if (msg.type === 'get_todos') {
-      send(ws, { type: 'todo_update', items: agent.todos.getAll() })
+      send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
     }
 
     if (msg.type === 'complete_todo') {
-      agent.todos.complete(msg.id)
-      send(ws, { type: 'todo_update', items: agent.todos.getAll() })
+      agent.calendar.complete(msg.id)
+      send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
     }
 
     if (msg.type === 'delete_todo') {
-      agent.todos.delete(msg.id)
-      send(ws, { type: 'todo_update', items: agent.todos.getAll() })
+      agent.calendar.delete(msg.id)
+      send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
     }
 
     if (msg.type === 'get_integrations') {
@@ -579,7 +706,7 @@ wss.on('connection', (ws) => {
         send(ws, { type: 'settings_update', settings })
         // If heartbeat interval or active hours changed, reschedule the wake
         if (msg.patch.heartbeat_interval !== undefined || msg.patch.active_hours !== undefined || msg.patch.active_days !== undefined) {
-          onHeartbeatSettingsChanged(DATA_DIR).catch(() => {})
+          scheduler.rescheduleHeartbeat()
         }
       } catch (err: any) {
         send(ws, { type: 'error', message: err.message })
@@ -710,31 +837,6 @@ wss.on('connection', (ws) => {
       }
     }
 
-    if (msg.type === 'update_document') {
-      try {
-        await updateDocumentContent(DATA_DIR, msg.id, msg.content)
-        // Also refresh the files list since metadata changed
-        await sendFilesAndFolders(ws)
-      } catch (err: any) {
-        send(ws, { type: 'error', message: `Failed to update document: ${err.message}` })
-      }
-    }
-
-    if (msg.type === 'close_document') {
-      broadcast({ type: 'document_closed' })
-    }
-
-    if (msg.type === 'open_document') {
-      try {
-        const content = await readDocumentContent(DATA_DIR, msg.id)
-        const files = await listFiles(DATA_DIR)
-        const file = files.find(f => f.id === msg.id)
-        broadcast({ type: 'document_opened', id: msg.id, filename: file?.filename ?? 'Document', content })
-      } catch (err: any) {
-        send(ws, { type: 'error', message: `Failed to open document: ${err.message}` })
-      }
-    }
-
     if (msg.type === 'trigger_heartbeat') {
       console.log('[Server] Manual heartbeat triggered')
       send(ws, { type: 'agent_thinking' })
@@ -742,7 +844,7 @@ wss.on('connection', (ws) => {
         await agent.handleTrigger({ source: 'heartbeat' })
         send(ws, { type: 'queue_update', items: agent.queue.getPending() })
         send(ws, { type: 'done_update', items: agent.queue.getDone() })
-        send(ws, { type: 'todo_update', items: agent.todos.getAll() })
+        send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
       } catch (err: any) {
         console.error('[Server] heartbeat error:', err.message)
         send(ws, { type: 'error', message: `Heartbeat failed: ${err.message}` })
@@ -787,6 +889,22 @@ wss.on('connection', (ws) => {
 
     if (msg.type === 'get_api_keys') {
       send(ws, { type: 'api_keys_status', keys: getApiKeyStatus() })
+    }
+
+    if (msg.type === 'get_usage') {
+      const usage = await getUsageSummary(DATA_DIR)
+      send(ws, { type: 'usage_update', usage })
+    }
+
+    if (msg.type === 'auto_organize') {
+      try {
+        const result = await autoOrganizeFiles(DATA_DIR)
+        send(ws, { type: 'auto_organize_done', folders: result.folders, moved: result.moved })
+        await sendFilesAndFolders(ws)
+      } catch (err: any) {
+        send(ws, { type: 'auto_organize_done', folders: [], moved: 0 })
+        send(ws, { type: 'error', message: `Auto-organize failed: ${err.message}` })
+      }
     }
 
     if (msg.type === 'update_api_keys') {
