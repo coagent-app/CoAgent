@@ -4,7 +4,6 @@ import { writeFileSync, unlinkSync } from 'fs'
 import type { Agent } from './agent.js'
 import { purgeEventStore } from './relay-client.js'
 import { readSettings, isActiveNow } from './settings.js'
-import { TodoList } from './todo.js'
 import { extractInsights } from './service-logger.js'
 import { pruneOldEntries } from './usage-tracker.js'
 
@@ -219,29 +218,28 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
     scheduleNightlyWake()
   })
 
-  // ── Todo timer: fires at exact due time, no polling ────────────────────────
+  // ── Task timer: fires at exact due time, no polling ────────────────────────
 
-  let todoTimer: ReturnType<typeof setTimeout> | null = null
-  const firedTodos = new Set<string>()
+  let taskTimer: ReturnType<typeof setTimeout> | null = null
+  const firedTasks = new Set<string>()
 
-  async function fireDueTodos(): Promise<void> {
-    // Todos always fire regardless of active hours — if you set a reminder, it fires.
+  async function fireDueTasks(): Promise<void> {
+    // Tasks always fire regardless of active hours — if you set a reminder, it fires.
 
-    const todos = new TodoList(dataDir)
-    const due = todos.getDue().filter(i => i.due)
+    const due = agent.calendar.getTasksDue().filter(e => e.due)
     for (const item of due) {
-      if (firedTodos.has(item.id)) continue
-      firedTodos.add(item.id)
-      console.log(`[Scheduler] Todo due — firing: "${item.task}" (${item.id})`)
+      if (firedTasks.has(item.id)) continue
+      firedTasks.add(item.id)
+      console.log(`[Scheduler] Task due — firing: "${item.label}" (${item.id})`)
       // Notify UI: inject the trigger as a user message and stream the response
-      callbacks?.onTodoStream?.('start', { task: item.task, due: item.due, context: (item as any).context })
+      callbacks?.onTodoStream?.('start', { task: item.label, due: item.due, context: item.instruction })
       try {
         let streamed = ''
         await keepAwakeDuring(
           agent.handleTrigger(
             {
               source: 'todo_due',
-              payload: { todoId: item.id, task: item.task, due: item.due, context: (item as any).context }
+              payload: { todoId: item.id, task: item.label, due: item.due, context: item.instruction }
             },
             (chunk) => {
               streamed += chunk
@@ -254,25 +252,72 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
         )
         callbacks?.onTodoStream?.('done', { response: streamed })
       } catch (err: any) {
-        console.error(`[Scheduler] Todo execution error (${item.id}):`, err.message)
+        console.error(`[Scheduler] Task execution error (${item.id}):`, err.message)
       }
     }
-    // After firing, reschedule for the next due todo
-    scheduleTodoTimer()
+    // After firing, reschedule for the next due task
+    scheduleTaskTimer()
   }
 
-  function scheduleTodoTimer(): void {
-    if (todoTimer) clearTimeout(todoTimer)
-    todoTimer = null
+  function scheduleTaskTimer(): void {
+    if (taskTimer) clearTimeout(taskTimer)
+    taskTimer = null
 
-    const todos = new TodoList(dataDir)
-    const next = todos.getNextDueTime()
+    const next = agent.calendar.getNextTaskTime()
     if (!next) return
 
     const delay = Math.max(next.getTime() - Date.now(), 0)
-    console.log(`[Scheduler] Next todo fires in ${Math.round(delay / 1000)}s at ${next.toLocaleString()}`)
-    todoTimer = setTimeout(() => fireDueTodos(), delay)
+    console.log(`[Scheduler] Next task fires in ${Math.round(delay / 1000)}s at ${next.toLocaleString()}`)
+    taskTimer = setTimeout(() => fireDueTasks(), delay)
     scheduleWake(next)
+  }
+
+  // ── Routine cron timers ─────────────────────────────────────────────────────
+
+  const routineJobs = new Map<string, cron.ScheduledTask>()
+
+  function syncRoutineTimers(): void {
+    const routines = agent.calendar.getRoutines()
+    const activeIds = new Set(routines.map(r => r.id))
+
+    // Remove timers for deleted/disabled routines
+    for (const [id, job] of routineJobs) {
+      if (!activeIds.has(id)) {
+        job.stop()
+        routineJobs.delete(id)
+      }
+    }
+
+    // Add timers for new routines
+    for (const routine of routines) {
+      if (routineJobs.has(routine.id)) continue
+      if (!cron.validate(routine.cron!)) {
+        console.warn(`[Scheduler] Invalid cron for "${routine.label}": ${routine.cron}`)
+        continue
+      }
+      const job = cron.schedule(routine.cron!, async () => {
+        if (!isActiveNow(await readSettings(dataDir))) {
+          console.log(`[Scheduler] Outside active hours — skipping routine "${routine.label}"`)
+          return
+        }
+        console.log(`[Scheduler] Routine firing: "${routine.label}"`)
+        callbacks?.onHeartbeat?.('started', `Routine: ${routine.label}`)
+        try {
+          await keepAwakeDuring(
+            agent.handleTrigger({
+              source: 'routine' as any,
+              payload: { id: routine.id, label: routine.label, instruction: routine.instruction }
+            })
+          )
+          callbacks?.onHeartbeat?.('done', `Routine completed: ${routine.label}`)
+        } catch (err: any) {
+          console.error(`[Scheduler] Routine error (${routine.id}):`, err.message)
+          callbacks?.onHeartbeat?.('done')
+        }
+      })
+      routineJobs.set(routine.id, job)
+      console.log(`[Scheduler] Registered routine: "${routine.label}" (${routine.cron})`)
+    }
   }
 
   // ── Heartbeat timer: fires at exact interval, no polling ───────────────────
@@ -320,15 +365,14 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
       console.log(`[Scheduler] Next heartbeat in ${interval}min at ${wakeAt.toLocaleString()}`)
       heartbeatTimer = setTimeout(() => fireHeartbeat(), delay)
 
-      // Wake at whichever is sooner: heartbeat, next todo, or 3 AM nightly job
-      const todos = new TodoList(dataDir)
-      const nextTodo = todos.getNextDueTime()
+      // Wake at whichever is sooner: heartbeat, next task, or 3 AM nightly job
+      const nextTask = agent.calendar.getNextTaskTime()
       const now = new Date()
       const next3am = new Date(now)
       next3am.setHours(3, 0, 0, 0)
       if (next3am <= now) next3am.setDate(next3am.getDate() + 1)
       const candidates = [wakeAt, next3am]
-      if (nextTodo) candidates.push(nextTodo)
+      if (nextTask) candidates.push(nextTask)
       const earliestWake = candidates.reduce((a, b) => a < b ? a : b)
       scheduleWake(earliestWake)
     }).catch(() => {})
@@ -340,13 +384,15 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
   const origOnCalendarChanged = agent.onCalendarChanged
   agent.onCalendarChanged = () => {
     origOnCalendarChanged?.()
-    scheduleTodoTimer()
+    scheduleTaskTimer()
+    syncRoutineTimers()
   }
 
-  // ── Startup: fire any overdue todos, then schedule timers ──────────────────
+  // ── Startup: fire any overdue tasks, register routines, then schedule timers ─
 
   ;(async () => {
-    await fireDueTodos()
+    syncRoutineTimers()
+    await fireDueTasks()
     scheduleHeartbeatTimer()
   })()
 
