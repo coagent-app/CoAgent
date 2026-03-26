@@ -4,6 +4,7 @@ import { existsSync } from 'fs'
 import { join, extname, basename, dirname } from 'path'
 import type { FileEntry } from '@coagent/shared'
 import { getRelayConfig } from './auth.js'
+import { recordUsage } from './usage-tracker.js'
 
 const INDEX_FILE = 'file-index.json'
 const FILES_DIR = 'files'
@@ -329,22 +330,20 @@ async function sampleContent(filename: string, buffer: Buffer, mimeType: string)
   return { type: 'text', text: sample }
 }
 
-// ── Haiku summary + group ─────────────────────────────────────────────────────
+// ── Haiku summary ─────────────────────────────────────────────────────────────
 
-async function generateSummaryAndGroup(
+async function generateSummary(
+  dataDir: string,
   filename: string,
   sample: SampleResult
-): Promise<{ summary: string; group: string }> {
+): Promise<string> {
   const anthropic = createAnthropicClient()
 
-  const prompt = `You are analyzing a file to generate a brief summary and assign it to a folder group.
+  const prompt = `You are analyzing a file to generate a brief summary.
 
 File: ${filename}
 
-Write a 2-3 sentence summary of what this file is and what it contains. Then assign it to a short, descriptive group name (1-2 words, title case, e.g. "Contracts", "Clients", "Reports", "Images", "Spreadsheets").
-
-Respond in this exact JSON format:
-{"summary": "...", "group": "..."}`
+Write ONE sentence summarizing what this file is. Be concise. Respond with the summary text only, no JSON.`
 
   const content: any =
     sample.type === 'image'
@@ -365,22 +364,172 @@ Respond in this exact JSON format:
     messages: [{ role: 'user', content }]
   })
 
+  recordUsage(dataDir, {
+    category: 'file_ingestion',
+    model: 'claude-haiku-4-5-20251001',
+    inputTokens: response.usage.input_tokens,
+    outputTokens: response.usage.output_tokens,
+    cacheReadTokens: (response.usage as any).cache_read_input_tokens ?? 0,
+    cacheCreationTokens: (response.usage as any).cache_creation_input_tokens ?? 0,
+    timestamp: new Date().toISOString(),
+  }).catch(() => {})
+
   const block = response.content[0]
   if (!block || block.type !== 'text') throw new Error('Unexpected Anthropic response content type')
-  const text = block.text.trim()
+  return block.text.trim().slice(0, 300) || 'No summary available.'
+}
 
-  // Strip markdown code fences (```json ... ```) that models sometimes wrap responses in
-  const clean = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()
+// ── K-means clustering ────────────────────────────────────────────────────────
 
-  try {
-    const parsed = JSON.parse(clean)
-    return {
-      summary: parsed.summary ?? 'No summary available.',
-      group: parsed.group ?? 'Files'
-    }
-  } catch {
-    return { summary: clean.slice(0, 200), group: 'Files' }
+function kmeans(vectors: number[][], k: number, maxIter = 20): number[] {
+  const n = vectors.length
+  const dim = vectors[0].length
+
+  // Initialize centroids by picking k random points
+  const indices = [...Array(n).keys()]
+  for (let i = indices.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[indices[i], indices[j]] = [indices[j], indices[i]]
   }
+  const centroids = indices.slice(0, k).map(i => [...vectors[i]])
+  const assignments = new Array<number>(n).fill(0)
+
+  for (let iter = 0; iter < maxIter; iter++) {
+    let changed = false
+    for (let i = 0; i < n; i++) {
+      let bestSim = -Infinity
+      let bestCluster = 0
+      for (let c = 0; c < k; c++) {
+        const sim = cosine(vectors[i], centroids[c])
+        if (sim > bestSim) { bestSim = sim; bestCluster = c }
+      }
+      if (assignments[i] !== bestCluster) { assignments[i] = bestCluster; changed = true }
+    }
+    if (!changed) break
+
+    // Recompute centroids
+    for (let c = 0; c < k; c++) {
+      const members = vectors.filter((_, i) => assignments[i] === c)
+      if (members.length === 0) continue
+      for (let d = 0; d < dim; d++) {
+        centroids[c][d] = members.reduce((sum, v) => sum + v[d], 0) / members.length
+      }
+    }
+  }
+
+  return assignments
+}
+
+// ── Auto-organize ─────────────────────────────────────────────────────────────
+
+export async function autoOrganizeFiles(
+  dataDir: string
+): Promise<{ folders: string[]; moved: number }> {
+  const index = await readIndex(dataDir)
+  // Only organize loose files (not already in a folder)
+  const withEmbeddings = index.filter(e => e.embedding.length > 0 && !e.group)
+
+  if (withEmbeddings.length < 3) {
+    throw new Error('Need at least 3 loose files to auto-organize')
+  }
+
+  const k = Math.max(2, Math.min(10, Math.ceil(withEmbeddings.length / 3)))
+  const vectors = withEmbeddings.map(e => e.embedding)
+  const assignments = kmeans(vectors, k)
+
+  // Group files by cluster
+  const clusters = new Map<number, FileIndexEntry[]>()
+  for (let i = 0; i < withEmbeddings.length; i++) {
+    const c = assignments[i]
+    if (!clusters.has(c)) clusters.set(c, [])
+    clusters.get(c)!.push(withEmbeddings[i])
+  }
+
+  // Drop empty clusters (k-means can leave some empty)
+  for (const [id, files] of clusters) {
+    if (files.length === 0) clusters.delete(id)
+  }
+
+  // Ask Haiku to name the clusters
+  const clusterDescriptions = [...clusters.entries()]
+    .map(([id, files]) => {
+      const fileList = files.map(f => `  - ${f.filename}: ${f.summary}`).join('\n')
+      return `Cluster ${id} (${files.length} files):\n${fileList}`
+    })
+    .join('\n\n')
+
+  const anthropic = createAnthropicClient()
+  const response = await anthropic.messages.create({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 256,
+    messages: [{
+      role: 'user',
+      content: `Name each file cluster with a short, descriptive folder name (1-2 words, Title Case, e.g. "Reports", "Contracts", "Images"). Each name must be unique.\n\nRespond with JSON only, no markdown fences:\n{"clusters":{"0":"FolderName","1":"FolderName"}}\n\n${clusterDescriptions}`
+    }]
+  })
+
+  recordUsage(dataDir, {
+    category: 'file_ingestion',
+    model: 'claude-haiku-4-5-20251001',
+    inputTokens: response.usage.input_tokens,
+    outputTokens: response.usage.output_tokens,
+    cacheReadTokens: (response.usage as any).cache_read_input_tokens ?? 0,
+    cacheCreationTokens: (response.usage as any).cache_creation_input_tokens ?? 0,
+    timestamp: new Date().toISOString(),
+  }).catch(() => {})
+
+  const rawText = response.content[0]?.type === 'text' ? response.content[0].text : ''
+  const cleanText = rawText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()
+  let clusterNames: Record<string, string> = {}
+  try {
+    clusterNames = JSON.parse(cleanText).clusters ?? {}
+  } catch {
+    // Fallback: generic names
+    for (const id of clusters.keys()) clusterNames[String(id)] = `Group ${id + 1}`
+  }
+
+  // Batch move: create folders, move files, update index
+  const filesDir = join(dataDir, FILES_DIR)
+  const folderSet = new Set<string>()
+  let moved = 0
+
+  for (const [clusterId, files] of clusters) {
+    const folderName = (clusterNames[String(clusterId)] ?? `Group ${clusterId + 1}`)
+      .replace(/\.\./g, '').replace(/^\/+|\/+$/g, '').trim()
+    if (!folderName) continue
+    folderSet.add(folderName)
+
+    const targetDir = join(filesDir, folderName)
+    await mkdir(targetDir, { recursive: true })
+
+    for (const file of files) {
+      const newPath = join(targetDir, file.filename)
+      if (file.path === newPath) continue // already there
+      if (existsSync(file.path)) {
+        try {
+          await rename(file.path, newPath)
+          file.path = newPath
+          file.group = folderName
+          moved++
+        } catch (err) {
+          console.warn(`[FileStore] Auto-organize move failed for ${file.filename}: ${(err as Error).message}`)
+        }
+      }
+    }
+  }
+
+  // Write updated index
+  await writeIndex(dataDir, index)
+
+  // Save folder order
+  const existingOrder = await loadFolderOrder(dataDir)
+  const newFolders = [...folderSet].filter(f => !existingOrder.includes(f))
+  if (newFolders.length > 0) {
+    await saveFolderOrder(dataDir, [...existingOrder, ...newFolders])
+  }
+
+  console.log(`[FileStore] Auto-organized ${moved} files into ${folderSet.size} folders`)
+  return { folders: [...folderSet], moved }
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -393,7 +542,7 @@ export async function ingestFile(
   group?: string
 ): Promise<FileEntry> {
   const sample = await sampleContent(filename, buffer, mimeType)
-  const { summary } = await generateSummaryAndGroup(filename, sample)
+  const summary = await generateSummary(dataDir, filename, sample)
 
   // Save file to the target folder (or root if no group)
   const safeFilename = basename(filename)
@@ -440,131 +589,8 @@ export async function ingestFile(
   return fileEntry
 }
 
-export async function createDocument(
-  dataDir: string,
-  title: string,
-  content: string,
-  group?: string
-): Promise<FileEntry> {
-  const safeGroup = group
-    ? group.replace(/\.\./g, '').replace(/^\/+|\/+$/g, '').replace(/\/+/g, '/')
-    : 'Drafts'
-  const safeTitle = basename(title).trim() || 'Untitled'
-  const filename = safeTitle.endsWith('.md') ? safeTitle : `${safeTitle}.md`
 
-  const targetDir = join(dataDir, FILES_DIR, ...safeGroup.split('/'))
-  await mkdir(targetDir, { recursive: true })
-  const filePath = join(targetDir, filename)
-  await writeFile(filePath, content, 'utf-8')
 
-  // Agent-created documents don't need an LLM summary or embedding at creation time.
-  // The title is the summary. Embeddings are generated later on finalizeDocument.
-  const summary = safeTitle
-
-  const entry: FileIndexEntry = {
-    id: crypto.randomUUID(),
-    type: 'document',
-    filename,
-    path: filePath,
-    addedAt: new Date().toISOString(),
-    lastAccessed: new Date().toISOString(),
-    summary,
-    group: safeGroup,
-    sizeBytes: Buffer.byteLength(content, 'utf-8'),
-    embedding: [],
-    dirty: true
-  }
-
-  const index = await readIndex(dataDir)
-  index.push(entry)
-  await writeIndex(dataDir, index)
-
-  console.log(`[FileStore] Created document: ${filename} in ${safeGroup}`)
-
-  const { embedding: _, dirty: __, ...fileEntry } = entry
-  return fileEntry
-}
-
-export async function updateDocumentContent(
-  dataDir: string,
-  id: string,
-  newContent: string
-): Promise<FileEntry> {
-  const index = await readIndex(dataDir)
-  const entry = index.find(e => e.id === id)
-  if (!entry) throw new Error(`File ${id} not found`)
-  if (entry.type !== 'document') throw new Error(`File ${id} is not a document`)
-
-  await writeFile(entry.path, newContent, 'utf-8')
-
-  const now = new Date().toISOString()
-  const updated = index.map(e =>
-    e.id === id
-      ? { ...e, sizeBytes: Buffer.byteLength(newContent, 'utf-8'), lastAccessed: now, dirty: true }
-      : e
-  )
-  await writeIndex(dataDir, updated)
-
-  const updatedEntry = updated.find(e => e.id === id)!
-  const { embedding: _, dirty: __, ...fileEntry } = updatedEntry
-  return fileEntry
-}
-
-export async function readDocumentContent(dataDir: string, id: string): Promise<string> {
-  const index = await readIndex(dataDir)
-  const entry = index.find(e => e.id === id)
-  if (!entry) throw new Error(`File ${id} not found`)
-  if (entry.type !== 'document') throw new Error(`File ${id} is not a document`)
-
-  const content = await readFile(entry.path, 'utf-8')
-
-  const updated = index.map(e =>
-    e.id === id ? { ...e, lastAccessed: new Date().toISOString() } : e
-  )
-  await writeIndex(dataDir, updated)
-
-  return content
-}
-
-export async function finalizeDocument(dataDir: string, id: string): Promise<FileEntry> {
-  const index = await readIndex(dataDir)
-  const entry = index.find(e => e.id === id)
-  if (!entry) throw new Error(`File ${id} not found`)
-  if (entry.type !== 'document') throw new Error(`File ${id} is not a document`)
-
-  // Skip expensive re-embedding if the document hasn't changed since last finalize
-  if (!entry.dirty) {
-    const { embedding: _, dirty: __, ...fileEntry } = entry
-    return fileEntry
-  }
-
-  const content = await readFile(entry.path, 'utf-8')
-  const sample: SampleResult = { type: 'text', text: content.slice(0, 200) }
-  const { summary } = await generateSummaryAndGroup(entry.filename, sample)
-
-  let embedding: number[] = entry.embedding
-  if (getOpenAIKey()) {
-    try {
-      embedding = await embedText(`${entry.filename} ${summary}`)
-    } catch (err) {
-      console.warn('[FileStore] OpenAI embedding failed during finalize:', (err as Error).message)
-    }
-  }
-
-  const now = new Date().toISOString()
-  const updated = index.map(e =>
-    e.id === id
-      ? { ...e, summary, embedding, lastAccessed: now, dirty: false }
-      : e
-  )
-  await writeIndex(dataDir, updated)
-
-  console.log(`[FileStore] Finalized document: ${entry.filename}`)
-
-  const updatedEntry = updated.find(e => e.id === id)!
-  const { embedding: _, dirty: __, ...fileEntry } = updatedEntry
-  return fileEntry
-}
 
 export async function listFiles(dataDir: string): Promise<FileEntry[]> {
   const index = await readIndex(dataDir)

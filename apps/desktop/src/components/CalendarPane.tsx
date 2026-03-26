@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react'
+import React, { useState, useMemo, useEffect, useRef } from 'react'
 import { ChevronLeft, ChevronRight, Circle, Trash2, Repeat, Calendar as CalendarIcon } from 'lucide-react'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { cn } from '@/lib/utils'
@@ -17,6 +17,7 @@ interface CalendarPaneProps {
   entries: CalendarEntry[]
   onComplete: (id: string) => void
   onDelete: (id: string) => void
+  activeHours?: { start: number; end: number }
 }
 
 const TYPE_COLORS = {
@@ -25,7 +26,7 @@ const TYPE_COLORS = {
   event:   { bg: 'bg-blue-100 dark:bg-blue-900/30', text: 'text-blue-700 dark:text-blue-300', dot: 'bg-blue-500' },
 }
 
-export function CalendarPane({ entries, onComplete, onDelete }: CalendarPaneProps) {
+export function CalendarPane({ entries, onComplete, onDelete, activeHours = { start: 7, end: 24 } }: CalendarPaneProps) {
   const [view, setView] = useState<CalendarView>('week')
   const [anchor, setAnchor] = useState(new Date())
 
@@ -81,11 +82,11 @@ export function CalendarPane({ entries, onComplete, onDelete }: CalendarPaneProp
       </div>
 
       {/* View content */}
-      <div className="flex-1 overflow-hidden">
+      <div className="flex-1 overflow-hidden px-4">
         {view === 'agenda' && <AgendaView entries={entries} onComplete={onComplete} onDelete={onDelete} />}
-        {view === 'week' && <WeekView entries={entries} anchor={anchor} />}
+        {view === 'week' && <WeekView entries={entries} anchor={anchor} activeHours={activeHours} />}
         {view === 'month' && <MonthView entries={entries} anchor={anchor} />}
-        {view === 'day' && <DayView entries={entries} anchor={anchor} />}
+        {view === 'day' && <DayView entries={entries} anchor={anchor} activeHours={activeHours} />}
       </div>
     </div>
   )
@@ -156,14 +157,21 @@ function formatTime(iso: string): string {
 
 /* ── Week View ──────────────────────────────────────── */
 
-function WeekView({ entries, anchor }: { entries: CalendarEntry[]; anchor: Date }) {
+function WeekView({ entries, anchor, activeHours }: { entries: CalendarEntry[]; anchor: Date; activeHours: { start: number; end: number } }) {
   const weekStart = startOfWeek(anchor, { weekStartsOn: 0 })
   const days = eachDayOfInterval({ start: weekStart, end: endOfWeek(anchor, { weekStartsOn: 0 }) })
-  const hours = Array.from({ length: 16 }, (_, i) => i + 6)
+  const hours = Array.from({ length: 24 }, (_, i) => i)
+  const isOffHour = (h: number) => h < activeHours.start || h >= activeHours.end
+  const scrollRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const el = scrollRef.current?.closest('[data-radix-scroll-area-viewport]') as HTMLElement | null
+    if (el) el.scrollTop = activeHours.start * 48
+  }, [])
 
   return (
     <ScrollArea className="h-full">
-      <div className="grid grid-cols-[50px_repeat(7,1fr)] min-w-0">
+      <div ref={scrollRef} className="grid grid-cols-[50px_repeat(7,1fr)] min-w-0">
         <div className="sticky top-0 z-10 bg-white dark:bg-neutral-950" />
         {days.map(day => (
           <div key={day.toISOString()} className={cn(
@@ -177,7 +185,7 @@ function WeekView({ entries, anchor }: { entries: CalendarEntry[]; anchor: Date 
 
         {hours.map(hour => (
           <React.Fragment key={hour}>
-            <div className="text-[10px] text-neutral-400 text-right pr-2 pt-1 h-[48px]">
+            <div className={cn('text-[10px] text-neutral-400 text-right pr-2 pt-1 h-[48px]', isOffHour(hour) && 'opacity-50')}>
               {format(setHours(new Date(), hour), 'h a')}
             </div>
             {days.map(day => {
@@ -185,8 +193,9 @@ function WeekView({ entries, anchor }: { entries: CalendarEntry[]; anchor: Date 
               return (
                 <div key={`${day.toISOString()}-${hour}`}
                   className={cn(
-                    'h-[48px] border-l border-b border-neutral-50 dark:border-neutral-800/50 relative',
-                    isToday(day) && 'bg-blue-50/30 dark:bg-blue-950/10'
+                    'h-[48px] border-l border-b border-neutral-200 dark:border-neutral-700 relative',
+                    isToday(day) && !isOffHour(hour) && 'bg-blue-50/30 dark:bg-blue-950/10',
+                    isOffHour(hour) && 'bg-neutral-50 dark:bg-neutral-900/50'
                   )}>
                   {dayEntries.map(entry => (
                     <div key={entry.id} className={cn('absolute inset-x-0.5 top-0.5 rounded px-1 py-0.5 text-[10px] truncate', TYPE_COLORS[entry.type].bg, TYPE_COLORS[entry.type].text)}>
@@ -211,6 +220,7 @@ function MonthView({ entries, anchor }: { entries: CalendarEntry[]; anchor: Date
   const calStart = startOfWeek(monthStart, { weekStartsOn: 0 })
   const calEnd = endOfWeek(monthEnd, { weekStartsOn: 0 })
   const days = eachDayOfInterval({ start: calStart, end: calEnd })
+  const weeks = Math.ceil(days.length / 7)
 
   return (
     <div className="flex-1 flex flex-col h-full">
@@ -219,47 +229,55 @@ function MonthView({ entries, anchor }: { entries: CalendarEntry[]; anchor: Date
           <div key={d} className="text-[10px] text-neutral-400 uppercase text-center py-1.5">{d}</div>
         ))}
       </div>
-      <ScrollArea className="flex-1">
-        <div className="grid grid-cols-7 auto-rows-[80px]">
-          {days.map(day => {
-            const dayEntries = getEntriesForDay(entries, day)
-            return (
-              <div key={day.toISOString()} className={cn(
-                'border-b border-r border-neutral-50 dark:border-neutral-800/50 p-1 overflow-hidden',
-                !isSameMonth(day, anchor) && 'opacity-40',
-                isToday(day) && 'bg-blue-50/50 dark:bg-blue-950/20'
-              )}>
-                <p className={cn('text-[11px] font-medium mb-0.5', isToday(day) ? 'text-blue-600' : 'text-neutral-500')}>{format(day, 'd')}</p>
-                {dayEntries.slice(0, 3).map(entry => (
-                  <div key={entry.id} className={cn('text-[9px] truncate rounded px-1 mb-0.5', TYPE_COLORS[entry.type].bg, TYPE_COLORS[entry.type].text)}>
-                    {entry.label}
-                  </div>
-                ))}
-                {dayEntries.length > 3 && (
-                  <p className="text-[9px] text-neutral-400">+{dayEntries.length - 3} more</p>
-                )}
-              </div>
-            )
-          })}
-        </div>
-      </ScrollArea>
+      <div className="flex-1 grid grid-cols-7" style={{ gridTemplateRows: `repeat(${weeks}, 1fr)` }}>
+        {days.map(day => {
+          const dayEntries = getEntriesForDay(entries, day)
+          return (
+            <div key={day.toISOString()} className={cn(
+              'border-b border-r border-neutral-200 dark:border-neutral-700 p-1.5 overflow-hidden',
+              !isSameMonth(day, anchor) && 'opacity-40',
+              isToday(day) && 'bg-blue-50/50 dark:bg-blue-950/20'
+            )}>
+              <p className={cn('text-[11px] font-medium mb-0.5', isToday(day) ? 'text-blue-600' : 'text-neutral-500')}>{format(day, 'd')}</p>
+              {dayEntries.slice(0, 3).map(entry => (
+                <div key={entry.id} className={cn('text-[9px] truncate rounded px-1 mb-0.5', TYPE_COLORS[entry.type].bg, TYPE_COLORS[entry.type].text)}>
+                  {entry.label}
+                </div>
+              ))}
+              {dayEntries.length > 3 && (
+                <p className="text-[9px] text-neutral-400">+{dayEntries.length - 3} more</p>
+              )}
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }
 
 /* ── Day View ───────────────────────────────────────── */
 
-function DayView({ entries, anchor }: { entries: CalendarEntry[]; anchor: Date }) {
-  const hours = Array.from({ length: 16 }, (_, i) => i + 6)
+function DayView({ entries, anchor, activeHours }: { entries: CalendarEntry[]; anchor: Date; activeHours: { start: number; end: number } }) {
+  const hours = Array.from({ length: 24 }, (_, i) => i)
+  const isOffHour = (h: number) => h < activeHours.start || h >= activeHours.end
+  const scrollRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const el = scrollRef.current?.closest('[data-radix-scroll-area-viewport]') as HTMLElement | null
+    if (el) el.scrollTop = activeHours.start * 48
+  }, [])
 
   return (
     <ScrollArea className="h-full">
-      <div className="px-4">
+      <div ref={scrollRef} className="px-4">
         {hours.map(hour => {
           const hourEntries = getEntriesForHour(entries, anchor, hour)
           return (
-            <div key={hour} className="flex border-b border-neutral-50 dark:border-neutral-800/50 min-h-[48px]">
-              <div className="w-[50px] text-[11px] text-neutral-400 text-right pr-3 pt-1 flex-shrink-0">
+            <div key={hour} className={cn(
+              'flex border-b border-neutral-200 dark:border-neutral-700 min-h-[48px]',
+              isOffHour(hour) && 'bg-neutral-50 dark:bg-neutral-900/50'
+            )}>
+              <div className={cn('w-[50px] text-[11px] text-neutral-400 text-right pr-3 pt-1 flex-shrink-0', isOffHour(hour) && 'opacity-50')}>
                 {format(setHours(new Date(), hour), 'h a')}
               </div>
               <div className="flex-1 py-0.5">

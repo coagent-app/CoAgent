@@ -87,6 +87,7 @@ export default function App() {
             entries={calendarEntries}
             onComplete={completeCalendarEntry}
             onDelete={deleteCalendarEntry}
+            activeHours={settings?.active_hours}
           />
         )}
 

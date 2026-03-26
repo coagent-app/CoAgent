@@ -22,8 +22,6 @@ interface ChatPaneProps {
   onStop?: () => void
   onIngestFile?: (filename: string, mimeType: string, data: string) => void
   files: FileEntry[]
-  onOpenDocument?: (id: string) => void
-  activeDocumentId: string | null
   apiKeyStatus?: { anthropic: boolean; composio: boolean; openai: boolean } | null
   onNavigateToSettings?: () => void
   lastHeartbeat?: { time: Date; status: string } | null
@@ -179,7 +177,7 @@ function FileCard({ file, onClick }: { file: FileEntry; onClick?: () => void }) 
 }
 
 // ── File deck (stacked cards you flip through) ──────────────────────────────
-function FileDeck({ files, onOpenDocument }: { files: FileEntry[]; onOpenDocument?: (id: string) => void }) {
+function FileDeck({ files }: { files: FileEntry[] }) {
   const [active, setActive] = useState(0)
   const [lightboxFile, setLightboxFile] = useState<FileEntry | null>(null)
 
@@ -187,11 +185,7 @@ function FileDeck({ files, onOpenDocument }: { files: FileEntry[]; onOpenDocumen
   const next = useCallback(() => setActive(i => Math.min(files.length - 1, i + 1)), [files.length])
 
   function handleFileClick(file: FileEntry) {
-    if (file.type === 'document' && onOpenDocument) {
-      onOpenDocument(file.id)
-    } else {
-      setLightboxFile(file)
-    }
+    setLightboxFile(file)
   }
 
   if (files.length === 0) return null
@@ -276,7 +270,7 @@ function FileDeck({ files, onOpenDocument }: { files: FileEntry[]; onOpenDocumen
 
 const FILE_LINK_RE = /\[([^\]]*)\]\(coagent-file:([^)]+)\)/g
 
-const AgentBubble = React.memo(function AgentBubble({ content, files, onOpenDocument }: { content: string; files: FileEntry[]; onOpenDocument?: (id: string) => void }) {
+const AgentBubble = React.memo(function AgentBubble({ content, files }: { content: string; files: FileEntry[] }) {
   const filesMap = React.useMemo(() => {
     const map = new Map<string, FileEntry>()
     for (const f of files) map.set(f.id, f)
@@ -333,13 +327,13 @@ const AgentBubble = React.memo(function AgentBubble({ content, files, onOpenDocu
         </ReactMarkdown>
       )}
       {referencedFiles.length > 0 && (
-        <FileDeck files={referencedFiles} onOpenDocument={onOpenDocument} />
+        <FileDeck files={referencedFiles} />
       )}
     </div>
   )
 })
 
-export function ChatPane({ messages, streamingText, thinking, processing, toolLabel, connected, onChat, onSteer, onStop, onIngestFile, files, onOpenDocument, activeDocumentId, apiKeyStatus, onNavigateToSettings, lastHeartbeat, skills = [], className }: ChatPaneProps) {
+export function ChatPane({ messages, streamingText, thinking, processing, toolLabel, connected, onChat, onSteer, onStop, onIngestFile, files, apiKeyStatus, onNavigateToSettings, lastHeartbeat, skills = [], className }: ChatPaneProps) {
   const [input, setInput] = useState('')
   const [skillQuery, setSkillQuery] = useState<string | null>(null)
   const [selectedSkillIdx, setSelectedSkillIdx] = useState(0)
@@ -447,14 +441,6 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
     if (e.key === 'Enter') handleSend()
   }, [handleSend, skillQuery, filteredSkills, selectedSkillIdx, insertSkill])
 
-  // Pre-compute last assistant index once instead of O(n²) in render
-  const lastAssistantIndex = React.useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === 'assistant') return i
-    }
-    return -1
-  }, [messages])
-
   return (
     <div
       className={cn("flex-1 bg-white dark:bg-neutral-950 flex flex-col overflow-hidden relative", className)}
@@ -507,41 +493,22 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
                   </button>
                 </div>
               ) : (
-                <AgentBubble content="Hello. I'm Co-Agent. I'm watching your queue and ready to help. What do you need?" files={files} onOpenDocument={onOpenDocument} />
+                <AgentBubble content="Hello. I'm Co-Agent. I'm watching your queue and ready to help. What do you need?" files={files} />
               )}
             </div>
           )}
 
-          {messages.map((msg, i) => {
-            const isLastAssistant = activeDocumentId && msg.role === 'assistant' && i === lastAssistantIndex
-            return (
-              <div key={i} className={cn('flex', msg.role === 'user' ? 'justify-end' : 'justify-start')}>
-                {msg.role === 'user' ? (
-                  <div className="bg-neutral-900 dark:bg-neutral-700 text-white text-[13.5px] leading-relaxed rounded-2xl rounded-tr-sm px-4 py-2.5 max-w-[560px]">
-                    {msg.content}
-                  </div>
-                ) : (
-                  <div className="max-w-[620px]">
-                    <AgentBubble content={msg.content} files={files} onOpenDocument={onOpenDocument} />
-                    {isLastAssistant && (
-                      <div className="flex justify-end mt-1">
-                        <button
-                          onClick={() => onOpenDocument?.(activeDocumentId)}
-                          className="group flex items-center gap-1.5 pr-2 text-[11.5px] font-medium text-neutral-400 dark:text-neutral-500 hover:text-neutral-600 dark:hover:text-neutral-300 transition-colors"
-                        >
-                          <svg width="9" height="9" viewBox="0 0 12 12" fill="none" className="text-neutral-300 dark:text-neutral-600 group-hover:text-neutral-400 dark:group-hover:text-neutral-500 transition-colors">
-                            <path d="M2 0 L2 8 Q2 10 4 10 L12 10" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" />
-                          </svg>
-                          <FileText size={12} />
-                          <span>Open document</span>
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )
-          })}
+          {messages.map((msg, i) => (
+            <div key={i} className={cn('flex', msg.role === 'user' ? 'justify-end' : 'justify-start')}>
+              {msg.role === 'user' ? (
+                <div className="bg-neutral-900 dark:bg-neutral-700 text-white text-[13.5px] leading-relaxed rounded-2xl rounded-tr-sm px-4 py-2.5 max-w-[560px]">
+                  {msg.content}
+                </div>
+              ) : (
+                <AgentBubble content={msg.content} files={files} />
+              )}
+            </div>
+          ))}
 
           {thinking && !streamingText && (
             <div className="flex justify-start">
@@ -558,7 +525,7 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
 
           {streamingText !== null && (
             <div className="flex justify-start">
-              <AgentBubble content={streamingText} files={files} onOpenDocument={onOpenDocument} />
+              <AgentBubble content={streamingText} files={files} />
             </div>
           )}
 

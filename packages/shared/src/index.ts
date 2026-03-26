@@ -73,7 +73,8 @@ export interface CalendarEntry {
   due?: string          // task: ISO datetime "2026-03-28T14:30:00"
   start?: string        // event: ISO datetime
   end?: string          // event: ISO datetime
-  instruction?: string  // what the agent executes (routines, tasks)
+  instruction?: string  // what the agent executes (routines, tasks only)
+  notes?: string        // contextual info (all types — meeting agenda, reminder details, etc.)
   enabled: boolean
   completed?: boolean   // for tasks
   createdAt: string

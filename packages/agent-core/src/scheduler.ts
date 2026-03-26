@@ -229,6 +229,17 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
     const due = agent.calendar.getTasksDue().filter(e => e.due)
     for (const item of due) {
       if (firedTasks.has(item.id)) continue
+
+      // Skip tasks overdue by more than 1 hour — stale from a previous session
+      const dueTime = item.due!.includes('T') ? new Date(item.due!) : new Date(item.due! + 'T23:59:59')
+      const overdueMs = Date.now() - dueTime.getTime()
+      if (overdueMs > 60 * 60 * 1000) {
+        console.log(`[Scheduler] Skipping stale task "${item.label}" (overdue by ${Math.round(overdueMs / 60000)}min) — auto-completing`)
+        agent.calendar.complete(item.id)
+        firedTasks.add(item.id)
+        continue
+      }
+
       firedTasks.add(item.id)
       console.log(`[Scheduler] Task due — firing: "${item.label}" (${item.id})`)
       // Notify UI: inject the trigger as a user message and stream the response
@@ -254,6 +265,8 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
       } catch (err: any) {
         console.error(`[Scheduler] Task execution error (${item.id}):`, err.message)
       }
+      // Auto-complete the task after execution so it doesn't re-fire on restart
+      agent.calendar.complete(item.id)
     }
     // After firing, reschedule for the next due task
     scheduleTaskTimer()

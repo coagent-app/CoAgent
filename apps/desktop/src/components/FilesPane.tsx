@@ -18,6 +18,8 @@ interface FilesPaneProps {
   onReorderFolders: (order: string[]) => void
   onMoveFolder: (folderPath: string, newParentPath: string) => void
   onSearchFiles: (query: string) => void
+  organizing?: boolean
+  onAutoOrganize?: () => void
 }
 
 type ContextMenu =
@@ -354,6 +356,8 @@ export function FilesPane({
   onReorderFolders,
   onMoveFolder,
   onSearchFiles,
+  organizing,
+  onAutoOrganize,
 }: FilesPaneProps) {
   const [currentPath, setCurrentPath] = useState<string>('')
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -1160,6 +1164,16 @@ export function FilesPane({
               </button>
             </div>
 
+            {onAutoOrganize && files.length >= 3 && (
+              <button
+                type="button"
+                onClick={onAutoOrganize}
+                disabled={organizing}
+                className="text-[12px] font-medium px-3 py-1.5 rounded-lg border border-blue-200 dark:border-blue-800 text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                {organizing ? 'Organizing…' : 'Auto-organize'}
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setCreatingFolder(true)}

@@ -43,7 +43,7 @@ async function saveToDisk(toolKey: string, embeddings: ToolEmbedding[]): Promise
   await writeFile(join(dataDir, CACHE_FILE), JSON.stringify(data), 'utf-8')
 }
 
-async function embed(texts: string[]): Promise<number[][]> {
+export async function embed(texts: string[]): Promise<number[][]> {
   const key = getOpenAIKey()
   if (!key) return texts.map(() => [])
   const res = await fetch(OPENAI_EMBED_URL, {
@@ -56,7 +56,7 @@ async function embed(texts: string[]): Promise<number[][]> {
   return data.data.map(d => d.embedding)
 }
 
-function cosine(a: number[], b: number[]): number {
+export function cosine(a: number[], b: number[]): number {
   let dot = 0, na = 0, nb = 0
   for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i] }
   const denom = Math.sqrt(na) * Math.sqrt(nb)
@@ -111,7 +111,7 @@ export async function embedTools(tools: Anthropic.Tool[]): Promise<void> {
 export async function searchToolsByEmbedding(
   query: string,
   tools: Anthropic.Tool[],
-  limit = 12
+  limit = 8
 ): Promise<Anthropic.Tool[]> {
   const toolMap = new Map(tools.map(t => [t.name, t]))
 
@@ -124,12 +124,12 @@ export async function searchToolsByEmbedding(
         .sort((a, b) => b.score - a.score)
 
       // Take top results above threshold, with a gap detector:
-      // if there's a big score drop (>0.15) between adjacent results, cut there
+      // if there's a sharp score drop (>0.10) between adjacent results, cut there
       const results: Anthropic.Tool[] = []
       for (let i = 0; i < scored.length && results.length < limit; i++) {
-        if (scored[i].score < 0.3) break
+        if (scored[i].score < 0.45) break
         // Gap detection: if score drops sharply from previous, stop
-        if (i > 0 && results.length >= 3 && (scored[i - 1].score - scored[i].score) > 0.15) break
+        if (i > 0 && results.length >= 2 && (scored[i - 1].score - scored[i].score) > 0.10) break
         const tool = toolMap.get(scored[i].name)
         if (tool) results.push(tool)
       }
@@ -149,15 +149,17 @@ export async function searchToolsByEmbedding(
 
   const scored = tools.map(tool => {
     const name = tool.name.toLowerCase().replace(/_/g, ' ')
+    const desc = (tool.description ?? '').toLowerCase()
     let score = 0
     for (const w of words) {
       if (name.includes(w)) score += 4
+      else if (desc.includes(w)) score += 1
     }
     return { tool, score }
   })
 
   return scored
-    .filter(s => s.score > 0)
+    .filter(s => s.score >= 4)
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
     .map(s => s.tool)

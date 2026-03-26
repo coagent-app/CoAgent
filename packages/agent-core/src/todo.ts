@@ -72,4 +72,18 @@ export class TodoList {
     this.items = this.items.filter(i => i.id !== id)
     this.save()
   }
+
+  /** Returns the nearest future due time across all to-dos, or null if none have a due time */
+  getNextDueTime(): Date | null {
+    const now = new Date()
+    let nearest: Date | null = null
+    for (const item of this.items) {
+      if (!item.due) continue
+      const due = item.due.includes('T') ? new Date(item.due) : new Date(item.due + 'T00:00:00')
+      if (due > now && (nearest === null || due < nearest)) {
+        nearest = due
+      }
+    }
+    return nearest
+  }
 }

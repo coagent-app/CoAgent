@@ -122,7 +122,7 @@ export const INTEGRATIONS = [
   { slug: 'instagram', name: 'Instagram' },
   { slug: 'tiktok', name: 'TikTok' },
   { slug: 'reddit', name: 'Reddit' },
-  { slug: 'facebook_ads', name: 'Meta Ads' },
+  { slug: 'metaads', name: 'Meta Ads' },
   { slug: 'googleads', name: 'Google Ads' },
   { slug: 'semrush', name: 'SEMrush' },
   { slug: 'google_maps', name: 'Google Maps' },
@@ -144,9 +144,11 @@ export async function getIntegrationStatuses(
   apiKey: string,
   userId = 'default'
 ): Promise<{ slug: string; name: string; connected: boolean }[]> {
-  const composio = new Composio({ apiKey })
-  const result = await composio.connectedAccounts.list({ user_uuid: userId } as any)
-  const accounts = (result as any)?.items ?? []
+  const res = await fetch(`${COMPOSIO_BASE}/connected_accounts?limit=100&user_uuid=${encodeURIComponent(userId)}`, {
+    headers: { 'X-API-KEY': apiKey }
+  })
+  const data = await res.json() as { items?: any[] }
+  const accounts = data.items ?? []
   const connectedSlugs = new Set<string>(
     accounts
       .filter((a: any) => a.status === 'ACTIVE')

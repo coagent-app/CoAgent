@@ -56,6 +56,7 @@ export interface MCPServerConfig {
 export class MCPManager {
   private clients: Map<string, Client> = new Map()
   private toolCache: { tools: Anthropic.Tool[]; serverMap: Map<string, string> } | null = null
+  private cacheVersion = 0
 
   async connect(configs: MCPServerConfig[]): Promise<void> {
     for (const config of configs) {
@@ -70,32 +71,43 @@ export class MCPManager {
       )
       await client.connect(transport)
       this.clients.set(config.name, client)
+      this.cacheVersion++
+      this.toolCache = null
     }
   }
 
   async getAllTools(): Promise<{ tools: Anthropic.Tool[]; serverMap: Map<string, string> }> {
     if (this.toolCache) return this.toolCache
 
+    const versionAtStart = this.cacheVersion
     const tools: Anthropic.Tool[] = []
     const serverMap = new Map<string, string>() // tool name → server name
 
     for (const [serverName, client] of this.clients) {
-      const result = await client.listTools()
-      for (const tool of result.tools) {
-        tools.push({
-          name: tool.name,
-          description: tool.description ?? '',
-          input_schema: sanitizeSchema(tool.inputSchema) as Anthropic.Tool['input_schema']
-        })
-        serverMap.set(tool.name, serverName)
+      try {
+        const result = await client.listTools()
+        for (const tool of result.tools) {
+          tools.push({
+            name: tool.name,
+            description: tool.description ?? '',
+            input_schema: sanitizeSchema(tool.inputSchema) as Anthropic.Tool['input_schema']
+          })
+          serverMap.set(tool.name, serverName)
+        }
+      } catch (err) {
+        console.error(`[MCP] Failed to list tools from ${serverName}:`, (err as Error).message)
       }
     }
 
-    this.toolCache = { tools, serverMap }
-    return this.toolCache
+    // Only cache if no connections changed while we were listing
+    if (this.cacheVersion === versionAtStart) {
+      this.toolCache = { tools, serverMap }
+    }
+    return { tools, serverMap }
   }
 
   invalidateToolCache(): void {
+    this.cacheVersion++
     this.toolCache = null
   }
 
@@ -112,7 +124,13 @@ export class MCPManager {
   }
 
   async connectHttp(name: string, url: string, bearerToken?: string): Promise<void> {
-    this.toolCache = null
+    // Disconnect existing client for this name if any
+    const existing = this.clients.get(name)
+    if (existing) {
+      await existing.close().catch(() => {})
+      this.clients.delete(name)
+    }
+
     const transport = new StreamableHTTPClientTransport(new URL(url), {
       requestInit: bearerToken
         ? { headers: { Authorization: `Bearer ${bearerToken}` } }
@@ -124,13 +142,18 @@ export class MCPManager {
     )
     await client.connect(transport)
     this.clients.set(name, client)
+    // Invalidate AFTER client is registered so getAllTools() sees the new client
+    this.cacheVersion++
+    this.toolCache = null
+    console.log(`[MCP] Connected HTTP client: ${name} (${url.split('?')[0]})`)
   }
 
   async disconnectAll(): Promise<void> {
-    for (const client of this.clients.values()) {
-      await client.close()
+    for (const [name, client] of this.clients) {
+      await client.close().catch(err => console.warn(`[MCP] Error closing ${name}:`, (err as Error).message))
     }
     this.clients.clear()
+    this.cacheVersion++
     this.toolCache = null
   }
 }

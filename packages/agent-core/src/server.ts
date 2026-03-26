@@ -75,7 +75,7 @@ CoAgent is a personal AI assistant that runs privately on your computer. Nothing
 
 **I ask before doing anything risky.** If I'm about to do something that can't be undone — like sending an email or deleting something — I'll queue it up for you to approve first.
 
-**I keep a to-do list.** To-dos can have a specific due time. They fire at exactly their due time — no polling. A precise timer is set, and the machine is scheduled to wake from sleep if needed. Past-due times are rejected; all to-dos must be in the future. When a to-do fires, it appears in the chat as an auto-injected prompt and the response streams live.
+**I keep a schedule.** Routines (recurring cron), tasks (one-time with due time), and events (informational) all live in one schedule. Routines fire on their cron schedule. Tasks fire at their due time. Events are display-only. Everything is managed through chat.
 
 **I manage files.** Users can upload files (PDF, DOCX, XLSX, images, etc.) which are summarized and embedded for semantic search. An "Auto-organize" button clusters loose files into named folders using embeddings — files already in folders are left alone.
 
@@ -88,12 +88,12 @@ CoAgent is a personal AI assistant that runs privately on your computer. Nothing
 Consolidated tools — each handles multiple actions via an \`action\` parameter:
 - **memory** (search/grep/read/write/edit/append/list/delete) — long-term memory. Use directly, never via search_tools. Prefer search (semantic) or grep (pattern match within a file) over read.
 - **files** (list/search/read/delete/stats) — uploaded file management.
-- **todos** (add/complete/list) — to-do items with optional due times.
-- **skills** (save/list/delete) — reusable automations.
+- **schedule** (create/update/delete/complete/list) — unified schedule for routines (recurring cron), tasks (one-time due), and events (informational).
+- **skills** (save/list/delete/execute) — reusable automations. Use execute to run a skill by name — loads its full instructions for you to follow.
 - **search_tools** — find and load external service tools (Gmail, Calendar, Slack, etc.). Optional "context" param greps recent tool logs for activity context.
 - **queue_approval** / **add_done_item** — approval queue and activity log.
 
-When multiple independent tool calls are needed, batch them in a single response (e.g. memory read + todos list + get_current_time in one turn).
+When multiple independent tool calls are needed, batch them in a single response (e.g. memory read + schedule list + get_current_time in one turn).
 
 **Token efficiency:** Old tool results are automatically compacted after 2 conversation turns — raw data gets truncated but my text responses (which contain the processed info) stay intact. This keeps history lean without losing context.
 
@@ -265,6 +265,8 @@ writeDefaultSkills().catch(err => console.error('[Server] Failed to write defaul
 
 const agent = new Agent(buildMcpConfigs(), DATA_DIR)
 
+let wss: WebSocketServer | null = null
+
 const scheduler = startScheduler(agent, DATA_DIR, {
   onHeartbeat: (status, summary) => {
     broadcast({ type: 'heartbeat', status, summary })
@@ -362,7 +364,7 @@ try {
   }
 } catch {}
 
-const wss = new WebSocketServer({ host: '127.0.0.1', port: PORT })
+wss = new WebSocketServer({ host: '127.0.0.1', port: PORT })
 
 relay.connect()
 
@@ -371,6 +373,7 @@ function send(ws: WebSocket, msg: WSServerMessage): void {
 }
 
 function broadcast(msg: WSServerMessage): void {
+  if (!wss) return
   for (const client of wss.clients) {
     if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(msg))
   }
@@ -639,6 +642,22 @@ wss.on('connection', (ws) => {
     if (msg.type === 'delete_todo') {
       agent.calendar.delete(msg.id)
       send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
+    }
+
+    if (msg.type === 'get_calendar') {
+      send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
+    }
+
+    if (msg.type === 'complete_calendar_entry') {
+      agent.calendar.complete(msg.id)
+      agent.onCalendarChanged?.()
+      broadcast({ type: 'calendar_update', entries: agent.calendar.getAll() })
+    }
+
+    if (msg.type === 'delete_calendar_entry') {
+      agent.calendar.delete(msg.id)
+      agent.onCalendarChanged?.()
+      broadcast({ type: 'calendar_update', entries: agent.calendar.getAll() })
     }
 
     if (msg.type === 'get_integrations') {

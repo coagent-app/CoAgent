@@ -4,9 +4,9 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Input } from '@/components/ui/input'
 import { Separator } from '@/components/ui/separator'
 import { cn } from '@/lib/utils'
-import type { AgentSettings, DayName, Autonomy, RelayUsage } from '@coagent/shared'
+import type { AgentSettings, DayName, Autonomy, RelayUsage, UsageSummary } from '@coagent/shared'
 
-type SettingsTab = 'general' | 'model' | 'keys'
+type SettingsTab = 'general' | 'model' | 'keys' | 'usage'
 
 interface SettingsPaneProps {
   settings: AgentSettings | null
@@ -20,6 +20,8 @@ interface SettingsPaneProps {
   apiKeyStatus: { anthropic: boolean; composio: boolean; openai: boolean } | null
   onUpdateApiKeys: (keys: { anthropic?: string; composio?: string; openai?: string }) => void
   onSetModel: (model: string) => void
+  usage?: UsageSummary | null
+  onRefreshUsage?: () => void
 }
 
 // --- Shared UI ---
@@ -448,15 +450,92 @@ function KeysTab({ apiKeyStatus, onUpdateApiKeys }: {
   )
 }
 
+// --- Tab: Usage ---
+
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
+  return String(n)
+}
+
+function UsageTab({ usage, onRefresh }: { usage: UsageSummary | null; onRefresh?: () => void }) {
+  useEffect(() => { onRefresh?.() }, [onRefresh])
+
+  if (!usage) {
+    return (
+      <>
+        <SectionHeader eyebrow="Billing" title="Token Usage" />
+        <p className="text-[13px] text-neutral-400 dark:text-neutral-500">Loading usage data...</p>
+      </>
+    )
+  }
+
+  const categories: { key: 'chat' | 'file_ingestion' | 'nightly_job'; label: string }[] = [
+    { key: 'chat', label: 'Chat & Heartbeats' },
+    { key: 'file_ingestion', label: 'File Ingestion' },
+    { key: 'nightly_job', label: 'Nightly Job' },
+  ]
+
+  return (
+    <>
+      <SectionHeader eyebrow="Billing" title="Token Usage" />
+      <p className="text-[13px] text-neutral-500 dark:text-neutral-400 mb-5">
+        Estimated costs for the last 30 days. Billed at exact provider rates.
+      </p>
+
+      {/* Total cost card */}
+      <div className="px-4 py-4 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 mb-5">
+        <p className="text-[11px] font-semibold text-neutral-400 dark:text-neutral-500 uppercase tracking-widest mb-1">Estimated Total</p>
+        <p className="text-[28px] font-bold text-neutral-900 dark:text-neutral-100 tracking-tight">
+          ${usage.estimatedCostUsd.toFixed(2)}
+        </p>
+        <div className="flex gap-4 mt-2">
+          <span className="text-[12px] text-neutral-500 dark:text-neutral-400">{formatTokens(usage.totalInputTokens)} input</span>
+          <span className="text-[12px] text-neutral-500 dark:text-neutral-400">{formatTokens(usage.totalOutputTokens)} output</span>
+          {usage.totalCacheReadTokens > 0 && (
+            <span className="text-[12px] text-emerald-600 dark:text-emerald-400">{formatTokens(usage.totalCacheReadTokens)} cached</span>
+          )}
+        </div>
+      </div>
+
+      {/* Breakdown by category */}
+      <SectionHeader eyebrow="Breakdown" title="By category" />
+      <div className="flex flex-col gap-2.5">
+        {categories.map(({ key, label }) => {
+          const cat = usage.byCategory[key]
+          const totalTokens = cat.inputTokens + cat.outputTokens
+          if (totalTokens === 0) return null
+          return (
+            <div key={key} className="px-4 py-3 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[13px] font-semibold text-neutral-900 dark:text-neutral-100">{label}</span>
+                <span className="text-[13px] font-semibold text-neutral-900 dark:text-neutral-100">${cat.costUsd.toFixed(2)}</span>
+              </div>
+              <div className="flex gap-4">
+                <span className="text-[12px] text-neutral-400 dark:text-neutral-500">{formatTokens(cat.inputTokens)} in</span>
+                <span className="text-[12px] text-neutral-400 dark:text-neutral-500">{formatTokens(cat.outputTokens)} out</span>
+                {cat.cacheReadTokens > 0 && (
+                  <span className="text-[12px] text-emerald-600 dark:text-emerald-400">{formatTokens(cat.cacheReadTokens)} cached</span>
+                )}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </>
+  )
+}
+
 // --- Main ---
 
 const TABS: { id: SettingsTab; label: string }[] = [
   { id: 'general', label: 'General' },
   { id: 'model', label: 'Model' },
   { id: 'keys', label: 'API Keys' },
+  { id: 'usage', label: 'Usage' },
 ]
 
-export function SettingsPane({ settings, onUpdate, apiKeyStatus, onUpdateApiKeys, onSetModel }: SettingsPaneProps) {
+export function SettingsPane({ settings, onUpdate, apiKeyStatus, onUpdateApiKeys, onSetModel, usage, onRefreshUsage }: SettingsPaneProps) {
   const [tab, setTab] = useState<SettingsTab>('general')
 
   if (!settings) {
@@ -496,6 +575,7 @@ export function SettingsPane({ settings, onUpdate, apiKeyStatus, onUpdateApiKeys
           {tab === 'general' && <GeneralTab settings={settings} onUpdate={onUpdate} />}
           {tab === 'model' && <ModelTab settings={settings} onSetModel={onSetModel} />}
           {tab === 'keys' && <KeysTab apiKeyStatus={apiKeyStatus} onUpdateApiKeys={onUpdateApiKeys} />}
+          {tab === 'usage' && <UsageTab usage={usage ?? null} onRefresh={onRefreshUsage} />}
           <div className="h-8" />
         </div>
       </ScrollArea>

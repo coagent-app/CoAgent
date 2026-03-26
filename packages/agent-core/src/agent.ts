@@ -144,15 +144,14 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'search_tools',
-    description: 'Find tools by description. Use before calling any external service. Optionally search recent activity and memory for context.',
+    description: 'Find tools and gather context for external services. Always include context to search past interactions.',
     input_schema: {
       type: 'object' as const,
       properties: {
         query: { type: 'string', description: 'e.g. "send email", "create calendar event"' },
-        context: { type: 'string', description: 'Semantic search recent tool logs, e.g. "real estate meeting" or "email from Alex"' },
-        memory_context: { type: 'string', description: 'Search long-term memory for context, e.g. "Brett project deadlines" or "Alex Morris contact"' }
+        context: { type: 'string', description: 'Search past interactions — messages sent, channels used, user IDs, email addresses, e.g. "Nathan slack" or "email from Alex"' }
       },
-      required: ['query']
+      required: ['query', 'context']
     }
   },
   {
@@ -209,20 +208,21 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
     }
   },
   {
-    name: 'calendar',
-    description: 'Unified calendar for routines, tasks, and events. Actions: create (type+label+timing+instruction), update (id+fields), delete (id), complete (id — tasks only), list (optional type filter).',
+    name: 'schedule',
+    description: 'Unified schedule for routines, tasks, and events. Actions: create (type+label+timing), update (id+fields), delete (id), complete (id — tasks only), list (optional type filter). Type rules: routine = recurring agent action (cron + instruction, fires and executes), task = one-time to-do (due + instruction, fires at due time and executes), event = calendar block (start+end + notes, display only, no execution). Tasks with a due time MUST have an instruction so the agent knows what to do when it fires. Reminders and to-dos are TASKS, not events.',
     input_schema: {
       type: 'object' as const,
       properties: {
         action: { type: 'string', enum: ['create', 'update', 'delete', 'complete', 'list'] },
-        type: { type: 'string', enum: ['routine', 'task', 'event'], description: 'Entry type (for create)' },
+        type: { type: 'string', enum: ['routine', 'task', 'event'], description: 'routine = recurring (cron+instruction), task = one-time to-do (due+instruction), event = meeting/appointment (start+end+notes)' },
         id: { type: 'string', description: 'Entry ID (for update/delete/complete)' },
         label: { type: 'string', description: 'Display name' },
         cron: { type: 'string', description: 'Cron expression for routines, e.g. "0 9 * * 1-5"' },
         due: { type: 'string', description: 'ISO datetime for tasks, e.g. "2026-03-28T14:30:00"' },
         start: { type: 'string', description: 'ISO datetime for event start' },
         end: { type: 'string', description: 'ISO datetime for event end' },
-        instruction: { type: 'string', description: 'What to execute when routine/task fires' },
+        instruction: { type: 'string', description: 'What the agent executes when routine/task fires. Required for tasks with due time.' },
+        notes: { type: 'string', description: 'Context/details for any entry type (meeting agenda, reminder details, etc.)' },
         enabled: { type: 'boolean', description: 'Enable/disable (default true)' },
         filter_type: { type: 'string', enum: ['routine', 'task', 'event'], description: 'Filter for list action' },
       },
@@ -231,12 +231,12 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'skills',
-    description: 'Manage reusable skills. Actions: save (name/description/instructions required), list, delete (by name). Users invoke with @skill-name.',
+    description: 'Manage reusable skills. Actions: save (name/description/instructions required), list, delete (by name), execute (by name — loads and returns full instructions for you to follow). Users invoke with @skill-name.',
     input_schema: {
       type: 'object' as const,
       properties: {
-        action: { type: 'string', enum: ['save', 'list', 'delete'] },
-        name: { type: 'string', description: 'Kebab-case name (for save/delete)' },
+        action: { type: 'string', enum: ['save', 'list', 'delete', 'execute'] },
+        name: { type: 'string', description: 'Kebab-case name (for save/delete/execute)' },
         description: { type: 'string', description: 'One-line description (for save)' },
         instructions: { type: 'string', description: 'Full instructions (for save)' }
       },
@@ -360,7 +360,7 @@ function buildSystemPrompt(connectedServices: string[], agentProfilePath: string
   const isFirstRun = !existsSync(agentProfilePath)
 
   const serviceSection = connectedServices.length > 0
-    ? `Connected external services: ${connectedServices.join(', ')}. Use search_tools to find the right tool before calling it.`
+    ? `Connected external services: ${connectedServices.join(', ')}. search_tools is how you find tools AND gather context for external services — always include context to search past interactions (messages, channels, user IDs, emails). Use the memory tool separately for contacts and preferences. Act on what you find, don't ask the user to confirm details you already have.`
     : 'No external services are connected yet. If the user wants to connect tools, tell them to open Settings and connect their integrations.'
 
   const onboardingSection = isFirstRun
@@ -392,11 +392,11 @@ File listings: plain text (e.g. "- report.md — summary"). Only use [filename](
 Memory: your long-term brain — history only shows recent messages. Use the memory tool directly (NOT search_tools). Prefer search (semantic) or grep (pattern match within a file) over read (dumps entire file). Only use read when you need the full file. Write things down immediately: names, dates, preferences, decisions. If unsure whether to save, save it. Always search memory before saying you don't know. Files: setup.md (read-only), agent.md, routines.md, preferences.md, contacts.md, projects.md. Update when you learn something new. Delete stale entries.
 
 Routine tasks: act, then add_done_item. High-stakes actions: queue_approval with full draft in "detail" and recipient/subject in "metadata".
-On heartbeat: use memory tool (action: read, file: routines.md) to check routines, use calendar (action: list) to check routines and tasks, check queue. If nothing needs attention, reply "All clear." immediately.
+On heartbeat: use memory tool (action: read, file: routines.md) to check routines, use schedule (action: list) to check routines and tasks, check queue. If nothing needs attention, reply "All clear." immediately.
 
-- **calendar** (create/update/delete/complete/list) — unified calendar for routines (recurring cron), tasks (one-time due), and events (informational).
+- **schedule** (create/update/delete/complete/list) — unified schedule for routines (recurring cron), tasks (one-time due), and events (informational).
 
-When you need multiple independent pieces of information, call all the tools in a single response (e.g. read memory + use calendar (action: list) to check routines and tasks + check time in one turn). This is faster and cheaper.
+When you need multiple independent pieces of information, call all the tools in a single response (e.g. read memory + use schedule (action: list) to check routines and tasks + check time in one turn). This is faster and cheaper.
 
 Concise responses. No emojis. Markdown only when helpful.${onboardingSection}`
 }
@@ -553,9 +553,9 @@ export class Agent {
       const result = await this.runLoopPromise
 
       // Heartbeat escalation: if Haiku found work to do, hand off to Sonnet
+      // Note: keep runLoopPromise set during escalation so concurrent triggers are blocked
       if (context === 'heartbeat' && result && !result.toLowerCase().includes('all clear')) {
         console.log('[Agent] Heartbeat found action needed — escalating to Sonnet')
-        this.runLoopPromise = null
         this.conversationHistory.push({ role: 'user', content: `[Escalated from heartbeat triage] Haiku identified the following. Take action now:\n\n${result}` })
         this.runLoopPromise = this.runLoop(onChunk, 'webhook', onToolCall)
         await this.runLoopPromise
@@ -799,7 +799,7 @@ export class Agent {
               })
               continue
             }
-            const input = block.input as { query: string; context?: string; memory_context?: string }
+            const input = block.input as { query: string; context?: string }
             const query = input.query
             const matches = await searchToolsByEmbedding(query, searchableTools)
 
@@ -816,39 +816,18 @@ export class Agent {
                 matches.map(t => `- ${t.name}: ${t.description ?? ''}`).join('\n')
             }
 
-            // Run context and memory_context searches in parallel
-            const [logResults, memResults] = await Promise.all([
-              input.context
-                ? searchToolLogs(this.dataDir, input.context)
-                : Promise.resolve(null),
-              input.memory_context
-                ? this.mcpManager.callTool('memory', 'search_memory', { query: input.memory_context, top_k: 3 })
-                    .then(raw => {
-                      // Trim each result to ~1 line for concise context
-                      return raw.split('\n\n')
-                        .filter((s: string) => s.trim().length > 0)
-                        .slice(0, 3)
-                        .map((s: string) => s.length > 150 ? s.slice(0, 150) + '…' : s)
-                    })
-                    .catch(() => null)
-                : Promise.resolve(null),
-            ])
-
-            if (logResults && logResults.length > 0) {
-              result += `\n\nRecent activity:\n` +
-                logResults.map(l => `- ${l}`).join('\n')
-            } else if (input.context) {
-              result += `\n\nNo recent activity matching "${input.context}".`
+            // Search past interactions (tool logs) for context
+            if (input.context) {
+              const logResults = await searchToolLogs(this.dataDir, input.context)
+              if (logResults && logResults.length > 0) {
+                result += `\n\nRecent activity:\n` +
+                  logResults.map(l => `- ${l}`).join('\n')
+              } else {
+                result += `\n\nNo recent activity matching "${input.context}".`
+              }
             }
 
-            if (memResults && memResults.length > 0) {
-              result += `\n\nFrom memory:\n` +
-                memResults.map((m: string) => `- ${m}`).join('\n')
-            } else if (input.memory_context) {
-              result += `\n\nNo memory matches for "${input.memory_context}".`
-            }
-
-            console.log(`[Agent] search_tools("${query}"${input.context ? `, context: "${input.context}"` : ''}${input.memory_context ? `, memory: "${input.memory_context}"` : ''}) → ${matches.map(t => t.name).join(', ')}`)
+            console.log(`[Agent] search_tools("${query}"${input.context ? `, context: "${input.context}"` : ''}) → ${matches.map(t => t.name).join(', ')}`)
 
           } else if (block.name === 'queue_approval') {
             this.queue.add(block.input as Parameters<ApprovalQueue['add']>[0])
@@ -864,7 +843,7 @@ export class Agent {
             result = 'Settings updated.'
             this.onSettingsChanged?.()
 
-          } else if (block.name === 'calendar') {
+          } else if (block.name === 'schedule') {
             const input = block.input as Record<string, any>
             const action = input.action as string
 
@@ -877,6 +856,7 @@ export class Agent {
                 start: input.start,
                 end: input.end,
                 instruction: input.instruction,
+                notes: input.notes,
                 enabled: input.enabled ?? true,
               })
               result = `Created ${entry.type}: "${entry.label}" (${entry.id})`
@@ -962,6 +942,13 @@ export class Agent {
                 const deleted = await deleteSkill(this.dataDir, input.name!)
                 result = deleted ? `Skill @${input.name} deleted.` : `Skill @${input.name} not found.`
                 if (deleted) this.onSkillsChanged?.()
+              }
+            } else if (input.action === 'execute') {
+              const skill = await loadSkill(this.dataDir, input.name!)
+              if (!skill) {
+                result = `Skill @${input.name} not found. Use skills(action: 'list') to see available skills.`
+              } else {
+                result = `[Skill: ${skill.name}]\n${skill.instructions}\n[/Skill]\n\nFollow these instructions now.`
               }
             } else {
               const allSkills = await listSkills(this.dataDir)
@@ -1064,8 +1051,8 @@ export class Agent {
                 result = raw.length > MAX_TOOL_RESULT
                   ? raw.slice(0, MAX_TOOL_RESULT) + `\n\n[Truncated: ${raw.length - MAX_TOOL_RESULT} chars omitted from history to save context]`
                   : raw
-                // Auto-log tool call for pattern extraction (3 AM)
-                logToolCall(this.dataDir, serverName, block.name, toolInput)
+                // Auto-log tool call + result for context search and 3 AM extraction
+                logToolCall(this.dataDir, serverName, block.name, toolInput, result)
 
                 // Context for integrations is now provided via search_tools context param
                 // (greps tool logs) — no more briefing injection
@@ -1119,7 +1106,7 @@ export class Agent {
       const dayName = new Date().toLocaleDateString('en-US', { weekday: 'long' })
       const hour = new Date().getHours()
       const timeOfDay = hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : 'evening'
-      return `[Heartbeat triage — Current time: ${time}, ${dayName} ${timeOfDay}]\n\nYou are triaging. DO NOT take action — only assess and report.\n\n1. Use memory tool (action: read, file: routines.md) — only look at sections relevant to this time of day (${timeOfDay}).\n2. Use calendar (action: list) — check for due tasks and active routines.${dueSection}\n3. Check pending queue items.\n\nThe current time is ${time}. Focus on what's relevant RIGHT NOW. Use your judgment — not everything needs to be surfaced.\n\nIf nothing needs attention, reply exactly "All clear."\nOtherwise, reply with a brief summary of what needs to be done. Do NOT take action yourself — a more capable model will handle it.`
+      return `[Heartbeat triage — Current time: ${time}, ${dayName} ${timeOfDay}]\n\nYou are triaging. DO NOT take action — only assess and report.\n\n1. Use memory tool (action: read, file: routines.md) — only look at sections relevant to this time of day (${timeOfDay}).\n2. Use schedule (action: list) — check for due tasks and active routines.${dueSection}\n3. Check pending queue items.\n\nThe current time is ${time}. Focus on what's relevant RIGHT NOW. Use your judgment — not everything needs to be surfaced.\n\nIf nothing needs attention, reply exactly "All clear."\nOtherwise, reply with a brief summary of what needs to be done. Do NOT take action yourself — a more capable model will handle it.`
     }
     if (trigger.source === 'todo_due' || trigger.source === 'task_due') {
       const payload = trigger.payload as any
@@ -1127,7 +1114,7 @@ export class Agent {
       const todoId = payload?.todoId ?? payload?.id ?? ''
       const context = payload?.context ?? payload?.instruction ?? ''
       const contextSection = context ? `\n\nContext notes:\n${context}` : ''
-      return `[Scheduled task — ${time}] A task is now due. Execute it immediately.\n\nTask: ${task}\nTask ID: ${todoId}${contextSection}\n\n1. Read agent.md and any relevant memory for additional context.\n2. Carry out the task fully — use all available tools.\n3. When done, mark it complete with the calendar tool (action: complete).\n4. Add a done item describing what you did.`
+      return `[Scheduled task — ${time}] A task is now due. Execute it.\n\nTask: ${task}\nTask ID: ${todoId}${contextSection}\n\n1. Read agent.md and any relevant memory for additional context.\n2. Carry out the task using the correct tools.\n3. When done, mark it complete with the schedule tool (action: complete).\n4. Add a done item describing what you did.\n\nDo not do anything outside the scope of this task.`
     }
     if (trigger.source === 'webhook') return `[Webhook — ${time}] Event received: ${JSON.stringify(trigger.payload)}. Search memory and handle it.`
     return `[Manual — ${time}] ${trigger.payload?.message ?? ''}`

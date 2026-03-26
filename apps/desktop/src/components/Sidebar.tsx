@@ -112,7 +112,7 @@ export function Sidebar({ view, onViewChange, queueCount, integrations, onConnec
 
       <div className="flex flex-col gap-0.5 mb-2">
         <NavItem icon={MessageSquare} label="Chat" active={view === 'chat'} onClick={() => onViewChange('chat')} />
-        <NavItem icon={CalendarIcon} label="Calendar" active={view === 'calendar'} onClick={() => onViewChange('calendar')} />
+        <NavItem icon={CalendarIcon} label="Schedule" active={view === 'calendar'} onClick={() => onViewChange('calendar')} />
         <NavItem icon={Inbox} label="Queue" active={view === 'queue'} onClick={() => onViewChange('queue')} badge={queueCount} />
         <NavItem icon={FolderOpen} label="Files" active={view === 'files'} onClick={() => onViewChange('files')} />
       </div>

@@ -5,7 +5,7 @@ use std::ffi::c_void;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::Mutex;
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, Listener, Manager};
 
 // ── File logging (visible when launched from Finder where stderr is lost) ────
 fn log(msg: &str) {
@@ -66,6 +66,8 @@ unsafe fn create_nsstring(s: &str) -> *mut c_void {
     objc_msg_1(alloc, sel("initWithUTF8String:"), cstr.as_ptr() as *mut c_void)
 }
 
+// Whether voice mode is enabled (controlled by frontend settings)
+static VOICE_ENABLED: AtomicBool = AtomicBool::new(false);
 // Whether fn key is currently held (for press/release edge detection in callback)
 static FN_DOWN: AtomicBool = AtomicBool::new(false);
 static CTRL_DOWN: AtomicBool = AtomicBool::new(false);
@@ -214,6 +216,11 @@ extern "C" fn fn_key_callback(
         if !tap.is_null() { unsafe { cg::CGEventTapEnable(tap, true); } }
         return event;
     }
+    // If voice mode is disabled, don't intercept fn key at all
+    if !VOICE_ENABLED.load(Ordering::Relaxed) {
+        return event;
+    }
+
     let flags = unsafe { cg::CGEventGetFlags(event) };
     let is_fn = (flags & FN_FLAG) != 0;
     let is_ctrl = (flags & CTRL_FLAG) != 0;
@@ -372,7 +379,7 @@ fn main() {
                     }
                 });
 
-                // Position at bottom center and show (idle state — small mic icon)
+                // Position at bottom center (but don't show yet — wait for voice-enabled setting from frontend)
                 if let Ok(Some(monitor)) = pill_win.primary_monitor() {
                     let screen = monitor.size();
                     let scale = monitor.scale_factor();
@@ -383,8 +390,38 @@ fn main() {
                     let y = logical_h - 170.0;
                     let _ = pill_win.set_position(tauri::LogicalPosition::new(x, y));
                 }
-                let _ = pill_win.show();
             }
+
+            // Listen for voice mode toggle from frontend settings
+            app.listen("set-voice-mode", |event| {
+                // Payload is JSON: {"enabled": true/false}
+                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(event.payload()) {
+                    let enabled = payload.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+                    VOICE_ENABLED.store(enabled, Ordering::Release);
+                    log(&format!("[Voice] Mode set to: {}", if enabled { "enabled" } else { "disabled" }));
+
+                    if let Some(handle) = APP_HANDLE.get() {
+                        if let Some(pill) = handle.get_webview_window("voice-pill") {
+                            if enabled {
+                                // Show and position the pill
+                                if let Ok(Some(monitor)) = pill.primary_monitor() {
+                                    let screen = monitor.size();
+                                    let scale = monitor.scale_factor();
+                                    let logical_w = screen.width as f64 / scale;
+                                    let logical_h = screen.height as f64 / scale;
+                                    let pill_w = 440.0;
+                                    let x = (logical_w - pill_w) / 2.0;
+                                    let y = logical_h - 170.0;
+                                    let _ = pill.set_position(tauri::LogicalPosition::new(x, y));
+                                }
+                                let _ = pill.show();
+                            } else {
+                                let _ = pill.hide();
+                            }
+                        }
+                    }
+                }
+            });
 
             // Check Accessibility permission — prompt user if missing
             let trusted = ax::is_trusted(true); // true = show macOS prompt dialog
