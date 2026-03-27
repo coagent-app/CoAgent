@@ -517,7 +517,7 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
                 <span className="w-1.5 h-1.5 bg-neutral-400 dark:bg-neutral-500 rounded-full animate-bounce [animation-delay:150ms]" />
                 <span className="w-1.5 h-1.5 bg-neutral-400 dark:bg-neutral-500 rounded-full animate-bounce [animation-delay:300ms]" />
                 {toolLabel && (
-                  <span className="text-[12px] text-neutral-400 dark:text-neutral-500 ml-1">{toolLabel}...</span>
+                  <span className="text-[12px] ml-1 shimmer-text">{toolLabel}...</span>
                 )}
               </div>
             </div>

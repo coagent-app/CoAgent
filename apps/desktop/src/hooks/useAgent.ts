@@ -156,6 +156,9 @@ export function useAgent() {
           // Show summary in pill, then auto-hide after delay
           import('@/lib/voice').then(v => v.showVoiceSummary(msg.summary))
         }
+        if (msg.type === 'voice_tts_audio') {
+          import('@/lib/voice').then(v => v.playTtsAudio(msg.data))
+        }
         if (msg.type === 'usage_update') setUsage(msg.usage)
         if (msg.type === 'auto_organize_done') setOrganizing(false)
         if (msg.type === 'calendar_update') setCalendarEntries(msg.entries)

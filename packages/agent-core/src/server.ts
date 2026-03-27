@@ -10,6 +10,7 @@ import { startScheduler } from './scheduler.js'
 import { readSettings, writeSettings } from './settings.js'
 
 import { listFiles, listFolders, ingestFile, deleteFileEntry, createFolder, moveFile, moveFolder, renameFile, renameFolder, deleteFolder, saveFolderOrder, searchFiles, autoOrganizeFiles } from './file-store.js'
+import { embedTools, setToolEmbeddingsDir } from './tool-embeddings.js'
 import { writeRelayCredentials, getRelayConfig, writeApiKeys, loadApiKeysToEnv, getApiKeyStatus } from './auth.js'
 import { getUsageSummary } from './usage-tracker.js'
 import { RelayClient } from './relay-client.js'
@@ -22,6 +23,96 @@ import { homedir } from 'os'
 // shell) are respected; dotenv fills in whatever remains.
 loadApiKeysToEnv(join(homedir(), '.coagent'))
 config({ path: join(homedir(), '.coagent', '.env') })
+
+// ── OpenAI TTS helper ─────────────────────────────────────────────────────────
+function stripMdForTts(s: string): string {
+  return s
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/\*(.+?)\*/g, '$1')
+    .replace(/__(.+?)__/g, '$1')
+    .replace(/_(.+?)_/g, '$1')
+    .replace(/~~(.+?)~~/g, '$1')
+    .replace(/`(.+?)`/g, '$1')
+    .replace(/^#+\s+/gm, '')
+    .replace(/^[-*]\s+/gm, '')
+    .replace(/^\d+\.\s+/gm, '')
+    .replace(/\[(.+?)\]\(.+?\)/g, '$1')
+    .replace(/\n+/g, ' ')
+    .trim()
+}
+
+function firstNSentences(s: string, n: number): string {
+  let count = 0
+  const re = /[.!?]\s/g
+  let m: RegExpExecArray | null
+  let lastEnd = 0
+  while ((m = re.exec(s)) !== null) {
+    count++
+    lastEnd = m.index + 1
+    if (count >= n) break
+  }
+  return count >= n ? s.slice(0, lastEnd) : s
+}
+
+async function generateTts(text: string): Promise<string | null> {
+  const apiKey = process.env.OPENAI_API_KEY
+  if (!apiKey) { console.log('[TTS] No OpenAI key'); return null }
+  const clean = firstNSentences(stripMdForTts(text), 2)
+  if (!clean) { console.log('[TTS] No text after cleanup'); return null }
+  console.log('[TTS] Generating audio for:', clean.slice(0, 80))
+  try {
+    const res = await fetch('https://api.openai.com/v1/audio/speech', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'tts-1', input: clean, voice: 'alloy', response_format: 'mp3' }),
+    })
+    if (!res.ok) {
+      console.error('[TTS] OpenAI error:', res.status, await res.text())
+      return null
+    }
+    const buf = Buffer.from(await res.arrayBuffer())
+    return buf.toString('base64')
+  } catch (err: any) {
+    console.error('[TTS] Failed:', err.message)
+    return null
+  }
+}
+
+// Prevent MCP stdio errors from crashing the server when a child process dies.
+// The MCP SDK's StdioClientTransport emits 'error' on the child's Socket which
+// becomes an uncaughtException if unhandled. Catch pipe/stream errors broadly.
+process.on('uncaughtException', (err: any) => {
+  const code = err?.code
+  const msg = err?.message ?? ''
+  const isStreamError =
+    code === 'EPIPE' ||
+    code === 'ECONNRESET' ||
+    code === 'ERR_STREAM_DESTROYED' ||
+    code === 'ERR_STREAM_WRITE_AFTER_END' ||
+    (err?.syscall === 'write' && (code === 'EPIPE' || code === 'ECONNRESET')) ||
+    msg.includes('EPIPE') ||
+    msg.includes('write after end') ||
+    msg.includes('stream destroyed')
+  if (isStreamError) {
+    console.error(`[Server] Stream error caught (${code ?? msg.slice(0, 60)}) — continuing`)
+    return
+  }
+  console.error('[Server] Uncaught exception:', err)
+  process.exit(1)
+})
+
+process.on('unhandledRejection', (reason: any) => {
+  const code = reason?.code
+  const msg = reason?.message ?? ''
+  const isStreamError =
+    code === 'EPIPE' || code === 'ECONNRESET' || code === 'ERR_STREAM_DESTROYED' ||
+    msg.includes('EPIPE') || msg.includes('stream destroyed')
+  if (isStreamError) {
+    console.error(`[Server] Unhandled stream rejection (${code ?? msg.slice(0, 60)}) — continuing`)
+    return
+  }
+  console.error('[Server] Unhandled rejection:', reason)
+})
 
 const PORT = parseInt(process.env.COAGENT_PORT ?? '7830')
 
@@ -309,6 +400,18 @@ let currentMcpSlugs: string[] = []
 // Always-on toolkits that require no auth — loaded regardless of user connections
 const ALWAYS_ON_TOOLKITS = ['composio_search', 'text_to_pdf']
 
+/** Embed tools + params into LanceDB after MCP connects or refreshes */
+async function embedToolsFromMcp(): Promise<void> {
+  try {
+    const { tools, serverMap } = await agent.mcpManager.getAllTools()
+    // Embed non-memory tools (the ones search_tools searches over)
+    const searchable = tools.filter(t => serverMap.get(t.name) !== 'memory')
+    await embedTools(searchable)
+  } catch (err: any) {
+    console.warn('[Server] Tool embedding failed:', err.message)
+  }
+}
+
 async function refreshComposioMcp(slugs: string[]): Promise<void> {
   // Merge with current slugs so we never drop recently-added integrations
   // (Composio may report them as not-yet-ACTIVE during OAuth flow)
@@ -320,6 +423,8 @@ async function refreshComposioMcp(slugs: string[]): Promise<void> {
   currentMcpSlugs = mergedSlugs
   updateSetupMd(mergedSlugs).catch(err => console.error('[Server] Failed to update setup.md:', err.message))
   console.log('[Composio] MCP refreshed with toolkits:', mergedSlugs.join(', '))
+  // Embed new tools + params immediately so they're ready before the user types
+  embedToolsFromMcp().catch(() => {})
 }
 
 if (process.env.COMPOSIO_API_KEY) {
@@ -339,6 +444,9 @@ if (process.env.COMPOSIO_API_KEY) {
     currentMcpSlugs = userToolkits
     updateSetupMd(slugs).catch(err => console.error('[Server] Failed to update setup.md:', err.message))
     console.log('[Composio] MCP connected with toolkits:', toolkits.join(', '))
+    // Embed tools + params on connect so they're ready before the first message
+    setToolEmbeddingsDir(DATA_DIR)
+    embedToolsFromMcp().catch(() => {})
     // Subscribe triggers for all currently connected integrations
     for (const slug of slugs) {
       subscribeTriggersForSlug(process.env.COMPOSIO_API_KEY!, slug)
@@ -382,7 +490,7 @@ function broadcast(msg: WSServerMessage): void {
 async function sendIntegrations(ws: WebSocket): Promise<void> {
   if (!process.env.COMPOSIO_API_KEY) {
     // No key — show all integrations as disconnected so user sees what's possible
-    send(ws, { type: 'integrations_update', integrations: INTEGRATIONS.map(i => ({ ...i, connected: false })) })
+    send(ws, { type: 'integrations_update', integrations: INTEGRATIONS.map(({ slug, name, category, description, capabilities }) => ({ slug, name, category, description, capabilities, connected: false })) })
     return
   }
   const integrations = await getIntegrationStatuses(process.env.COMPOSIO_API_KEY)
@@ -529,12 +637,20 @@ wss.on('connection', (ws) => {
             send(ws, { type: 'tool_start', tool, label })
           }
         )
-        send(ws, { type: 'chat_response', message: { role: 'assistant', content: streamed || response, timestamp: new Date().toISOString() } })
+        const fullResponse = streamed || response
+        send(ws, { type: 'chat_response', message: { role: 'assistant', content: fullResponse, timestamp: new Date().toISOString() } })
         send(ws, { type: 'queue_update', items: agent.queue.getPending() })
         send(ws, { type: 'done_update', items: agent.queue.getDone() })
         send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
         sendFilesAndFolders(ws).catch(console.error)
-        send(ws, { type: 'voice_summary', summary: 'Refer to Co-Agent for full details' })
+        send(ws, { type: 'voice_summary', summary: fullResponse })
+        // TTS read-back if enabled
+        const settings = await readSettings(DATA_DIR)
+        if (settings.voice_response && process.env.OPENAI_API_KEY) {
+          generateTts(fullResponse).then(audio => {
+            if (audio) send(ws, { type: 'voice_tts_audio', data: audio })
+          })
+        }
       } catch (err: any) {
         console.error('[Voice] Transcription/chat error:', err.message)
         send(ws, { type: 'error', message: `Voice failed: ${err.message}` })
@@ -564,15 +680,23 @@ wss.on('connection', (ws) => {
             send(ws, { type: 'tool_start', tool, label })
           }
         )
+        const fullResp = streamed || response
         send(ws, {
           type: 'chat_response',
-          message: { role: 'assistant', content: streamed || response, timestamp: new Date().toISOString() }
+          message: { role: 'assistant', content: fullResp, timestamp: new Date().toISOString() }
         })
         send(ws, { type: 'queue_update', items: agent.queue.getPending() })
         send(ws, { type: 'done_update', items: agent.queue.getDone() })
         send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
         sendFilesAndFolders(ws).catch(console.error)
-        send(ws, { type: 'voice_summary', summary: 'Refer to Co-Agent for full details' })
+        send(ws, { type: 'voice_summary', summary: fullResp })
+        // TTS read-back if enabled
+        const settings = await readSettings(DATA_DIR)
+        if (settings.voice_response && process.env.OPENAI_API_KEY) {
+          generateTts(fullResp).then(audio => {
+            if (audio) send(ws, { type: 'voice_tts_audio', data: audio })
+          })
+        }
       } catch (err: any) {
         console.error('[Server] voice_chat error:', err.message)
         send(ws, { type: 'error', message: err.message ?? 'Something went wrong.' })

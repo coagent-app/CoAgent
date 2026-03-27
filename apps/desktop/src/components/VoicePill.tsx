@@ -22,7 +22,7 @@ const baseFont: React.CSSProperties = {
 
 const iconStyle: React.CSSProperties = { flexShrink: 0, width: 16, height: 16 }
 const labelStyle: React.CSSProperties = { color: '#a3a3a3' }
-const responseStyle: React.CSSProperties = { color: '#e5e5e5', lineHeight: 1.4, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' as any, overflow: 'hidden' }
+const responseStyle: React.CSSProperties = { color: '#e5e5e5', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as any, minWidth: 0, flex: 1, fontSize: 13, lineHeight: '16px' }
 
 // Vertical audio bars — idle has gentle wave, listening reacts to volume
 function AudioBars({ volume, idle, small }: { volume: number; idle?: boolean; small?: boolean }) {
@@ -96,6 +96,7 @@ function useAnimationFrame(fps: number): number {
   return time
 }
 
+
 function SpinnerIcon({ color }: { color: string }) {
   return (
     <svg style={{ ...iconStyle, animation: 'spin 1s linear infinite' }} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
@@ -159,27 +160,44 @@ export function VoicePill() {
   }, [])
 
   const isIdle = state === 'idle'
+  const isResponse = state === 'responding' || state === 'result'
   const isExpanded = !isIdle
 
   const pillStyle: React.CSSProperties = {
     ...baseFont,
     position: 'fixed',
     bottom: 16,
-    left: '50%',
-    transform: 'translateX(-50%)',
     display: 'flex',
     alignItems: 'center',
-    justifyContent: 'center',
     gap: isExpanded ? 10 : 0,
-    padding: isExpanded ? '12px 20px' : '6px 8px',
-    borderRadius: 9999,
-    background: isIdle ? 'rgba(23,23,23,0.85)' : '#171717',
-    boxShadow: isExpanded ? '0 25px 50px -12px rgba(0,0,0,0.5)' : '0 4px 16px rgba(0,0,0,0.4)',
-    border: `1px solid rgba(64,64,64,${isIdle ? 0.4 : 0.5})`,
-    maxWidth: isExpanded ? 400 : 32,
     overflow: 'hidden',
-    transition: 'all 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
+    transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
     cursor: 'default',
+    ...(isResponse ? {
+      // Same pill shape, widens to fit text
+      left: '50%',
+      right: 'auto',
+      transform: 'translateX(-50%)',
+      padding: '12px 20px',
+      borderRadius: 9999,
+      background: '#171717',
+      boxShadow: '0 25px 50px -12px rgba(0,0,0,0.5)',
+      border: '1px solid rgba(64,64,64,0.5)',
+      maxWidth: 'calc(100vw - 32px)',
+      whiteSpace: 'nowrap' as any,
+    } : {
+      // Centered pill for idle / listening / thinking / working
+      left: '50%',
+      right: 'auto',
+      transform: 'translateX(-50%)',
+      justifyContent: 'center',
+      padding: isExpanded ? '12px 20px' : '4px 8px',
+      borderRadius: 9999,
+      background: isIdle ? 'rgba(23,23,23,0.85)' : '#171717',
+      boxShadow: isExpanded ? '0 25px 50px -12px rgba(0,0,0,0.5)' : '0 4px 16px rgba(0,0,0,0.4)',
+      border: `1px solid rgba(64,64,64,${isIdle ? 0.4 : 0.5})`,
+      maxWidth: isExpanded ? 400 : 32,
+    }),
   }
 
   if (isIdle) {
@@ -216,7 +234,7 @@ export function VoicePill() {
             <span style={{ ...labelStyle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{text || 'Working...'}</span>
           </>
         )}
-        {(state === 'responding' || state === 'result') && (
+        {isResponse && (
           <span style={responseStyle}>{text}</span>
         )}
       </div>

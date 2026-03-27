@@ -334,6 +334,10 @@ fn main() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(ServerProcess(Mutex::new(None)))
         .setup(|app| {
+            // In dev mode (debug builds), beforeDevCommand already starts the
+            // backend via start-dev.js — don't launch the sidecar binary or it
+            // will kill the running server and take over the port.
+            #[cfg(not(debug_assertions))]
             if let Some(server_path) = find_server_binary() {
                 log(&format!("[Tauri] Starting server: {:?}", server_path));
                 match Command::new(&server_path)
@@ -353,33 +357,15 @@ fn main() {
             } else {
                 log("[Tauri] No server binary found next to executable");
             }
+            #[cfg(debug_assertions)]
+            log("[Tauri] Dev mode — skipping sidecar server (beforeDevCommand handles it)");
 
             let _ = APP_HANDLE.set(app.handle().clone());
 
-            // Voice pill: force transparent background, position at bottom center, show idle
-            #[cfg(target_os = "macos")]
+            // Voice pill: position at bottom center
+            // NOTE: with_webview Obj-C styling removed — deadlocks the main thread in
+            // release builds. Transparency is handled by tauri.conf.json + overlay.html CSS.
             if let Some(pill_win) = app.get_webview_window("voice-pill") {
-                let _ = pill_win.with_webview(|wv| {
-                    unsafe {
-                        let wkwebview: *mut c_void = wv.inner().cast();
-                        // [wkWebView setValue:@NO forKey:@"drawsBackground"]
-                        let no_obj = objc_msg_bool(objc_cls("NSNumber"), sel("numberWithBool:"), false);
-                        let key = create_nsstring("drawsBackground");
-                        objc_msg_2(wkwebview, sel("setValue:forKey:"), no_obj, key);
-
-                        // Set window background to clear + no shadow
-                        let ns_window: *mut c_void = objc_msg(wkwebview, sel("window"));
-                        let clear_color: *mut c_void = objc_msg(objc_cls("NSColor"), sel("clearColor"));
-                        objc_msg_1(ns_window, sel("setBackgroundColor:"), clear_color);
-                        objc_msg_bool(ns_window, sel("setOpaque:"), false);
-                        objc_msg_bool(ns_window, sel("setHasShadow:"), false);
-
-                        // Make transparent areas click-through
-                        objc_msg_bool(ns_window, sel("setIgnoresMouseEvents:"), true);
-                    }
-                });
-
-                // Position at bottom center (but don't show yet — wait for voice-enabled setting from frontend)
                 if let Ok(Some(monitor)) = pill_win.primary_monitor() {
                     let screen = monitor.size();
                     let scale = monitor.scale_factor();
@@ -390,6 +376,7 @@ fn main() {
                     let y = logical_h - 170.0;
                     let _ = pill_win.set_position(tauri::LogicalPosition::new(x, y));
                 }
+                log("[Tauri] Voice pill positioned");
             }
 
             // Listen for voice mode toggle from frontend settings

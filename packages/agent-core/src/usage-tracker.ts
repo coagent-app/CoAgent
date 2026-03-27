@@ -10,6 +10,7 @@ const PRICING: Record<string, { input: number; output: number; cacheRead: number
   'claude-sonnet-4-6':         { input: 3,    output: 15,   cacheRead: 0.30,  cacheWrite: 3.75 },
   'claude-haiku-4-5-20251001': { input: 0.80, output: 4,    cacheRead: 0.08,  cacheWrite: 1.00 },
   'claude-haiku-4-5':          { input: 0.80, output: 4,    cacheRead: 0.08,  cacheWrite: 1.00 },
+  'claude-3-5-haiku-20241022': { input: 0.80, output: 4,    cacheRead: 0.08,  cacheWrite: 1.00 },
 }
 
 const DEFAULT_PRICING = PRICING['claude-sonnet-4-6']

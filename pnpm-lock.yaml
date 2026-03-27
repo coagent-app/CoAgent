@@ -133,6 +133,9 @@ importers:
       '@huggingface/transformers':
         specifier: ^3.8.1
         version: 3.8.1
+      '@lancedb/lancedb':
+        specifier: ^0.9.0
+        version: 0.9.0(apache-arrow@17.0.0)
       '@modelcontextprotocol/sdk':
         specifier: ^1.0.0
         version: 1.26.0(zod@4.3.6)

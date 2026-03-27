@@ -65,6 +65,7 @@ export class MCPManager {
         args: config.args ?? [],
         env: { ...process.env, ...config.env } as Record<string, string>
       })
+
       const client = new Client(
         { name: 'coagent-core', version: '0.0.1' },
         { capabilities: {} }
@@ -114,13 +115,22 @@ export class MCPManager {
   async callTool(serverName: string, toolName: string, args: Record<string, unknown>): Promise<string> {
     const client = this.clients.get(serverName)
     if (!client) throw new Error(`MCP server not found: ${serverName}`)
-    const result = await client.callTool({ name: toolName, arguments: args })
-    const content = result.content as Array<{ type: string; text?: string }>
-    const text = content
-      .filter(c => c.type === 'text')
-      .map(c => c.text ?? '')
-      .join('\n')
-    return text
+    try {
+      const result = await client.callTool({ name: toolName, arguments: args })
+      const content = result.content as Array<{ type: string; text?: string }>
+      const text = content
+        .filter(c => c.type === 'text')
+        .map(c => c.text ?? '')
+        .join('\n')
+      return text
+    } catch (err: any) {
+      const code = err?.code
+      if (code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED' || err?.message?.includes('EPIPE')) {
+        console.error(`[MCP] ${serverName} pipe broken during ${toolName} — server likely crashed`)
+        return `[Error: ${serverName} server is not available. It may have crashed and will restart.]`
+      }
+      throw err
+    }
   }
 
   async connectHttp(name: string, url: string, bearerToken?: string): Promise<void> {

@@ -359,14 +359,14 @@ Write ONE sentence summarizing what this file is. Be concise. Respond with the s
         : [{ type: 'text', text: `${prompt}\n\nFile contents (sample):\n${sample.text}` }]
 
   const response = await anthropic.messages.create({
-    model: 'claude-haiku-4-5-20251001',
+    model: 'claude-3-5-haiku-20241022',
     max_tokens: 256,
     messages: [{ role: 'user', content }]
   })
 
   recordUsage(dataDir, {
     category: 'file_ingestion',
-    model: 'claude-haiku-4-5-20251001',
+    model: 'claude-3-5-haiku-20241022',
     inputTokens: response.usage.input_tokens,
     outputTokens: response.usage.output_tokens,
     cacheReadTokens: (response.usage as any).cache_read_input_tokens ?? 0,
@@ -460,7 +460,7 @@ export async function autoOrganizeFiles(
 
   const anthropic = createAnthropicClient()
   const response = await anthropic.messages.create({
-    model: 'claude-haiku-4-5-20251001',
+    model: 'claude-3-5-haiku-20241022',
     max_tokens: 256,
     messages: [{
       role: 'user',
@@ -470,7 +470,7 @@ export async function autoOrganizeFiles(
 
   recordUsage(dataDir, {
     category: 'file_ingestion',
-    model: 'claude-haiku-4-5-20251001',
+    model: 'claude-3-5-haiku-20241022',
     inputTokens: response.usage.input_tokens,
     outputTokens: response.usage.output_tokens,
     cacheReadTokens: (response.usage as any).cache_read_input_tokens ?? 0,

@@ -9,6 +9,17 @@ import { MemoryStore } from './memory-store.js'
 import { homedir } from 'os'
 import { join } from 'path'
 
+// Prevent EPIPE from crashing when the parent process closes our stdout pipe.
+// This happens during shutdown/restart — just exit cleanly instead of crashing.
+process.stdout.on('error', (err: any) => {
+  if (err?.code === 'EPIPE') process.exit(0)
+})
+process.on('uncaughtException', (err: any) => {
+  if (err?.code === 'EPIPE' || err?.message?.includes('EPIPE')) process.exit(0)
+  console.error('[Memory] Uncaught:', err)
+  process.exit(1)
+})
+
 const MEMORY_BASE = process.env.COAGENT_DATA_DIR ?? join(homedir(), '.coagent')
 const store = new MemoryStore(MEMORY_BASE)
 

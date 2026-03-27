@@ -1,8 +1,10 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
 import { join } from 'path'
+import { mkdir } from 'fs/promises'
 import Anthropic from '@anthropic-ai/sdk'
 import { recordUsage } from './usage-tracker.js'
-import { embed, cosine } from './tool-embeddings.js'
+import { embed } from './tool-embeddings.js'
+import { connect, Table } from '@lancedb/lancedb'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -26,25 +28,28 @@ function logPath(dataDir: string): string {
   return join(servicesDir(dataDir), 'tool-log.json')
 }
 
-function embeddingsPath(dataDir: string): string {
-  return join(servicesDir(dataDir), 'tool-log-embeddings.json')
-}
+// ── LanceDB for log embeddings ──────────────────────────────────────────────
 
-// ── Log Embeddings Cache ─────────────────────────────────────────────────────
+const EMBED_DIM = 512
+let logTable: Table | null = null
+let logDbDir: string | null = null
 
-interface LogEmbedding {
-  ts: string          // matches ToolLogEntry.ts — used as key
-  embedding: number[]
-}
-
-function readEmbeddings(dataDir: string): LogEmbedding[] {
-  const path = embeddingsPath(dataDir)
-  if (!existsSync(path)) return []
-  try { return JSON.parse(readFileSync(path, 'utf-8')) } catch { return [] }
-}
-
-function writeEmbeddings(dataDir: string, embeddings: LogEmbedding[]): void {
-  writeFileSync(embeddingsPath(dataDir), JSON.stringify(embeddings))
+async function getLogTable(dataDir: string): Promise<Table | null> {
+  const dbDir = join(dataDir, 'services', 'tool-log-db')
+  if (logTable && logDbDir === dbDir) return logTable
+  await mkdir(dbDir, { recursive: true })
+  const db = await connect(dbDir)
+  const tables = await db.tableNames()
+  if (tables.includes('logs')) {
+    logTable = await db.openTable('logs')
+  } else {
+    // Create with a dummy row so the table exists
+    logTable = await db.createTable('logs', [
+      { ts: '', text: '', vector: new Array(EMBED_DIM).fill(0) }
+    ])
+  }
+  logDbDir = dbDir
+  return logTable
 }
 
 /** Format a log entry into an embeddable text string */
@@ -70,7 +75,7 @@ export function extractIntegration(serverName: string, toolName: string): string
 
 // ── Logging ──────────────────────────────────────────────────────────────────
 
-/** Append a tool call entry to the daily log and embed it for semantic search. */
+/** Append a tool call entry to the daily log and embed it into LanceDB. */
 export function logToolCall(
   dataDir: string,
   service: string,
@@ -99,12 +104,13 @@ export function logToolCall(
   log.push(entry)
   writeFileSync(path, JSON.stringify(log, null, 2))
 
-  // Embed async — don't block the tool call
-  embed([logEntryText(entry)]).then(([vec]) => {
+  // Embed async into LanceDB — don't block the tool call
+  const text = logEntryText(entry)
+  embed([text]).then(async ([vec]) => {
     if (!vec || vec.length === 0) return
-    const embeddings = readEmbeddings(dataDir)
-    embeddings.push({ ts: entry.ts, embedding: vec })
-    writeEmbeddings(dataDir, embeddings)
+    const tbl = await getLogTable(dataDir)
+    if (!tbl) return
+    await tbl.add([{ ts: entry.ts, text, vector: vec }])
   }).catch(() => {})
 }
 
@@ -113,12 +119,16 @@ export function logToolCall(
 function formatLogEntry(e: ToolLogEntry): string {
   const time = e.ts.slice(5, 16).replace('T', ' ')
   const params = Object.entries(e.params).map(([k, v]) => `${k}: ${v}`).join(', ')
-  return `${time} ${e.service}/${e.tool}(${params})${e.result ? ' → ' + e.result : ''}`
+  // Show result on its own line so the agent can actually read the context
+  if (e.result) {
+    return `${time} ${e.service}/${e.tool}(${params})\n  Result: ${e.result}`
+  }
+  return `${time} ${e.service}/${e.tool}(${params})`
 }
 
 /**
- * Semantic search over tool logs. Embeds the query and compares against
- * pre-embedded log entries. Falls back to keyword matching if no embeddings.
+ * Semantic search over tool logs using LanceDB vector search.
+ * Falls back to keyword matching if no embeddings available.
  */
 export async function searchToolLogs(
   dataDir: string,
@@ -134,27 +144,29 @@ export async function searchToolLogs(
   // Build a ts→entry map for fast lookup
   const byTs = new Map(log.map(e => [e.ts, e]))
 
-  // Try semantic search first
-  const embeddings = readEmbeddings(dataDir)
-  if (embeddings.length > 0) {
-    try {
+  // Try LanceDB vector search
+  try {
+    const tbl = await getLogTable(dataDir)
+    if (tbl) {
       const [queryVec] = await embed([query])
       if (queryVec && queryVec.length > 0) {
-        const scored = embeddings
-          .map(le => ({ ts: le.ts, score: cosine(queryVec, le.embedding) }))
-          .filter(s => s.score > 0.35)
-          .sort((a, b) => b.score - a.score)
-          .slice(0, limit)
+        const results = await tbl
+          .vectorSearch(queryVec)
+          .limit(limit * 2)
+          .toArray()
 
-        if (scored.length > 0) {
-          return scored
-            .map(s => byTs.get(s.ts))
-            .filter((e): e is ToolLogEntry => !!e)
-            .map(formatLogEntry)
-        }
+        // Filter by distance threshold (L2 distance < 1.0 ≈ cosine > 0.50)
+        const matched = results
+          .filter(r => r.ts && (r._distance as number) < 1.0)
+          .slice(0, limit)
+          .map(r => byTs.get(r.ts as string))
+          .filter((e): e is ToolLogEntry => !!e)
+          .map(formatLogEntry)
+
+        if (matched.length > 0) return matched
       }
-    } catch {}
-  }
+    }
+  } catch {}
 
   // Fallback: keyword matching
   const words = query.toLowerCase().split(/\s+/).filter(w => w.length > 1)
@@ -312,8 +324,14 @@ Search memory for existing entries about the people and projects mentioned. Then
     break
   }
 
-  // Clear processed logs and their embeddings
+  // Clear processed logs and LanceDB log table
   writeFileSync(logFile, '[]')
-  writeEmbeddings(dataDir, [])
+  try {
+    const dbDir = join(dataDir, 'services', 'tool-log-db')
+    const db = await connect(dbDir)
+    const tables = await db.tableNames()
+    if (tables.includes('logs')) await db.dropTable('logs')
+    logTable = null
+  } catch {}
   console.log(`[ServiceLogger] Cleared ${log.length} processed log entries`)
 }

@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import { readFile, writeFile, mkdir } from 'fs/promises'
 import { existsSync } from 'fs'
 import { join } from 'path'
+import { createHash } from 'crypto'
 import { MCPManager, MCPServerConfig } from './mcp-manager.js'
 import { ApprovalQueue } from './queue.js'
 import { CalendarStore } from './calendar-store.js'
@@ -10,7 +11,7 @@ import { readSettings, writeSettings } from './settings.js'
 import type { AgentSettings } from './settings.js'
 import type { AgentTrigger } from '@coagent/shared'
 import { searchFiles, readFileContent, readFileBase64, deleteFileEntry, getStorageStats, listFiles } from './file-store.js'
-import { embedTools, searchToolsByEmbedding, clearToolEmbeddings, setToolEmbeddingsDir } from './tool-embeddings.js'
+import { embedTools, searchToolsAndSchema, clearToolEmbeddings, setToolEmbeddingsDir } from './tool-embeddings.js'
 import { logToolCall, extractIntegration, searchToolLogs } from './service-logger.js'
 import { recordUsage } from './usage-tracker.js'
 import { getRelayConfig } from './auth.js'
@@ -53,6 +54,61 @@ async function deleteSkill(dataDir: string, name: string): Promise<boolean> {
   const { unlink } = await import('fs/promises')
   await unlink(path)
   return true
+}
+
+// ── Composio S3 file upload for email attachments ──────────────────────────
+
+const COMPOSIO_FILES_URL = 'https://backend.composio.dev/api/v3/files/upload/request'
+
+/**
+ * Upload a file to Composio's S3 via presigned URL.
+ * Returns the { name, mimetype, s3key } object needed by email tool `attachment` param.
+ */
+async function uploadToComposioS3(
+  fileBuffer: Buffer,
+  filename: string,
+  mimeType: string,
+  toolSlug: string,
+  toolkitSlug: string
+): Promise<{ name: string; mimetype: string; s3key: string }> {
+  const composioKey = process.env.COMPOSIO_API_KEY
+  if (!composioKey) throw new Error('No COMPOSIO_API_KEY set')
+
+  const md5 = createHash('md5').update(fileBuffer).digest('hex')
+
+  // Step 1: Get presigned upload URL
+  const presignRes = await fetch(COMPOSIO_FILES_URL, {
+    method: 'POST',
+    headers: { 'X-API-KEY': composioKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      filename,
+      md5,
+      mimetype: mimeType,
+      tool_slug: toolSlug,
+      toolkit_slug: toolkitSlug,
+    })
+  })
+  if (!presignRes.ok) {
+    const body = await presignRes.text()
+    throw new Error(`Composio presign failed (${presignRes.status}): ${body}`)
+  }
+  const presignData = await presignRes.json() as { key: string; new_presigned_url: string }
+
+  // Step 2: PUT file bytes to presigned URL
+  const uploadRes = await fetch(presignData.new_presigned_url, {
+    method: 'PUT',
+    body: fileBuffer,
+    headers: {
+      'Content-Type': mimeType,
+      'Content-Length': fileBuffer.length.toString(),
+    }
+  })
+  if (!uploadRes.ok) {
+    throw new Error(`S3 upload failed (${uploadRes.status})`)
+  }
+
+  console.log(`[Agent] Uploaded ${filename} to Composio S3: ${presignData.key}`)
+  return { name: filename, mimetype: mimeType, s3key: presignData.key }
 }
 
 async function resolveSkillMentions(dataDir: string, message: string): Promise<string> {
@@ -136,6 +192,34 @@ function rankByRelevance(
     .map(s => s.msg)
 }
 
+/** Format a tool's schema as readable text, filtered to only the specified params.
+ *  If no paramNames provided, includes all params (fallback).
+ *  The schema lives in messages (cached), NOT in the tools array — saves thousands of tokens. */
+function formatSchemaForResult(tool: Anthropic.Tool, paramNames?: string[]): string {
+  const schema = tool.input_schema as any
+  if (!schema?.properties) return ''
+
+  const includeSet = paramNames && paramNames.length > 0 ? new Set(paramNames) : null
+
+  const params: string[] = []
+  let skipped = 0
+
+  for (const [k, v] of Object.entries(schema.properties) as [string, any][]) {
+    if (includeSet && !includeSet.has(k)) { skipped++; continue }
+
+    const type = v.type || 'any'
+    const required = new Set(schema.required || [])
+    const req = required.has(k) ? ' (required)' : ''
+    const rawDesc = v.description || ''
+    const desc = rawDesc ? ` — ${rawDesc.length > 120 ? rawDesc.slice(0, 120) + '…' : rawDesc}` : ''
+    const enumVals = v.enum ? ` [${v.enum.slice(0, 8).join(', ')}]` : ''
+    params.push(`  ${k} (${type}${req})${desc}${enumVals}`)
+  }
+
+  const note = skipped > 0 ? `  (${skipped} more params available — search with details to see them)` : ''
+  return `\n${tool.name} parameters:\n${params.join('\n')}${note ? '\n' + note : ''}`
+}
+
 const INTERNAL_TOOLS: Anthropic.Tool[] = [
   {
     name: 'get_current_time',
@@ -144,14 +228,15 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'search_tools',
-    description: 'Find tools and gather context for external services. Always include context to search past interactions.',
+    description: 'Find tools, gather context, and get the schema for the action you want to take.',
     input_schema: {
       type: 'object' as const,
       properties: {
         query: { type: 'string', description: 'e.g. "send email", "create calendar event"' },
-        context: { type: 'string', description: 'Search past interactions — messages sent, channels used, user IDs, email addresses, e.g. "Nathan slack" or "email from Alex"' }
+        context: { type: 'string', description: 'Context to look up — names, user IDs, emails, channels, e.g. "Nathan slack" or "email from Alex"' },
+        schema: { type: 'string', description: 'Describe the full action including all fields you need, e.g. "send email to recipient with subject, body, CC, and attachment", "create calendar event with title, time, attendees, and location", "fetch emails filtered by sender and subject"' }
       },
-      required: ['query', 'context']
+      required: ['query', 'context', 'schema']
     }
   },
   {
@@ -262,6 +347,18 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
       required: ['action']
     }
   },
+  {
+    name: 'call_external_tool',
+    description: 'Call an external integration tool discovered via search_tools. Pass the exact tool name and parameters from the schema returned by search_tools.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        tool_name: { type: 'string', description: 'Exact tool name from search_tools result, e.g. GMAIL_SEND_EMAIL' },
+        parameters: { type: 'object', description: 'Tool parameters as described in the schema', additionalProperties: true }
+      },
+      required: ['tool_name', 'parameters']
+    }
+  },
 ]
 
 // Map consolidated memory actions → MCP tool names
@@ -295,6 +392,7 @@ const TOOL_LABELS: Record<string, string> = {
   calendar: 'Managing calendar',
   skills: 'Managing skills',
   memory: 'Checking memory',
+  call_external_tool: 'Calling tool',
 }
 
 // Action-specific labels for consolidated tools
@@ -360,7 +458,11 @@ function buildSystemPrompt(connectedServices: string[], agentProfilePath: string
   const isFirstRun = !existsSync(agentProfilePath)
 
   const serviceSection = connectedServices.length > 0
-    ? `Connected external services: ${connectedServices.join(', ')}. search_tools is how you find tools AND gather context for external services — always include context to search past interactions (messages, channels, user IDs, emails). Use the memory tool separately for contacts and preferences. Act on what you find, don't ask the user to confirm details you already have.`
+    ? `Connected external services: ${connectedServices.join(', ')}. search_tools is how you find tools AND gather context for external services. It has 3 required params:
+- query: what you want to do (e.g. "send email", "create calendar event")
+- context: look up relevant context (names, user IDs, emails, channels, e.g. "Nathan slack")
+- schema: describe the full action with ALL fields you need (e.g. "send email to recipient with subject, body, CC, and attachment") — returns only the relevant parameter schemas
+IMPORTANT: After search_tools returns the schema, use call_external_tool(tool_name, parameters) to execute the action. READ the schema in the search_tools result to know exactly what parameters to pass. Use the memory tool separately for contacts and preferences. Act on what you find, don't ask the user to confirm details you already have.`
     : 'No external services are connected yet. If the user wants to connect tools, tell them to open Settings and connect their integrations.'
 
   const onboardingSection = isFirstRun
@@ -383,11 +485,14 @@ Current settings:
 
   return `You are CoAgent — a private AI agent running on the user's machine. Help with anything asked. Never refuse by saying something is outside your scope.
 
+IMPORTANT — Assume first, ask second: When the user asks you to do something, ALWAYS search memory or use search_tools with context to find what you need (contacts, user IDs, channels, emails). Only ask after you've searched and genuinely can't find it. Use context clues and serve the user as much as possible without prompting — only ask when obviously needed.
+
 ${serviceSection}
 ${settingsSection}
 Skills: Users invoke with @skill-name. When invoked, the skill's instructions appear in the message.
 
-File listings: plain text (e.g. "- report.md — summary"). Only use [filename](coagent-file:FILE_ID) when asked to open a specific file. To attach files to emails, add "coagent_file_ids": ["FILE_ID"] to tool input.
+File listings: plain text (e.g. "- report.md — summary"). Only use [filename](coagent-file:FILE_ID) when asked to open a specific file.
+Attaching files to emails: add coagent_file_ids as a TOP-LEVEL field in the parameters object of call_external_tool: {"recipient_email":"x@y.com","subject":"...","body":"...","coagent_file_ids":["FILE_ID"]}. Do NOT nest it inside "attachment". The system uploads the file automatically.
 
 Memory: your long-term brain — history only shows recent messages. Use the memory tool directly (NOT search_tools). Prefer search (semantic) or grep (pattern match within a file) over read (dumps entire file). Only use read when you need the full file. Write things down immediately: names, dates, preferences, decisions. If unsure whether to save, save it. Always search memory before saying you don't know. Files: setup.md (read-only), agent.md, routines.md, preferences.md, contacts.md, projects.md. Update when you learn something new. Delete stale entries.
 
@@ -397,6 +502,8 @@ On heartbeat: use memory tool (action: read, file: routines.md) to check routine
 - **schedule** (create/update/delete/complete/list) — unified schedule for routines (recurring cron), tasks (one-time due), and events (informational).
 
 When you need multiple independent pieces of information, call all the tools in a single response (e.g. read memory + use schedule (action: list) to check routines and tasks + check time in one turn). This is faster and cheaper.
+
+You can search the web — use search_tools("web search") to find the right tool.
 
 Concise responses. No emojis. Markdown only when helpful.${onboardingSection}`
 }
@@ -415,6 +522,11 @@ export class Agent {
   private stopped = false
   private missedEvents: { source: string; payload: unknown; time: string }[] = []
   private steeringQueue: string[] = []
+  /** Index of the last scheduled-task message — pinned in selectHistory so it doesn't scroll out */
+  private pinnedTaskIdx: number | null = null
+  /** Memoized system prompt — only rebuilt when inputs actually change */
+  private cachedSystemPrompt: string | null = null
+  private cachedPromptKey: string | null = null
   // Briefings removed — context now provided via search_tools context param
   public onSkillsChanged?: () => void
   public onSettingsChanged?: () => void
@@ -456,7 +568,9 @@ export class Agent {
 
   private createClient(): Anthropic {
     const relay = getRelayConfig()
-    const defaultHeaders = { 'anthropic-beta': 'extended-cache-ttl-2025-04-11' }
+    const defaultHeaders: Record<string, string> = {
+      'anthropic-beta': 'extended-cache-ttl-2025-04-11',
+    }
     if (relay) {
       console.log(`[Agent] Using relay proxy at ${relay.url}`)
       return new Anthropic({
@@ -548,6 +662,13 @@ export class Agent {
     }
 
     this.conversationHistory.push({ role: 'user', content: message })
+
+    // Pin scheduled-task messages so they stay in the context window even when
+    // the tool loop generates many messages that would push them out of RECENT_KEEP
+    if (isTodoDue) {
+      this.pinnedTaskIdx = this.conversationHistory.length - 1
+    }
+
     this.runLoopPromise = this.runLoop(onChunk, context, onToolCall)
     try {
       const result = await this.runLoopPromise
@@ -562,6 +683,7 @@ export class Agent {
       }
     } finally {
       this.runLoopPromise = null
+      if (isTodoDue) this.pinnedTaskIdx = null
     }
   }
 
@@ -617,10 +739,21 @@ export class Agent {
     const searchableTools = allExternalTools.filter(t => serverMap.get(t.name) !== 'memory')
     const connectedServices = Array.from(new Set(searchableTools.map(t => serverMap.get(t.name)!)))
 
-    // Embed tool names for semantic search (no-op if already cached or no OpenAI key)
+    // Embed check — no-op if already cached. Actual embedding happens on integration connect.
     embedTools(searchableTools).catch(err => console.warn('[Agent] Tool embedding failed:', err.message))
     const settings = await readSettings(this.dataDir)
-    let systemPrompt = buildSystemPrompt(connectedServices, this.agentProfilePath, settings)
+
+    // Memoize system prompt — only rebuild when services or settings actually change
+    const promptKey = connectedServices.join(',') + '|' + JSON.stringify(settings)
+    let systemPrompt: string
+    if (this.cachedSystemPrompt && this.cachedPromptKey === promptKey) {
+      systemPrompt = this.cachedSystemPrompt
+    } else {
+      systemPrompt = buildSystemPrompt(connectedServices, this.agentProfilePath, settings)
+      this.cachedSystemPrompt = systemPrompt
+      this.cachedPromptKey = promptKey
+      console.log('[Agent] System prompt rebuilt (settings or services changed)')
+    }
 
 
     // Model routing: Haiku for background tasks, user's power model for everything else
@@ -630,36 +763,30 @@ export class Agent {
 
     console.log(`[Agent] Starting ${context} on ${currentModel} (max_tokens: ${maxTokens})`)
 
-    // Proactively pre-load tools relevant to the user's latest message
-    // Skip for heartbeat — it has fixed tool needs
     const lastUserMsg = this.conversationHistory.filter(m => m.role === 'user').at(-1)
     const userText = typeof lastUserMsg?.content === 'string' ? lastUserMsg.content : ''
-    const preloaded = (context === 'heartbeat')
-      ? []
-      : userText ? await searchToolsByEmbedding(userText, searchableTools, 3) : []
 
-    // Cache only truly stable tools (internal tools — never change between messages).
-    // Preloaded Composio tools go outside the cache — they change per message based on
-    // embedding search, so caching them causes expensive cache writes that never get read.
-    // Skip caching for heartbeat — runs too infrequently to benefit.
+    // Tools array is 100% stable — external tools go through call_external_tool proxy.
+    // This means tools never change between API calls, so the cache prefix stays warm.
     const isBackground = context === 'heartbeat'
     const contextTools = getInternalTools(context)
-    // Memory tools are now handled by the consolidated 'memory' internal tool — no raw MCP tools sent to Claude
-    const stableTools = contextTools.length > 0
-      ? contextTools.map((t, i) =>
-          i === contextTools.length - 1 && !isBackground ? { ...t, cache_control: { type: 'ephemeral' as const, ttl: '1h' } } : t
-        )
-      : []
-    const dynamicTools: Anthropic.Tool[] = [...preloaded]
-    const loadedToolNames = new Set([...stableTools, ...preloaded].map(t => t.name))
-
-    if (preloaded.length > 0) {
-      console.log(`[Agent] Pre-loaded ${preloaded.length} tools: ${preloaded.map(t => t.name).join(', ')}`)
-    }
+    const stableTools = [...contextTools]
 
     let finalText = ''
     let turn = 0
     let lastText = ''
+
+    // Snapshot the history BEFORE tool loops begin.
+    // During tool loops, new messages (tool_use + tool_result) are appended to this snapshot
+    // instead of re-calling selectHistory(), which would shift the sliding window.
+    // The cache breakpoint stays at a fixed position in the snapshot — the "book" stays frozen.
+    const baseMessages = this.compactToolResults(this.sanitizeHistory(this.selectHistory(userText)))
+    const cacheBreakpointIdx = baseMessages.length >= 2 ? baseMessages.length - 2 : -1
+    // Tool loop messages accumulate here — appended AFTER the breakpoint
+    const loopMessages: Anthropic.MessageParam[] = []
+
+    // Dedup search_tools calls within this turn — same query+schema returns cached result
+    const searchCache = new Map<string, { matches: Anthropic.Tool[]; schemas: { tool: string; params: string[]; score: number }[] }>()
 
     this.stopped = false
 
@@ -676,9 +803,13 @@ export class Agent {
         const steering = this.steeringQueue.splice(0)
         const combined = steering.join('\n')
         if (lastText) {
-          this.conversationHistory.push({ role: 'assistant', content: lastText })
+          const steerAssistant: Anthropic.MessageParam = { role: 'assistant', content: lastText }
+          this.conversationHistory.push(steerAssistant)
+          loopMessages.push(steerAssistant)
         }
-        this.conversationHistory.push({ role: 'user', content: `[User changed direction]: ${combined}` })
+        const steerUser: Anthropic.MessageParam = { role: 'user', content: `[User changed direction]: ${combined}` }
+        this.conversationHistory.push(steerUser)
+        loopMessages.push(steerUser)
         console.log(`[Agent] Steering injected: "${combined.slice(0, 80)}"`)
         onChunk?.(`\n\n_Redirecting: ${combined}_\n\n`)
         lastText = ''
@@ -686,10 +817,6 @@ export class Agent {
 
       let response: Anthropic.Message
       let retryDelay = 60000
-
-      // Rebuild tools each turn: stable (with cache boundary) + dynamic (no cache)
-      // This ensures the cache boundary stays on the last stable tool even after search_tools adds more
-      const activeTools: Anthropic.Tool[] = [...stableTools, ...dynamicTools]
 
       turn++
       const t0 = Date.now()
@@ -701,9 +828,13 @@ export class Agent {
             system: isBackground
               ? [{ type: 'text', text: systemPrompt }]
               : [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral', ttl: '1h' } as any }],
-            tools: activeTools as any,
-            messages: this.compactToolResults(this.sanitizeHistory(this.selectHistory(userText))) as any,
-            ...(isBackground ? {} : { cache_control: { type: 'ephemeral', ttl: '1h' } as any }),
+            tools: stableTools as any,
+            messages: this.addMessageCacheBreakpoint(
+              [...baseMessages, ...loopMessages],
+              isBackground,
+              cacheBreakpointIdx >= 0 ? cacheBreakpointIdx : undefined
+            ) as any,
+            // Note: cache_control goes on content blocks (system, tools), not request body
           } as any)
           this.activeStream = stream
           stream.on('text', (text) => {
@@ -715,7 +846,10 @@ export class Agent {
           const u = response.usage as any
           const cacheHit = u.cache_read_input_tokens ?? 0
           const cacheWrite = u.cache_creation_input_tokens ?? 0
-          const cacheInfo = cacheHit > 0 ? ` (${cacheHit} cached)` : cacheWrite > 0 ? ` (${cacheWrite} cache write)` : ''
+          const cacheParts: string[] = []
+          if (cacheHit > 0) cacheParts.push(`${cacheHit} cached`)
+          if (cacheWrite > 0) cacheParts.push(`${cacheWrite} cache write`)
+          const cacheInfo = cacheParts.length > 0 ? ` (${cacheParts.join(', ')})` : ''
           console.log(`[Agent] Turn ${turn} — ${response.stop_reason} — ${Date.now() - t0}ms — ${response.usage.input_tokens} in${cacheInfo} / ${response.usage.output_tokens} out tokens`)
           recordUsage(this.dataDir, {
             category: 'chat',
@@ -754,6 +888,7 @@ export class Agent {
       if (!response) continue
 
       this.conversationHistory.push({ role: 'assistant', content: response.content })
+      loopMessages.push({ role: 'assistant', content: response.content })
 
       // Track text for abort recovery
       const turnText = response.content.filter(b => b.type === 'text').map(b => (b as { type: 'text'; text: string }).text).join('\n')
@@ -777,11 +912,16 @@ export class Agent {
           if (block.type !== 'tool_use') continue
 
           if (onToolCall) {
-            const inputAction = (block.input as Record<string, unknown>).action as string | undefined
-            const label = (inputAction && ACTION_LABELS[block.name]?.[inputAction])
-              ?? TOOL_LABELS[block.name]
-              ?? humanizeToolName(block.name)
-            onToolCall(block.name, label)
+            if (block.name === 'call_external_tool') {
+              const extName = ((block.input as any).tool_name as string) || 'external tool'
+              onToolCall(extName, humanizeToolName(extName))
+            } else {
+              const inputAction = (block.input as Record<string, unknown>).action as string | undefined
+              const label = (inputAction && ACTION_LABELS[block.name]?.[inputAction])
+                ?? TOOL_LABELS[block.name]
+                ?? humanizeToolName(block.name)
+              onToolCall(block.name, label)
+            }
           }
 
           let result: string
@@ -799,32 +939,70 @@ export class Agent {
               })
               continue
             }
-            const input = block.input as { query: string; context?: string }
+            const input = block.input as { query: string; context?: string; schema?: string }
             const query = input.query
-            const matches = await searchToolsByEmbedding(query, searchableTools)
+            const schemaQuery = input.schema || query
+
+            // ONE embed call → tool search + schema search + max ranking (deduped within turn)
+            const searchKey = `${query}|${schemaQuery}`
+            let searchResult = searchCache.get(searchKey)
+            if (!searchResult) {
+              searchResult = await searchToolsAndSchema(query, schemaQuery, searchableTools)
+              searchCache.set(searchKey, searchResult)
+            } else {
+              console.log(`[Agent] search_tools cache hit for "${query}"`)
+            }
+            const { matches, schemas } = searchResult
 
             if (matches.length === 0) {
               result = `No tools found matching "${query}". Available services: ${connectedServices.join(', ')}`
             } else {
-              for (const tool of matches) {
-                if (!loadedToolNames.has(tool.name)) {
-                  dynamicTools.push(tool)
-                  loadedToolNames.add(tool.name)
+              // No dynamic tool injection — external tools go through call_external_tool proxy.
+              // The tools array stays stable so the cache prefix is never busted.
+              result = `Found ${matches.length} tools for "${query}" — use call_external_tool(tool_name, parameters) to call:\n` +
+                matches.map(t => `- ${t.name}: ${t.description ?? ''}`).join('\n')
+
+              // Append filtered schemas from the combined search
+              if (schemas.length > 0) {
+                const matchMap = new Map(matches.map(t => [t.name, t]))
+                for (const { tool: toolName, params: paramNames } of schemas) {
+                  const tool = matchMap.get(toolName)
+                  if (tool) {
+                    result += formatSchemaForResult(tool, paramNames.length > 0 ? paramNames : undefined)
+                    console.log(`[Agent] Schema for ${toolName}: ${paramNames.length} filtered params`)
+                  }
+                }
+              } else if (matches.length > 0) {
+                // Fallback: show required params only (full schema is too large for context)
+                const topTool = matches[0]
+                const schema = topTool.input_schema as any
+                const reqParams = schema?.required as string[] | undefined
+                if (reqParams && reqParams.length > 0) {
+                  result += formatSchemaForResult(topTool, reqParams)
+                  console.log(`[Agent] Schema fallback for ${topTool.name}: required params only (${reqParams.length})`)
+                } else {
+                  result += formatSchemaForResult(topTool)
+                  console.log(`[Agent] Schema fallback for ${topTool.name}: full schema (no embedding match)`)
                 }
               }
-              result = `Found ${matches.length} tools for "${query}" — now available to call:\n` +
-                matches.map(t => `- ${t.name}: ${t.description ?? ''}`).join('\n')
             }
 
-            // Search past interactions (tool logs) for context
+            // Look up context (tool logs + memory) — parallel with no extra embed call
             if (input.context) {
-              const logResults = await searchToolLogs(this.dataDir, input.context)
-              if (logResults && logResults.length > 0) {
-                result += `\n\nRecent activity:\n` +
-                  logResults.map(l => `- ${l}`).join('\n')
+              const [logResults, memoryResult] = await Promise.all([
+                searchToolLogs(this.dataDir, input.context),
+                this.mcpManager.callTool('memory', 'search_memory', { query: input.context, topK: 3 }).catch(() => '')
+              ])
+              const hasLogs = logResults && logResults.length > 0
+              const hasMem = memoryResult && memoryResult.trim()
+              if (hasLogs || hasMem) {
+                result += `\n\nContext for "${input.context}":`
+                if (hasLogs) result += '\n' + logResults.map(l => `- ${l}`).join('\n')
+                if (hasMem) result += '\n' + memoryResult
               } else {
-                result += `\n\nNo recent activity matching "${input.context}".`
+                result += `\n\nNo context found for "${input.context}".`
               }
+              console.log(`[Agent] Context: ${hasLogs ? logResults!.length + ' logs' : 'no logs'}, ${hasMem ? 'memory found' : 'no memory'}`)
             }
 
             console.log(`[Agent] search_tools("${query}"${input.context ? `, context: "${input.context}"` : ''}) → ${matches.map(t => t.name).join(', ')}`)
@@ -1013,51 +1191,83 @@ export class Agent {
               }
             }
 
-          } else {
-            const serverName = serverMap.get(block.name)
+          } else if (block.name === 'call_external_tool') {
+            const { tool_name: extToolName, parameters: extParams } = block.input as { tool_name: string; parameters: Record<string, unknown> }
+            const serverName = serverMap.get(extToolName)
             if (!serverName) {
-              result = `Tool "${block.name}" is not loaded. Call search_tools first to find and load it.`
+              result = `Tool "${extToolName}" not found. Call search_tools first to discover available tools.`
             } else {
-              // Resolve CoAgent file IDs → base64 attachments before calling external tools
-              const toolInput = { ...(block.input as Record<string, unknown>) }
-              const attachFileIds = toolInput.coagent_file_ids as string[] | undefined
-              if (attachFileIds && Array.isArray(attachFileIds) && attachFileIds.length > 0) {
+              // Resolve CoAgent file IDs → upload to Composio S3 for email attachments
+              const toolInput = { ...extParams }
+
+              // Extract coagent_file_ids robustly — the model puts them in various places/formats
+              let fileIds: string[] = []
+              const extractIds = (val: unknown): string[] => {
+                if (Array.isArray(val)) return val.filter(v => typeof v === 'string')
+                if (typeof val === 'string') {
+                  try { const parsed = JSON.parse(val); if (Array.isArray(parsed)) return parsed.filter((v: any) => typeof v === 'string') } catch {}
+                  if (val.match(/^[0-9a-f-]{36}$/i)) return [val]
+                }
+                if (val && typeof val === 'object') {
+                  const obj = val as Record<string, unknown>
+                  if (obj.coagent_file_ids) return extractIds(obj.coagent_file_ids)
+                }
+                return []
+              }
+              // Check top-level
+              if (toolInput.coagent_file_ids) {
+                fileIds = extractIds(toolInput.coagent_file_ids)
                 delete toolInput.coagent_file_ids
+              }
+              // Check inside attachment (model sometimes nests it there)
+              if (fileIds.length === 0 && toolInput.attachment) {
+                const fromAttach = extractIds(toolInput.attachment)
+                if (fromAttach.length > 0) {
+                  fileIds = fromAttach
+                  delete toolInput.attachment
+                }
+              }
+              if (fileIds.length > 0) {
                 try {
-                  const attachments = await Promise.all(
-                    attachFileIds.map(id => readFileBase64(this.dataDir, id))
+                  const toolkitSlug = extractIntegration(serverName, extToolName)
+                  const files = await Promise.all(
+                    fileIds.map((id: string) => readFileBase64(this.dataDir, id))
                   )
-                  // Composio Gmail/Outlook: expects attachment_content_type, attachment_name, attachment_content (base64)
-                  // If tool already has an attachments field, append; otherwise set common attachment fields
-                  if (attachments.length === 1) {
-                    toolInput.attachment_name = attachments[0].filename
-                    toolInput.attachment_content = attachments[0].base64
-                    toolInput.attachment_content_type = attachments[0].mimeType
+                  const uploaded = await Promise.all(
+                    files.map((f: { base64: string; filename: string; mimeType: string }) => uploadToComposioS3(
+                      Buffer.from(f.base64, 'base64'), f.filename, f.mimeType, extToolName, toolkitSlug
+                    ))
+                  )
+                  const isDraft = extToolName.toUpperCase().includes('DRAFT')
+                  if (isDraft) {
+                    toolInput.attachments = uploaded
+                  } else {
+                    toolInput.attachment = uploaded[0]
+                    if (uploaded.length > 1) {
+                      const extraNames = uploaded.slice(1).map((a: { name: string }) => a.name).join(', ')
+                      const body = (toolInput.body as string) || ''
+                      toolInput.body = body + `\n\n[Note: Additional file(s) (${extraNames}) could not be attached — only one attachment per direct send. Use create-draft for multiple.]`
+                    }
                   }
-                  // Also set generic attachments array for tools that accept it
-                  toolInput.attachments = attachments.map(a => ({
-                    filename: a.filename,
-                    content: a.base64,
-                    content_type: a.mimeType
-                  }))
-                  console.log(`[Agent] Resolved ${attachments.length} file attachment(s): ${attachments.map(a => a.filename).join(', ')}`)
+                  console.log(`[Agent] Uploaded ${uploaded.length} attachment(s): ${uploaded.map((a: { name: string }) => a.name).join(', ')}`)
                 } catch (err: any) {
-                  console.error(`[Agent] Failed to resolve file attachments:`, err.message)
+                  console.error(`[Agent] Failed to upload file attachment:`, err.message)
+                  const body = (toolInput.body as string) || ''
+                  toolInput.body = body + `\n\n[Note: File attachment could not be included due to an upload error.]`
                 }
               }
               {
-                const raw = await this.mcpManager.callTool(serverName, block.name, toolInput)
+                const raw = await this.mcpManager.callTool(serverName, extToolName, toolInput)
                 const MAX_TOOL_RESULT = 4000
                 result = raw.length > MAX_TOOL_RESULT
                   ? raw.slice(0, MAX_TOOL_RESULT) + `\n\n[Truncated: ${raw.length - MAX_TOOL_RESULT} chars omitted from history to save context]`
                   : raw
-                // Auto-log tool call + result for context search and 3 AM extraction
-                logToolCall(this.dataDir, serverName, block.name, toolInput, result)
-
-                // Context for integrations is now provided via search_tools context param
-                // (greps tool logs) — no more briefing injection
+                logToolCall(this.dataDir, serverName, extToolName, toolInput, result)
               }
             }
+
+          } else {
+            result = `Unknown tool "${block.name}". For external integrations, use search_tools then call_external_tool.`
           }
 
           ;(toolResults.content as Anthropic.ToolResultBlockParam[]).push({
@@ -1068,6 +1278,7 @@ export class Agent {
         }
 
         this.conversationHistory.push(toolResults)
+        loopMessages.push(toolResults)
 
         continue
       }
@@ -1122,9 +1333,19 @@ export class Agent {
 
 
 
-  /** Select history: just the most recent messages. Memory tools handle long-term context. */
+  /** Select history: recent messages + any pinned task message. Memory tools handle long-term context. */
   private selectHistory(_currentQuery: string): Anthropic.MessageParam[] {
-    return this.conversationHistory.slice(-RECENT_KEEP)
+    const recent = this.conversationHistory.slice(-RECENT_KEEP)
+
+    // If a scheduled task is pinned and it fell outside the recent window, prepend it
+    if (this.pinnedTaskIdx !== null) {
+      const windowStart = this.conversationHistory.length - RECENT_KEEP
+      if (this.pinnedTaskIdx < windowStart) {
+        return [this.conversationHistory[this.pinnedTaskIdx], ...recent]
+      }
+    }
+
+    return recent
   }
 
   /**
@@ -1137,12 +1358,48 @@ export class Agent {
    * Anything older gets truncated to 300 chars — the assistant's text response
    * from that turn already contains the processed information.
    */
+  /**
+   * Place a cache breakpoint on the second-to-last message so all prior history
+   * is cached. Each turn, the cache grows to include the previous turn's messages —
+   * only the newest user message is sent as fresh (non-cached) input.
+   */
+  private addMessageCacheBreakpoint(
+    messages: Anthropic.MessageParam[],
+    isBackground: boolean,
+    fixedIdx?: number
+  ): Anthropic.MessageParam[] {
+    if (isBackground || messages.length < 2) return messages
+
+    const result = [...messages]
+    // Use fixed index if provided (stable breakpoint during tool loops),
+    // otherwise default to second-to-last message
+    const idx = fixedIdx !== undefined
+      ? Math.min(fixedIdx, result.length - 2)
+      : result.length - 2
+
+    if (idx < 0) return result
+
+    const msg = result[idx]
+    if (typeof msg.content === 'string') {
+      result[idx] = {
+        ...msg,
+        content: [{ type: 'text', text: msg.content, cache_control: { type: 'ephemeral', ttl: '1h' } } as any]
+      }
+    } else if (Array.isArray(msg.content) && msg.content.length > 0) {
+      const blocks = [...msg.content as any[]]
+      const last = blocks.length - 1
+      blocks[last] = { ...blocks[last], cache_control: { type: 'ephemeral', ttl: '1h' } }
+      result[idx] = { ...msg, content: blocks }
+    }
+
+    return result
+  }
+
   private compactToolResults(messages: Anthropic.MessageParam[]): Anthropic.MessageParam[] {
     if (messages.length <= 4) return messages
 
     // Find the last TWO user messages that contain plain text (not just tool_results).
-    // These mark conversation turn boundaries. Everything before the second-to-last
-    // user turn is old enough to compact.
+    // Keep 2-turn window so users can ask follow-ups about previous results.
     let userTurnCount = 0
     let compactBefore = 0
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -1159,9 +1416,22 @@ export class Agent {
 
     if (compactBefore === 0) return messages
 
-    const TRUNCATE_AT = 300
+    const TRUNCATE_AT = 200
     let compactedCount = 0
     let savedChars = 0
+
+    // Build set of tool_use_ids that belong to search_tools — their results contain
+    // schemas that the agent needs to reference and must NOT be truncated.
+    const schemaToolUseIds = new Set<string>()
+    for (let i = 0; i < compactBefore; i++) {
+      const msg = messages[i]
+      if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue
+      for (const block of msg.content as any[]) {
+        if (block.type === 'tool_use' && block.name === 'search_tools') {
+          schemaToolUseIds.add(block.id)
+        }
+      }
+    }
 
     const result = messages.map((msg, idx) => {
       if (idx >= compactBefore) return msg
@@ -1172,6 +1442,8 @@ export class Agent {
 
       const compacted = (msg.content as any[]).map(block => {
         if (block.type !== 'tool_result') return block
+        // Never truncate search_tools results — they contain parameter schemas
+        if (schemaToolUseIds.has(block.tool_use_id)) return block
         const content = typeof block.content === 'string' ? block.content : ''
         if (content.length <= TRUNCATE_AT) return block
         compactedCount++

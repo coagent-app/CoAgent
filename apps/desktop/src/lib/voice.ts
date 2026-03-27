@@ -13,6 +13,7 @@ let currentHotkey: string | null = null
 let locked = false // double-tap fn locks listening on
 let lastFnPressTime = 0
 let volumeEmitInterval: ReturnType<typeof setInterval> | null = null
+let cachedStream: MediaStream | null = null
 
 // State callback — tells the UI what's happening
 let onStateChange: ((state: 'listening' | 'thinking' | 'hidden', summary?: string) => void) | null = null
@@ -44,27 +45,35 @@ function hidePill() {
   updatePill('hidden') // VoicePill treats 'hidden' as 'idle' — stays visible as small mic
 }
 
+async function getStream(): Promise<MediaStream> {
+  if (cachedStream && cachedStream.active) return cachedStream
+  cachedStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+  return cachedStream
+}
+
 async function startRecording() {
   try {
     onStateChange?.('listening')
     updatePill('listening')
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    const stream = await getStream()
     audioChunks = []
     speechDetected = false
 
     // Monitor audio level to detect actual speech
-    audioCtx = new AudioContext()
-    const source = audioCtx.createMediaStreamSource(stream)
-    analyser = audioCtx.createAnalyser()
-    analyser.fftSize = 512
-    source.connect(analyser)
-    const dataArray = new Uint8Array(analyser.fftSize)
+    if (!audioCtx || audioCtx.state === 'closed') {
+      audioCtx = new AudioContext()
+      const source = audioCtx.createMediaStreamSource(stream)
+      analyser = audioCtx.createAnalyser()
+      analyser.fftSize = 512
+      source.connect(analyser)
+    }
+    if (audioCtx.state === 'suspended') await audioCtx.resume()
+    const dataArray = new Uint8Array(analyser!.fftSize)
     speechCheckInterval = setInterval(() => {
       if (!analyser) return
       analyser.getByteTimeDomainData(dataArray)
-      // Check if any sample deviates significantly from silence (128)
       const peak = dataArray.reduce((max, v) => Math.max(max, Math.abs(v - 128)), 0)
-      if (peak > 15) speechDetected = true // threshold: ~12% above silence
+      if (peak > 15) speechDetected = true
     }, 50)
 
     mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' })
@@ -92,16 +101,14 @@ async function stopRecordingAndSend(
   const blob = await new Promise<Blob>((resolve) => {
     mediaRecorder!.onstop = () => {
       const b = new Blob(audioChunks, { type: 'audio/webm' })
-      mediaRecorder!.stream.getTracks().forEach(t => t.stop())
       resolve(b)
     }
     mediaRecorder!.stop()
   })
 
-  // Clean up audio monitoring
+  // Clean up speech check, keep stream + audioCtx alive for next press
   stopVolumeEmit()
   if (speechCheckInterval) { clearInterval(speechCheckInterval); speechCheckInterval = null }
-  if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; analyser = null }
 
   const duration = Date.now() - recordingStartTime
   if (blob.size < 1000 || duration < 600 || !speechDetected) {
@@ -125,12 +132,28 @@ async function stopRecordingAndSend(
   reader.readAsDataURL(blob)
 }
 
+let ttsAudio: HTMLAudioElement | null = null
+
 export function showVoiceSummary(_summary: string) {
   // Keep showing whatever was last displayed, then hide after a short delay
   responseAccum = ''
   onStateChange?.('hidden')
   ;(window as any).__voiceActive = false // voice session done
-  setTimeout(() => hidePill(), 2000)
+  // If TTS audio is playing, wait for it to finish before hiding
+  if (ttsAudio && !ttsAudio.ended && !ttsAudio.paused) {
+    ttsAudio.onended = () => { ttsAudio = null; setTimeout(() => hidePill(), 500) }
+  } else {
+    setTimeout(() => hidePill(), 2000)
+  }
+}
+
+export function playTtsAudio(base64Mp3: string) {
+  // Stop any existing playback
+  if (ttsAudio) { ttsAudio.pause(); ttsAudio = null }
+  const audio = new Audio(`data:audio/mp3;base64,${base64Mp3}`)
+  ttsAudio = audio
+  audio.onended = () => { ttsAudio = null }
+  audio.play().catch(err => console.error('[Voice] TTS playback failed:', err))
 }
 
 // Show tool activity in the pill (e.g. "Reading email...")
@@ -138,21 +161,45 @@ export function showVoiceToolLabel(label: string) {
   updatePill('working', label)
 }
 
-// Show just the first sentence of the agent response in the pill
+// Strip markdown for pill display
+function stripMd(s: string): string {
+  return s
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/\*(.+?)\*/g, '$1')
+    .replace(/__(.+?)__/g, '$1')
+    .replace(/_(.+?)_/g, '$1')
+    .replace(/~~(.+?)~~/g, '$1')
+    .replace(/`(.+?)`/g, '$1')
+    .replace(/^#+\s+/gm, '')
+    .replace(/^[-*]\s+/gm, '')
+    .replace(/^\d+\.\s+/gm, '')
+    .replace(/\[(.+?)\]\(.+?\)/g, '$1')
+    .replace(/\n+/g, ' ')
+}
+
+// Show first two sentences of the agent response in the pill
 let responseAccum = ''
 let responseLocked = false
 export function showVoiceResponse(chunk: string) {
   if (responseLocked) return
   responseAccum += chunk
-  // Stop after first sentence or 80 chars
-  const sentenceEnd = responseAccum.search(/[.!?]\s/)
-  if (sentenceEnd > 0) {
-    responseAccum = responseAccum.slice(0, sentenceEnd + 1)
-    responseLocked = true
-  } else if (responseAccum.length > 80) {
-    responseLocked = true
+  const clean = stripMd(responseAccum)
+  // Count sentence endings (. ! ? followed by a space)
+  let count = 0
+  const re = /[.!?]\s/g
+  let lastEnd = 0
+  let m: RegExpExecArray | null
+  while ((m = re.exec(clean)) !== null) {
+    count++
+    lastEnd = m.index + 1
+    if (count >= 2) break
   }
-  updatePill('responding', responseAccum)
+  if (count >= 2) {
+    responseLocked = true
+    updatePill('responding', clean.slice(0, lastEnd))
+  } else {
+    updatePill('responding', clean)
+  }
 }
 
 export function resetVoiceResponse() {
@@ -163,12 +210,12 @@ export function resetVoiceResponse() {
 export function cancelVoice() {
   locked = false
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-    mediaRecorder.stream.getTracks().forEach(t => t.stop())
     mediaRecorder.stop()
     mediaRecorder = null
   }
   stopVolumeEmit()
   if (speechCheckInterval) { clearInterval(speechCheckInterval); speechCheckInterval = null }
+  if (cachedStream) { cachedStream.getTracks().forEach(t => t.stop()); cachedStream = null }
   if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; analyser = null }
   onStateChange?.('hidden')
   ;(window as any).__voiceActive = false
@@ -176,16 +223,6 @@ export function cancelVoice() {
   console.log('[Voice] Cancelled')
 }
 
-export function speakText(text: string): void {
-  try {
-    const synth = window.speechSynthesis
-    const utter = new SpeechSynthesisUtterance(text)
-    utter.rate = 1.0
-    synth.speak(utter)
-  } catch (err) {
-    console.error('[Voice] TTS failed:', err)
-  }
-}
 
 export async function registerVoiceHotkey(
   hotkey: string,
@@ -226,6 +263,8 @@ export async function registerVoiceHotkey(
 export async function unregisterVoiceHotkey() {
   onStateChange = null
   locked = false
+  if (cachedStream) { cachedStream.getTracks().forEach(t => t.stop()); cachedStream = null }
+  if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; analyser = null }
   if (fnUnlisteners.length > 0) {
     fnUnlisteners.forEach(fn => fn())
     fnUnlisteners = []

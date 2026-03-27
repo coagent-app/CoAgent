@@ -90,6 +90,10 @@ export interface Integration {
   slug: string
   name: string
   connected: boolean
+  category?: string
+  description?: string
+  capabilities?: string
+  custom?: boolean
 }
 
 export interface FileEntry {
@@ -177,6 +181,7 @@ export type WSServerMessage =
   | { type: 'skills_update'; skills: { name: string; description: string }[] }
   | { type: 'file_ingested'; id: string; filename: string }
   | { type: 'voice_summary'; summary: string }
+  | { type: 'voice_tts_audio'; data: string }
   | { type: 'voice_transcribed'; text: string }
   | { type: 'usage_update'; usage: UsageSummary }
   | { type: 'auto_organize_done'; folders: string[]; moved: number }

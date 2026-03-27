@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.30.0",
+    "@lancedb/lancedb": "^0.9.0",
     "@coagent/mcp-memory": "workspace:*",
     "@coagent/shared": "workspace:*",
     "@composio/core": "^0.6.3",
