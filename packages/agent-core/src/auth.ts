@@ -1,7 +1,6 @@
 // packages/agent-core/src/auth.ts
 import { readFile, writeFile, mkdir, chmod } from 'fs/promises'
 import { join } from 'path'
-import type { ApiKeys } from '@coagent/shared'
 
 const ENV_FILE = '.env'
 const RELAY_TOKEN_VAR = 'RELAY_TOKEN'
@@ -77,30 +76,20 @@ export function getRelayConfig(): { token: string; url: string } | null {
 }
 
 /**
- * Persist API keys to ~/.coagent/.env and set them in process.env immediately.
- * Only updates keys that are provided (undefined values are left unchanged).
+ * Returns base URL and auth header for OpenAI-compatible calls (embeddings, TTS, transcription).
+ * Routes through relay when configured, returns null if no relay is available.
  */
-export async function writeApiKeys(dataDir: string, keys: Partial<ApiKeys>): Promise<void> {
-  let lines = await readEnvLines(dataDir)
-
-  if (keys.anthropic !== undefined) {
-    lines = upsertEnvLine(lines, 'ANTHROPIC_API_KEY', keys.anthropic)
-    process.env.ANTHROPIC_API_KEY = keys.anthropic
+export function getOpenAIProxy(): { baseUrl: string; authHeader: string } | null {
+  const relay = getRelayConfig()
+  if (!relay) return null
+  return {
+    baseUrl: relay.url.replace(/\/$/, ''),
+    authHeader: `Bearer ${relay.token}`,
   }
-  if (keys.composio !== undefined) {
-    lines = upsertEnvLine(lines, 'COMPOSIO_API_KEY', keys.composio)
-    process.env.COMPOSIO_API_KEY = keys.composio
-  }
-  if (keys.openai !== undefined) {
-    lines = upsertEnvLine(lines, 'OPENAI_API_KEY', keys.openai)
-    process.env.OPENAI_API_KEY = keys.openai
-  }
-
-  await writeEnvLines(dataDir, lines)
 }
 
 /**
- * Read ~/.coagent/.env and load all known API keys into process.env.
+ * Read ~/.coagent/.env and load relay credentials into process.env.
  * Call this once on startup before creating the agent so saved keys are active.
  */
 export function loadApiKeysToEnv(dataDir: string): void {
@@ -129,14 +118,3 @@ export function loadApiKeysToEnv(dataDir: string): void {
   }
 }
 
-/**
- * Returns a masked status object — whether each key is set, without exposing
- * the actual values. Safe to send over the WebSocket to the frontend.
- */
-export function getApiKeyStatus(): { anthropic: boolean; composio: boolean; openai: boolean } {
-  return {
-    anthropic: !!process.env.ANTHROPIC_API_KEY,
-    composio: !!process.env.COMPOSIO_API_KEY,
-    openai: !!process.env.OPENAI_API_KEY,
-  }
-}

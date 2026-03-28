@@ -9,8 +9,7 @@ import { recordUsage } from './usage-tracker.js'
 const INDEX_FILE = 'file-index.json'
 const FILES_DIR = 'files'
 const FOLDER_ORDER_FILE = 'folder-order.json'
-const OPENAI_EMBED_URL = 'https://api.openai.com/v1/embeddings'
-const getOpenAIKey = () => process.env.OPENAI_API_KEY ?? ''
+import { getOpenAIProxy } from './auth.js'
 
 function createAnthropicClient(): Anthropic {
   const relay = getRelayConfig()
@@ -246,15 +245,17 @@ export async function moveFile(dataDir: string, id: string, targetGroup: string)
 // ── OpenAI embedding ──────────────────────────────────────────────────────────
 
 async function embedText(text: string): Promise<number[]> {
-  const res = await fetch(OPENAI_EMBED_URL, {
+  const proxy = getOpenAIProxy()
+  if (!proxy) throw new Error('No relay configured for embeddings')
+  const res = await fetch(`${proxy.baseUrl}/v1/embeddings`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${getOpenAIKey()}`, 'Content-Type': 'application/json' },
+    headers: { Authorization: proxy.authHeader, 'Content-Type': 'application/json' },
     body: JSON.stringify({ input: [text], model: 'text-embedding-3-small', dimensions: 512 })
   })
-  if (!res.ok) throw new Error(`OpenAI embedding error: ${res.status} ${res.statusText}`)
+  if (!res.ok) throw new Error(`Embedding error: ${res.status} ${res.statusText}`)
   const data = await res.json() as { data: { embedding: number[] }[] }
   const embedding = data.data?.[0]?.embedding
-  if (!embedding) throw new Error('Unexpected OpenAI response shape')
+  if (!embedding) throw new Error('Unexpected embedding response shape')
   return embedding
 }
 
@@ -556,9 +557,9 @@ export async function ingestFile(
   const filePath = join(targetDir, safeFilename)
   await writeFile(filePath, buffer)
 
-  // Embed the summary (fall back gracefully if no Voyage key)
+  // Embed the summary (fall back gracefully if no relay)
   let embedding: number[] = []
-  if (getOpenAIKey()) {
+  if (getOpenAIProxy()) {
     try {
       embedding = await embedText(`${safeGroup ? safeGroup + '/' : ''}${filename} ${summary}`)
     } catch (err) {
@@ -607,7 +608,7 @@ function keywordMatch(entry: FileIndexEntry, q: string): boolean {
 }
 
 export async function searchFiles(dataDir: string, query: string, limit = 5): Promise<FileEntry[]> {
-  if (!getOpenAIKey()) {
+  if (!getOpenAIProxy()) {
     const index = await readIndex(dataDir)
     const q = query.toLowerCase()
     return index

@@ -9,6 +9,7 @@ import { CalendarPane } from '@/components/CalendarPane'
 import { IntegrationsModal } from '@/components/IntegrationsModal'
 import { SettingsPane } from '@/components/SettingsPane'
 import { FilesPane } from '@/components/FilesPane'
+import { SkillsPane } from '@/components/SkillsPane'
 import { useAgent } from '@/hooks/useAgent'
 import { useTheme } from '@/hooks/useTheme'
 import { cn } from '@/lib/utils'
@@ -17,7 +18,7 @@ import { emit } from '@tauri-apps/api/event'
 import type { ApprovalItem } from '@coagent/shared'
 
 export default function App() {
-  const { queue, done, todos, messages, streamingText, thinking, processing, toolLabel, connected, lastHeartbeat, skills, steer, stopAgent, integrations, error, chat, approve, reject, editQueueItem, completeTodo, deleteTodo, connectIntegration, disconnectIntegration, settings, updateSettings, authStatus, updateAuth, verifyAuth, files, folders, searchResults, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, relayActive, relayModel, setRelayModel, relayUsage, activateRelay, refreshRelayStatus, apiKeyStatus, pendingFields, setPendingFields, updateApiKeys, setModel, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry } = useAgent()
+  const { queue, done, messages, streamingText, thinking, processing, toolLabel, connected, lastHeartbeat, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, error, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, settings, updateSettings, authStatus, updateAuth, verifyAuth, files, folders, searchResults, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, relayActive, relayModel, setRelayModel, relayUsage, activateRelay, refreshRelayStatus, pendingFields, setPendingFields, setModel, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger } = useAgent()
   const { dark, toggle: toggleTheme } = useTheme()
   const [view, setView] = useState<View>('chat')
   const [selectedItem, setSelectedItem] = useState<ApprovalItem | null>(null)
@@ -78,7 +79,7 @@ export default function App() {
 
         {view === 'chat' && (
           <div className="relative flex-1 flex overflow-hidden">
-            <ChatPane messages={messages} streamingText={streamingText} thinking={thinking} processing={processing} toolLabel={toolLabel} connected={connected} onChat={chat} onSteer={steer} onStop={stopAgent} onIngestFile={ingestFile} files={files} apiKeyStatus={apiKeyStatus} onNavigateToSettings={() => setView('settings')} lastHeartbeat={lastHeartbeat} skills={skills} className="flex-1" />
+            <ChatPane messages={messages} streamingText={streamingText} thinking={thinking} processing={processing} toolLabel={toolLabel} connected={connected} onChat={chat} onSteer={steer} onStop={stopAgent} onIngestFile={ingestFile} files={files} onNavigateToSettings={() => setView('settings')} lastHeartbeat={lastHeartbeat} skills={skills} capabilityCard={capabilityCard} onConfirmCapabilities={confirmCapabilities} className="flex-1" />
           </div>
         )}
 
@@ -108,11 +109,17 @@ export default function App() {
             relayUsage={relayUsage}
             onActivateRelay={activateRelay}
             onRefreshRelayStatus={refreshRelayStatus}
-            apiKeyStatus={apiKeyStatus}
-            onUpdateApiKeys={updateApiKeys}
             onSetModel={setModel}
             usage={usage}
             onRefreshUsage={refreshUsage}
+          />
+        )}
+
+        {view === 'skills' && (
+          <SkillsPane
+            skills={skills}
+            onUpdate={updateSkill}
+            onDelete={deleteSkill}
           />
         )}
 
@@ -145,8 +152,11 @@ export default function App() {
         integrations={integrations}
         onConnect={connectIntegration}
         onDisconnect={disconnectIntegration}
+        onDelete={deleteCustomIntegration}
         pendingFields={pendingFields}
         onClearPendingFields={() => setPendingFields(null)}
+        whatsappQr={whatsappQr}
+        onToggleTrigger={toggleTrigger}
       />
     </>
   )

@@ -1,16 +1,15 @@
 name = "coagent-relay"
 main = "src/index.ts"
-compatibility_date = "2026-01-01"
-
-[vars]
-# Secrets set via: wrangler secret put <NAME>
-# ANTHROPIC_API_KEY, VOYAGE_API_KEY, COMPOSIO_API_KEY, STRIPE_WEBHOOK_SECRET, TUNNEL_SECRET
+compatibility_date = "2026-03-01"
 
 [[kv_namespaces]]
 binding = "TOKENS"
 id = "8d749fb9446e41eb987d9d6f39a72486"
 
-# Migration to remove the old RelayDO Durable Object from packages/relay
+[[durable_objects.bindings]]
+name = "USER_SESSION"
+class_name = "UserSession"
+
 [[migrations]]
-tag = "v2"
-deleted_classes = ["RelayDO"]
+tag = "v3"
+new_sqlite_classes = ["UserSession"]

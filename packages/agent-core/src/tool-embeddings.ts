@@ -2,9 +2,8 @@ import Anthropic from '@anthropic-ai/sdk'
 import { mkdir } from 'fs/promises'
 import { join } from 'path'
 import { connect, Table } from '@lancedb/lancedb'
+import { getOpenAIProxy } from './auth.js'
 
-const OPENAI_EMBED_URL = 'https://api.openai.com/v1/embeddings'
-const getOpenAIKey = () => process.env.OPENAI_API_KEY ?? ''
 const EMBED_DIM = 512
 
 let table: Table | null = null
@@ -18,14 +17,14 @@ export function setToolEmbeddingsDir(dir: string): void {
 }
 
 export async function embed(texts: string[]): Promise<number[][]> {
-  const key = getOpenAIKey()
-  if (!key) return texts.map(() => [])
-  const res = await fetch(OPENAI_EMBED_URL, {
+  const proxy = getOpenAIProxy()
+  if (!proxy) return texts.map(() => [])
+  const res = await fetch(`${proxy.baseUrl}/v1/embeddings`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+    headers: { Authorization: proxy.authHeader, 'Content-Type': 'application/json' },
     body: JSON.stringify({ input: texts, model: 'text-embedding-3-small', dimensions: EMBED_DIM })
   })
-  if (!res.ok) throw new Error(`OpenAI embedding error: ${res.status}`)
+  if (!res.ok) throw new Error(`Embedding error: ${res.status}`)
   const data = await res.json() as { data: { embedding: number[] }[] }
   return data.data.map(d => d.embedding)
 }
@@ -134,7 +133,7 @@ function paramEmbedEntries(t: Anthropic.Tool): { tool: string; param: string; re
  * Incremental: only embeds new tools, removes stale ones. Existing embeddings are kept.
  */
 export async function embedTools(tools: Anthropic.Tool[]): Promise<void> {
-  if (!getOpenAIKey()) return
+  if (!getOpenAIProxy()) return
   const toolKey = 'v3:' + tools.map(t => t.name).sort().join(',')
 
   // Already indexed with same tools
@@ -254,7 +253,7 @@ export async function searchToolsAndSchema(
 }> {
   const toolMap = new Map(tools.map(t => [t.name, t]))
 
-  if (table && getOpenAIKey()) {
+  if (table && getOpenAIProxy()) {
     try {
       // ONE embed call for both query and schema
       const [queryEmb, schemaEmb] = await embed([query, schema])

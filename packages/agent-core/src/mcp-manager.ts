@@ -53,17 +53,33 @@ export interface MCPServerConfig {
   env?: Record<string, string>
 }
 
+const MAX_STDERR_LINES = 50
+
 export class MCPManager {
   private clients: Map<string, Client> = new Map()
   private toolCache: { tools: Anthropic.Tool[]; serverMap: Map<string, string> } | null = null
   private cacheVersion = 0
+  private stderrBuffers: Map<string, string[]> = new Map()
 
   async connect(configs: MCPServerConfig[]): Promise<void> {
     for (const config of configs) {
       const transport = new StdioClientTransport({
         command: config.command,
         args: config.args ?? [],
-        env: { ...process.env, ...config.env } as Record<string, string>
+        env: { ...process.env, ...config.env } as Record<string, string>,
+        stderr: 'pipe'
+      })
+
+      // Capture stderr for debugging
+      const lines: string[] = []
+      this.stderrBuffers.set(config.name, lines)
+      transport.stderr?.on('data', (chunk: Buffer) => {
+        const text = chunk.toString()
+        for (const line of text.split('\n').filter(Boolean)) {
+          lines.push(line)
+          if (lines.length > MAX_STDERR_LINES) lines.shift()
+          console.error(`[MCP:${config.name}] ${line}`)
+        }
       })
 
       const client = new Client(
@@ -75,6 +91,13 @@ export class MCPManager {
       this.cacheVersion++
       this.toolCache = null
     }
+  }
+
+  /** Get recent stderr output for a server (for debugging custom MCPs) */
+  getStderr(name: string): string | null {
+    const lines = this.stderrBuffers.get(name)
+    if (!lines || lines.length === 0) return null
+    return lines.join('\n')
   }
 
   async getAllTools(): Promise<{ tools: Anthropic.Tool[]; serverMap: Map<string, string> }> {
@@ -112,6 +135,10 @@ export class MCPManager {
     this.toolCache = null
   }
 
+  isConnected(name: string): boolean {
+    return this.clients.has(name)
+  }
+
   async callTool(serverName: string, toolName: string, args: Record<string, unknown>): Promise<string> {
     const client = this.clients.get(serverName)
     if (!client) throw new Error(`MCP server not found: ${serverName}`)
@@ -127,7 +154,9 @@ export class MCPManager {
       const code = err?.code
       if (code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED' || err?.message?.includes('EPIPE')) {
         console.error(`[MCP] ${serverName} pipe broken during ${toolName} — server likely crashed`)
-        return `[Error: ${serverName} server is not available. It may have crashed and will restart.]`
+        const stderr = this.getStderr(serverName)
+        const detail = stderr ? `\n\nServer stderr:\n${stderr}` : ''
+        return `[Error: ${serverName} server crashed during ${toolName}.${detail}]`
       }
       throw err
     }
@@ -156,6 +185,16 @@ export class MCPManager {
     this.cacheVersion++
     this.toolCache = null
     console.log(`[MCP] Connected HTTP client: ${name} (${url.split('?')[0]})`)
+  }
+
+  async disconnect(name: string): Promise<void> {
+    const client = this.clients.get(name)
+    if (client) {
+      await client.close().catch(err => console.warn(`[MCP] Error closing ${name}:`, (err as Error).message))
+      this.clients.delete(name)
+      this.cacheVersion++
+      this.toolCache = null
+    }
   }
 
   async disconnectAll(): Promise<void> {

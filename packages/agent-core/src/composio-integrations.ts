@@ -1,18 +1,95 @@
-import { Composio } from '@composio/core'
-
 // High-signal trigger slugs to subscribe per app (verified against Composio v3 API listTypes)
 // docusign, dropbox, calendly, linkedin, highlevel, zoom, follow_up_boss = action-only, no triggers available
-const TRIGGER_MAP: Record<string, string[]> = {
-  gmail:          ['GMAIL_NEW_GMAIL_MESSAGE'],
-  googlecalendar: ['GOOGLECALENDAR_GOOGLE_CALENDAR_EVENT_CREATED_TRIGGER', 'GOOGLECALENDAR_EVENT_STARTING_SOON_TRIGGER'],
-  hubspot:        ['HUBSPOT_CONTACT_CREATED_TRIGGER', 'HUBSPOT_DEAL_STAGE_UPDATED_TRIGGER'],
-  slack:          ['SLACKBOT_RECEIVE_MESSAGE', 'SLACKBOT_RECEIVE_THREAD_REPLY', 'SLACKBOT_RECEIVE_DIRECT_MESSAGE'],
-  outlook:        ['OUTLOOK_MESSAGE_TRIGGER'],
-  googledrive:    ['GOOGLEDRIVE_FILE_CREATED_TRIGGER', 'GOOGLEDRIVE_FILE_SHARED_PERMISSIONS_ADDED'],
-  notion:         ['NOTION_PAGE_ADDED_TRIGGER', 'NOTION_COMMENTS_ADDED_TRIGGER'],
+const TRIGGER_MAP: Record<string, { slug: string; label: string }[]> = {
+  // Email & Communication
+  gmail:          [{ slug: 'GMAIL_NEW_GMAIL_MESSAGE', label: 'New email received' }],
+  outlook:        [
+    { slug: 'OUTLOOK_MESSAGE_TRIGGER', label: 'New email received' },
+    { slug: 'OUTLOOK_EVENT_TRIGGER', label: 'New calendar event' },
+  ],
+  slack:          [{ slug: 'SLACKBOT_RECEIVE_MESSAGE', label: 'New message' }],
+  discord:        [{ slug: 'DISCORD_NEW_MESSAGE_TRIGGER', label: 'New message' }],
+
+  // Calendar & Scheduling
+  googlecalendar: [
+    { slug: 'GOOGLECALENDAR_GOOGLE_CALENDAR_EVENT_CREATED_TRIGGER', label: 'New event created' },
+    { slug: 'GOOGLECALENDAR_EVENT_STARTING_SOON_TRIGGER', label: 'Event starting soon' },
+  ],
+
+  // CRM & Sales
+  hubspot:        [
+    { slug: 'HUBSPOT_CONTACT_CREATED_TRIGGER', label: 'New contact created' },
+    { slug: 'HUBSPOT_DEAL_STAGE_UPDATED_TRIGGER', label: 'Deal stage changed' },
+  ],
+  salesforce:     [
+    { slug: 'SALESFORCE_NEW_LEAD_TRIGGER', label: 'New lead' },
+    { slug: 'SALESFORCE_NEW_OR_UPDATED_OPPORTUNITY_TRIGGER', label: 'Opportunity updated' },
+  ],
+  pipedrive:      [
+    { slug: 'PIPEDRIVE_NEW_DEAL_TRIGGER', label: 'New deal' },
+    { slug: 'PIPEDRIVE_NEW_NOTE_TRIGGER', label: 'New note added' },
+  ],
+  zendesk:        [{ slug: 'ZENDESK_NEW_ZENDESK_TICKET_TRIGGER', label: 'New ticket' }],
+
+  // Project Management
+  notion:         [
+    { slug: 'NOTION_PAGE_ADDED_TO_DATABASE', label: 'New database entry' },
+    { slug: 'NOTION_COMMENTS_ADDED_TRIGGER', label: 'New comment' },
+  ],
+  jira:           [
+    { slug: 'JIRA_NEW_ISSUE_TRIGGER', label: 'New issue' },
+    { slug: 'JIRA_UPDATED_ISSUE_TRIGGER', label: 'Issue updated' },
+  ],
+  linear:         [
+    { slug: 'LINEAR_ISSUE_CREATED_TRIGGER', label: 'Issue created' },
+    { slug: 'LINEAR_COMMENT_EVENT_TRIGGER', label: 'New comment' },
+  ],
+  trello:         [{ slug: 'TRELLO_NEW_CARD_TRIGGER', label: 'New card' }],
+  asana:          [{ slug: 'ASANA_TASK_TRIGGER', label: 'Task update' }],
+  todoist:        [{ slug: 'TODOIST_NEW_TASK_CREATED', label: 'New task created' }],
+
+  // Finance & Payments
+  stripe:         [
+    { slug: 'STRIPE_CHECKOUT_SESSION_COMPLETED_TRIGGER', label: 'Checkout completed' },
+    { slug: 'STRIPE_INVOICE_PAYMENT_SUCCEEDED_TRIGGER', label: 'Invoice paid' },
+    { slug: 'STRIPE_PAYMENT_FAILED_TRIGGER', label: 'Payment failed' },
+  ],
+
+  // Storage
+  googledrive:    [
+    { slug: 'GOOGLEDRIVE_FILE_CREATED_TRIGGER', label: 'New file created' },
+    { slug: 'GOOGLEDRIVE_FILE_SHARED_PERMISSIONS_ADDED', label: 'File shared with you' },
+  ],
+
+  // Developer Tools
+  github:         [
+    { slug: 'GITHUB_PULL_REQUEST_EVENT', label: 'Pull request activity' },
+    { slug: 'GITHUB_ISSUES_EVENT', label: 'Issue activity' },
+  ],
 }
 
-const COMPOSIO_BASE = 'https://backend.composio.dev/api/v3'
+// Tracks which trigger slugs are currently subscribed (populated at boot + on toggle)
+const subscribedTriggers = new Set<string>()
+
+export function getAvailableTriggersForSlug(appSlug: string): { slug: string; label: string }[] {
+  return TRIGGER_MAP[appSlug] ?? []
+}
+
+export function getSubscribedTriggers(): Set<string> {
+  return subscribedTriggers
+}
+
+export function setTriggerEnabled(slug: string, enabled: boolean): void {
+  if (enabled) subscribedTriggers.add(slug)
+  else subscribedTriggers.delete(slug)
+}
+
+// When RELAY_URL is set, all Composio calls route through the relay (key stays server-side).
+// apiKey param becomes the relay token in that case.
+// Read at call time so dotenv / loadApiKeysToEnv has a chance to load first
+const getComposioBase = () => process.env.RELAY_URL
+  ? `${process.env.RELAY_URL.replace(/\/$/, '')}/v1/composio`
+  : 'https://backend.composio.dev/api/v3'
 
 export const INTEGRATIONS = [
   // Email & Communication
@@ -165,7 +242,7 @@ export async function getIntegrationStatuses(
   apiKey: string,
   userId = 'default'
 ): Promise<{ slug: string; name: string; connected: boolean }[]> {
-  const res = await fetch(`${COMPOSIO_BASE}/connected_accounts?limit=100&user_uuid=${encodeURIComponent(userId)}`, {
+  const res = await fetch(`${getComposioBase()}/connected_accounts?limit=100&user_uuid=${encodeURIComponent(userId)}`, {
     headers: { 'X-API-KEY': apiKey }
   })
   const data = await res.json() as { items?: any[] }
@@ -200,7 +277,7 @@ const authCache = new Map<string, ToolkitAuth>()
 async function getToolkitAuth(apiKey: string, slug: string): Promise<ToolkitAuth> {
   if (authCache.has(slug)) return authCache.get(slug)!
   try {
-    const res = await fetch(`${COMPOSIO_BASE}/toolkits/${slug}`, {
+    const res = await fetch(`${getComposioBase()}/toolkits/${slug}`, {
       headers: { 'X-API-KEY': apiKey }
     })
     const data = await res.json() as any
@@ -242,7 +319,7 @@ export async function getRequiredFields(
 /** Find existing auth config on Composio for this slug, return its ID or null */
 async function findExistingAuthConfig(apiKey: string, slug: string): Promise<string | null> {
   try {
-    const res = await fetch(`${COMPOSIO_BASE}/auth_configs?toolkit_slug=${slug}`, {
+    const res = await fetch(`${getComposioBase()}/auth_configs?toolkit_slug=${slug}`, {
       headers: { 'X-API-KEY': apiKey }
     })
     const data = await res.json() as any
@@ -277,7 +354,7 @@ async function ensureAuthConfig(
   }
 
   // Check if any auth config already exists for this slug
-  const listRes = await fetch(`${COMPOSIO_BASE}/auth_configs?toolkit_slug=${slug}`, {
+  const listRes = await fetch(`${getComposioBase()}/auth_configs?toolkit_slug=${slug}`, {
     headers: { 'X-API-KEY': apiKey }
   })
   const listData = await listRes.json() as any
@@ -288,7 +365,7 @@ async function ensureAuthConfig(
   }
 
   // Create new auth config
-  const res = await fetch(`${COMPOSIO_BASE}/auth_configs`, {
+  const res = await fetch(`${getComposioBase()}/auth_configs`, {
     method: 'POST',
     headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -325,7 +402,7 @@ export async function generateAuthUrl(
     const data: Record<string, string> = {}
     for (const f of auth.connectionFields) data[f.name] = params?.[f.name]?.trim() || f.default || ''
 
-    const res = await fetch(`${COMPOSIO_BASE}/connected_accounts`, {
+    const res = await fetch(`${getComposioBase()}/connected_accounts`, {
       method: 'POST',
       headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },
       body: JSON.stringify({ toolkit_slug: slug, user_uuid: userId, data })
@@ -353,7 +430,7 @@ export async function generateAuthUrl(
     const authConfigId = existingConfigId || await ensureAuthConfig(apiKey, slug, params || {})
     await removeAllAccountsForSlug(apiKey, slug, userId)
 
-    const res = await fetch(`${COMPOSIO_BASE}/connected_accounts`, {
+    const res = await fetch(`${getComposioBase()}/connected_accounts`, {
       method: 'POST',
       headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -371,11 +448,16 @@ export async function generateAuthUrl(
     return url
   }
 
-  // Managed OAuth — use SDK auth flow directly
+  // Managed OAuth — create connected account directly
   await removeAllAccountsForSlug(apiKey, slug, userId).catch(() => {})
-  const composio = new Composio({ apiKey })
-  const result = await composio.toolkits.authorize(userId, slug)
-  const url = (result as any)?.redirectUrl
+  const res = await fetch(`${getComposioBase()}/connected_accounts`, {
+    method: 'POST',
+    headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ toolkit_slug: slug, user_uuid: userId })
+  })
+  const body = await res.json() as any
+  if (!res.ok) throw new Error(body?.error?.message ?? `Failed to connect ${slug}`)
+  const url = body?.redirect_url ?? body?.redirectUrl
   if (!url) throw new Error(`No auth URL returned for ${slug}`)
   return url
 }
@@ -386,7 +468,7 @@ async function removeAllAccountsForSlug(
   slug: string,
   userId = 'default'
 ): Promise<number> {
-  const res = await fetch(`${COMPOSIO_BASE}/connected_accounts?limit=100&user_uuid=${encodeURIComponent(userId)}`, {
+  const res = await fetch(`${getComposioBase()}/connected_accounts?limit=100&user_uuid=${encodeURIComponent(userId)}`, {
     headers: { 'X-API-KEY': apiKey }
   })
   const data = await res.json() as { items?: any[] }
@@ -395,7 +477,7 @@ async function removeAllAccountsForSlug(
     (a.toolkit?.slug ?? a.toolkitSlug ?? a.appName ?? '').toLowerCase() === slug.toLowerCase()
   )
   for (const a of matching) {
-    await fetch(`${COMPOSIO_BASE}/connected_accounts/${a.id}`, {
+    await fetch(`${getComposioBase()}/connected_accounts/${a.id}`, {
       method: 'DELETE',
       headers: { 'X-API-KEY': apiKey }
     })
@@ -424,7 +506,7 @@ export async function getConnectedSlugs(
 
 // Purge EXPIRED connected accounts for a specific user on startup to prevent buildup
 export async function purgeExpiredAccounts(apiKey: string, userId = 'default'): Promise<void> {
-  const res = await fetch(`${COMPOSIO_BASE}/connected_accounts?limit=100&user_uuid=${encodeURIComponent(userId)}`, {
+  const res = await fetch(`${getComposioBase()}/connected_accounts?limit=100&user_uuid=${encodeURIComponent(userId)}`, {
     headers: { 'X-API-KEY': apiKey }
   })
   const data = await res.json() as { items?: any[] }
@@ -432,7 +514,7 @@ export async function purgeExpiredAccounts(apiKey: string, userId = 'default'): 
   const expired = all.filter((a: any) => a.status === 'EXPIRED')
   if (expired.length === 0) return
   for (const a of expired) {
-    await fetch(`${COMPOSIO_BASE}/connected_accounts/${a.id}`, {
+    await fetch(`${getComposioBase()}/connected_accounts/${a.id}`, {
       method: 'DELETE',
       headers: { 'X-API-KEY': apiKey }
     })
@@ -442,7 +524,7 @@ export async function purgeExpiredAccounts(apiKey: string, userId = 'default'): 
 
 // Get v3 connected account ID (short format: ca_xxx) for a specific app slug and user
 async function getV3ConnectedAccountId(apiKey: string, appSlug: string, userId = 'default'): Promise<string | null> {
-  const res = await fetch(`${COMPOSIO_BASE}/connected_accounts?limit=50&user_uuid=${encodeURIComponent(userId)}`, {
+  const res = await fetch(`${getComposioBase()}/connected_accounts?limit=50&user_uuid=${encodeURIComponent(userId)}`, {
     headers: { 'X-API-KEY': apiKey }
   })
   const data = await res.json() as { items?: any[] }
@@ -456,22 +538,22 @@ async function getV3ConnectedAccountId(apiKey: string, appSlug: string, userId =
 
 // Subscribe all high-signal triggers for a newly connected app.
 // Safe to call multiple times — upsert is idempotent.
-export async function subscribeTriggersForSlug(apiKey: string, appSlug: string): Promise<void> {
-  const triggerSlugs = TRIGGER_MAP[appSlug]
-  if (!triggerSlugs || triggerSlugs.length === 0) {
+export async function subscribeTriggersForSlug(apiKey: string, appSlug: string, userId = 'default'): Promise<void> {
+  const triggers = TRIGGER_MAP[appSlug]
+  if (!triggers || triggers.length === 0) {
     console.log(`[Composio] No triggers configured for ${appSlug}`)
     return
   }
 
-  const connectedAccountId = await getV3ConnectedAccountId(apiKey, appSlug)
+  const connectedAccountId = await getV3ConnectedAccountId(apiKey, appSlug, userId)
   if (!connectedAccountId) {
     console.warn(`[Composio] No active connected account found for ${appSlug}`)
     return
   }
 
-  for (const triggerSlug of triggerSlugs) {
+  for (const { slug: triggerSlug } of triggers) {
     try {
-      const res = await fetch(`${COMPOSIO_BASE}/trigger_instances/${triggerSlug}/upsert`, {
+      const res = await fetch(`${getComposioBase()}/trigger_instances/${triggerSlug}/upsert`, {
         method: 'POST',
         headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -481,6 +563,7 @@ export async function subscribeTriggersForSlug(apiKey: string, appSlug: string):
       })
       const body = await res.json() as any
       if (res.ok) {
+        subscribedTriggers.add(triggerSlug)
         console.log(`[Composio] Subscribed trigger ${triggerSlug} (${body.trigger_id})`)
       } else {
         console.warn(`[Composio] Failed to subscribe ${triggerSlug}: ${body?.error?.message ?? res.status}`)
@@ -488,5 +571,33 @@ export async function subscribeTriggersForSlug(apiKey: string, appSlug: string):
     } catch (err: any) {
       console.error(`[Composio] Error subscribing ${triggerSlug}:`, err.message)
     }
+  }
+}
+
+// Subscribe a single trigger by slug (used for individual toggle-on from UI)
+export async function subscribeSingleTrigger(apiKey: string, triggerSlug: string, appSlug: string, userId = 'default'): Promise<boolean> {
+  const connectedAccountId = await getV3ConnectedAccountId(apiKey, appSlug, userId)
+  if (!connectedAccountId) return false
+
+  try {
+    const res = await fetch(`${getComposioBase()}/trigger_instances/${triggerSlug}/upsert`, {
+      method: 'POST',
+      headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        connected_account_id: connectedAccountId,
+        trigger_config: { userId: 'me', interval: 1 }
+      })
+    })
+    const body = await res.json() as any
+    if (res.ok) {
+      subscribedTriggers.add(triggerSlug)
+      console.log(`[Composio] Subscribed trigger ${triggerSlug} (${body.trigger_id})`)
+      return true
+    }
+    console.warn(`[Composio] Failed to subscribe ${triggerSlug}: ${body?.error?.message ?? res.status}`)
+    return false
+  } catch (err: any) {
+    console.error(`[Composio] Error subscribing ${triggerSlug}:`, err.message)
+    return false
   }
 }

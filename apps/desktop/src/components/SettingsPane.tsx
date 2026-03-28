@@ -6,7 +6,7 @@ import { Separator } from '@/components/ui/separator'
 import { cn } from '@/lib/utils'
 import type { AgentSettings, DayName, Autonomy, RelayUsage, UsageSummary } from '@coagent/shared'
 
-type SettingsTab = 'general' | 'model' | 'keys' | 'usage'
+type SettingsTab = 'general' | 'model' | 'usage'
 
 interface SettingsPaneProps {
   settings: AgentSettings | null
@@ -17,8 +17,6 @@ interface SettingsPaneProps {
   relayUsage?: RelayUsage | null
   onActivateRelay?: (token: string, relayUrl: string) => void
   onRefreshRelayStatus?: () => void
-  apiKeyStatus: { anthropic: boolean; composio: boolean; openai: boolean } | null
-  onUpdateApiKeys: (keys: { anthropic?: string; composio?: string; openai?: string }) => void
   onSetModel: (model: string) => void
   usage?: UsageSummary | null
   onRefreshUsage?: () => void
@@ -257,6 +255,7 @@ function GeneralTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate:
         </div>
       </FieldRow>
       {s.voice_enabled && (
+        <>
         <FieldRow label="Speak responses">
           <div className="flex items-center gap-3">
             <button
@@ -275,10 +274,30 @@ function GeneralTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate:
               )} />
             </button>
             <span className="text-[12.5px] text-neutral-500 dark:text-neutral-400">
-              Uses OpenAI TTS — costs extra
+              Uses OpenAI TTS
             </span>
           </div>
         </FieldRow>
+        {s.voice_response && (
+          <FieldRow label="Voice">
+            <select
+              value={s.voice_voice || 'alloy'}
+              onChange={e => onUpdate({ voice_voice: e.target.value })}
+              className="px-3 py-1.5 rounded-lg border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-[13px] text-neutral-900 dark:text-neutral-100 focus:outline-none focus:ring-2 focus:ring-neutral-300 dark:focus:ring-neutral-600"
+            >
+              <option value="alloy">Alloy</option>
+              <option value="ash">Ash</option>
+              <option value="coral">Coral</option>
+              <option value="echo">Echo</option>
+              <option value="fable">Fable</option>
+              <option value="onyx">Onyx</option>
+              <option value="nova">Nova</option>
+              <option value="sage">Sage</option>
+              <option value="shimmer">Shimmer</option>
+            </select>
+          </FieldRow>
+        )}
+        </>
       )}
     </>
   )
@@ -328,124 +347,6 @@ function ModelTab({ settings, onSetModel }: { settings: AgentSettings; onSetMode
           )
         })}
       </div>
-    </>
-  )
-}
-
-// --- Tab: API Keys ---
-
-function ApiKeyField({ label, description, linkUrl, linkLabel, required, configured, onSave }: {
-  label: string
-  description: string
-  linkUrl?: string
-  linkLabel?: string
-  required?: boolean
-  configured: boolean
-  onSave: (key: string) => void
-}) {
-  const [editing, setEditing] = useState(false)
-  const [value, setValue] = useState('')
-
-  function handleSave() {
-    if (value.trim()) {
-      onSave(value.trim())
-      setValue('')
-      setEditing(false)
-    }
-  }
-
-  return (
-    <div className="mb-5 px-4 py-3.5 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900">
-      <div className="flex items-center justify-between mb-1">
-        <div className="flex items-center gap-2">
-          <div className={cn('w-2 h-2 rounded-full', configured ? 'bg-emerald-500' : 'bg-neutral-300 dark:bg-neutral-600')} />
-          <span className="text-[13.5px] font-semibold text-neutral-900 dark:text-neutral-100">
-            {label} {required && <span className="text-red-400 text-[11px]">required</span>}
-          </span>
-        </div>
-        {!editing && (
-          <button
-            type="button"
-            onClick={() => setEditing(true)}
-            className="text-[12px] text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200"
-          >
-            {configured ? 'Change' : 'Add key'}
-          </button>
-        )}
-      </div>
-      <p className="text-[12px] text-neutral-400 dark:text-neutral-500 mb-2">
-        {description}
-        {linkUrl && (
-          <> <a href={linkUrl} target="_blank" rel="noreferrer" className="text-neutral-600 dark:text-neutral-300 hover:underline">{linkLabel || 'Get a key'} &rarr;</a></>
-        )}
-      </p>
-      {editing && (
-        <div className="flex gap-2 mt-2">
-          <Input
-            type="password"
-            className="text-[13px] flex-1 dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100"
-            placeholder="sk-..."
-            value={value}
-            onChange={e => setValue(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && handleSave()}
-            autoFocus
-          />
-          <button
-            type="button"
-            onClick={handleSave}
-            disabled={!value.trim()}
-            className="px-3 py-1.5 text-[12px] font-medium rounded-md bg-neutral-900 text-white disabled:opacity-40 dark:bg-neutral-100 dark:text-neutral-900"
-          >
-            Save
-          </button>
-          <button
-            type="button"
-            onClick={() => { setEditing(false); setValue('') }}
-            className="px-3 py-1.5 text-[12px] font-medium rounded-md text-neutral-500 hover:text-neutral-700 dark:text-neutral-400"
-          >
-            Cancel
-          </button>
-        </div>
-      )}
-    </div>
-  )
-}
-
-function KeysTab({ apiKeyStatus, onUpdateApiKeys }: {
-  apiKeyStatus: { anthropic: boolean; composio: boolean; openai: boolean } | null
-  onUpdateApiKeys: (keys: { anthropic?: string; composio?: string; openai?: string }) => void
-}) {
-  return (
-    <>
-      <SectionHeader eyebrow="Configuration" title="API Keys" />
-      <p className="text-[13px] text-neutral-500 dark:text-neutral-400 mb-5">
-        Your keys are stored locally on your machine and never sent anywhere except directly to each service.
-      </p>
-      <ApiKeyField
-        label="Anthropic"
-        description="Powers the AI agent."
-        linkUrl="https://console.anthropic.com"
-        linkLabel="Get a key"
-        required
-        configured={apiKeyStatus?.anthropic ?? false}
-        onSave={(key) => onUpdateApiKeys({ anthropic: key })}
-      />
-      <ApiKeyField
-        label="Composio"
-        description="Enables Gmail, Calendar, Slack and 80+ integrations."
-        linkUrl="https://composio.dev"
-        linkLabel="Get a key"
-        configured={apiKeyStatus?.composio ?? false}
-        onSave={(key) => onUpdateApiKeys({ composio: key })}
-      />
-      <ApiKeyField
-        label="OpenAI"
-        description="Enables semantic file search."
-        linkUrl="https://platform.openai.com/api-keys"
-        linkLabel="Get a key"
-        configured={apiKeyStatus?.openai ?? false}
-        onSave={(key) => onUpdateApiKeys({ openai: key })}
-      />
     </>
   )
 }
@@ -531,11 +432,10 @@ function UsageTab({ usage, onRefresh }: { usage: UsageSummary | null; onRefresh?
 const TABS: { id: SettingsTab; label: string }[] = [
   { id: 'general', label: 'General' },
   { id: 'model', label: 'Model' },
-  { id: 'keys', label: 'API Keys' },
   { id: 'usage', label: 'Usage' },
 ]
 
-export function SettingsPane({ settings, onUpdate, apiKeyStatus, onUpdateApiKeys, onSetModel, usage, onRefreshUsage }: SettingsPaneProps) {
+export function SettingsPane({ settings, onUpdate, onSetModel, usage, onRefreshUsage }: SettingsPaneProps) {
   const [tab, setTab] = useState<SettingsTab>('general')
 
   if (!settings) {
@@ -574,7 +474,6 @@ export function SettingsPane({ settings, onUpdate, apiKeyStatus, onUpdateApiKeys
         <div className="px-8 py-6 max-w-xl">
           {tab === 'general' && <GeneralTab settings={settings} onUpdate={onUpdate} />}
           {tab === 'model' && <ModelTab settings={settings} onSetModel={onSetModel} />}
-          {tab === 'keys' && <KeysTab apiKeyStatus={apiKeyStatus} onUpdateApiKeys={onUpdateApiKeys} />}
           {tab === 'usage' && <UsageTab usage={usage ?? null} onRefresh={onRefreshUsage} />}
           <div className="h-8" />
         </div>

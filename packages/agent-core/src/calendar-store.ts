@@ -86,7 +86,7 @@ export class CalendarStore {
 
   complete(id: string): CalendarEntry | undefined {
     const entry = this.entries.find(e => e.id === id)
-    if (!entry || entry.type !== 'task') return undefined
+    if (!entry || (entry.type !== 'task' && entry.type !== 'followup')) return undefined
     entry.completed = true
     this.save()
     return entry
@@ -94,10 +94,12 @@ export class CalendarStore {
 
   getAll(): CalendarEntry[] {
     return [...this.entries].sort((a, b) => {
-      const typeOrder = { routine: 0, task: 1, event: 2 }
-      if (typeOrder[a.type] !== typeOrder[b.type]) return typeOrder[a.type] - typeOrder[b.type]
-      const aTime = a.due || a.start || a.cron || ''
-      const bTime = b.due || b.start || b.cron || ''
+      const typeOrder: Record<string, number> = { routine: 0, task: 1, followup: 2 }
+      const aOrder = typeOrder[a.type] ?? 3
+      const bOrder = typeOrder[b.type] ?? 3
+      if (aOrder !== bOrder) return aOrder - bOrder
+      const aTime = a.due || a.cron || ''
+      const bTime = b.due || b.cron || ''
       return aTime.localeCompare(bTime)
     })
   }
@@ -106,11 +108,11 @@ export class CalendarStore {
     return this.getAll().filter(e => e.type === type)
   }
 
-  /** Tasks past due or with no due time (and not completed) */
+  /** Tasks and followups past due or with no due time (and not completed) */
   getTasksDue(): CalendarEntry[] {
     const now = new Date()
     return this.entries
-      .filter(e => e.type === 'task' && !e.completed && e.enabled)
+      .filter(e => (e.type === 'task' || e.type === 'followup') && !e.completed && e.enabled)
       .filter(e => {
         if (!e.due) return true
         const due = e.due.includes('T') ? new Date(e.due) : new Date(e.due + 'T23:59:59')
@@ -123,12 +125,12 @@ export class CalendarStore {
     return this.entries.filter(e => e.type === 'routine' && e.enabled)
   }
 
-  /** Next fire time for tasks (for wake scheduling) */
+  /** Next fire time for tasks and followups (for wake scheduling) */
   getNextTaskTime(): Date | null {
     const now = new Date()
     let nearest: Date | null = null
     for (const entry of this.entries) {
-      if (entry.type !== 'task' || entry.completed || !entry.due) continue
+      if ((entry.type !== 'task' && entry.type !== 'followup') || entry.completed || !entry.due) continue
       const due = entry.due.includes('T') ? new Date(entry.due) : new Date(entry.due + 'T00:00:00')
       if (due > now && (nearest === null || due < nearest)) nearest = due
     }

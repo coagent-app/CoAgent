@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { open } from '@tauri-apps/plugin-shell'
-import type { ApprovalItem, DoneItem, TodoItem, AgentMessage, WSServerMessage, WSClientMessage, Integration, AgentSettings, FileEntry, AuthStatus, AuthMethod, RelayUsage, UsageSummary, CalendarEntry } from '@coagent/shared'
+import type { ApprovalItem, DoneItem, AgentMessage, WSServerMessage, WSClientMessage, Integration, AgentSettings, FileEntry, AuthStatus, AuthMethod, RelayUsage, UsageSummary, CalendarEntry } from '@coagent/shared'
 
 const WS_URL = 'ws://localhost:7830'
 const RECONNECT_BASE = 250
@@ -14,7 +14,6 @@ export function useAgent() {
   const recentIngestedFiles = useRef<{ id: string; filename: string }[]>([])
   const [queue, setQueue] = useState<ApprovalItem[]>([])
   const [done, setDone] = useState<DoneItem[]>([])
-  const [todos, setTodos] = useState<TodoItem[]>([])
   const [messages, setMessages] = useState<AgentMessage[]>([])
   const [streamingText, setStreamingText] = useState<string | null>(null)
   const [thinking, setThinking] = useState(false)
@@ -29,16 +28,17 @@ export function useAgent() {
   const [error, setError] = useState<string | null>(null)
   const [toolLabel, setToolLabel] = useState<string | null>(null)
   const [lastHeartbeat, setLastHeartbeat] = useState<{ time: Date; status: string } | null>(null)
-  const [skills, setSkills] = useState<{ name: string; description: string }[]>([])
+  const [skills, setSkills] = useState<{ name: string; description: string; instructions: string }[]>([])
   const [pendingFields, setPendingFields] = useState<{ slug: string; fields: { name: string; displayName: string; description: string }[] } | null>(null)
   const [relayActive, setRelayActive] = useState<boolean>(false)
   const [relayModel, setRelayModel] = useState<string | null>(null)
   const [relayUsage, setRelayUsage] = useState<RelayUsage | null>(null)
-  const [apiKeyStatus, setApiKeyStatus] = useState<{ anthropic: boolean; composio: boolean; openai: boolean } | null>(null)
   const [voiceSummary, setVoiceSummary] = useState<string | null>(null)
   const [usage, setUsage] = useState<UsageSummary | null>(null)
   const [organizing, setOrganizing] = useState(false)
   const [calendarEntries, setCalendarEntries] = useState<CalendarEntry[]>([])
+  const [capabilityCard, setCapabilityCard] = useState<{ name: string; capabilities: { name: string; description: string; checked: boolean }[] } | null>(null)
+  const [whatsappQr, setWhatsappQr] = useState<string | null>(null)
 
   useEffect(() => {
     let unmounted = false
@@ -67,7 +67,6 @@ export function useAgent() {
         const msg: WSServerMessage = JSON.parse(event.data)
         if (msg.type === 'queue_update') setQueue(msg.items)
         if (msg.type === 'done_update') setDone(msg.items)
-        if (msg.type === 'todo_update') setTodos(msg.items)
         if (msg.type === 'agent_thinking') {
           setThinking(true)
           setStreamingText(null)
@@ -127,7 +126,11 @@ export function useAgent() {
           }
         }
         if (msg.type === 'chat_history') setMessages(msg.messages)
-        if (msg.type === 'integrations_update') setIntegrations(msg.integrations)
+        if (msg.type === 'integrations_update') {
+          setIntegrations(msg.integrations)
+          const wa = msg.integrations.find((i: any) => i.slug === 'coagent:whatsapp')
+          if (wa?.connected) setWhatsappQr(null)
+        }
         if (msg.type === 'settings_update') setSettings(msg.settings)
         if (msg.type === 'auth_status') setAuthStatus(msg.status)
         if (msg.type === 'files_update') setFiles(msg.files)
@@ -138,7 +141,6 @@ export function useAgent() {
           setRelayModel(msg.model)
           setRelayUsage(msg.usage)
         }
-        if (msg.type === 'api_keys_status') setApiKeyStatus(msg.keys)
         if (msg.type === 'file_ingested') recentIngestedFiles.current.push({ id: msg.id, filename: msg.filename })
         if (msg.type === 'heartbeat') setLastHeartbeat({ time: new Date(), status: msg.status })
         if (msg.type === 'skills_update') setSkills(msg.skills)
@@ -159,12 +161,27 @@ export function useAgent() {
         if (msg.type === 'voice_tts_audio') {
           import('@/lib/voice').then(v => v.playTtsAudio(msg.data))
         }
+        if (msg.type === 'voice_tts_chunk') {
+          import('@/lib/voice').then(v => v.handleTtsChunk(msg.data, msg.seq))
+        }
+        if (msg.type === 'voice_tts_done') {
+          import('@/lib/voice').then(v => v.handleTtsDone())
+        }
         if (msg.type === 'usage_update') setUsage(msg.usage)
         if (msg.type === 'auto_organize_done') setOrganizing(false)
         if (msg.type === 'calendar_update') setCalendarEntries(msg.entries)
+        if (msg.type === 'capability_card') {
+          setCapabilityCard({ name: msg.name, capabilities: msg.capabilities })
+        }
+        if ((msg as any).type === 'whatsapp_qr') {
+          setWhatsappQr((msg as any).dataUrl)
+        }
         if (msg.type === 'error') { setError(msg.message); setTimeout(() => setError(null), 5000) }
         if (msg.type === 'integration_needs_fields') {
           setPendingFields({ slug: msg.slug, fields: msg.fields })
+        }
+        if (msg.type === 'integration_fda_required') {
+          setError(msg.message)
         }
         if (msg.type === 'integration_auth_url') {
           setPendingFields(null)
@@ -277,10 +294,15 @@ export function useAgent() {
   const approve = useCallback((id: string) => send({ type: 'approve', id }), [send])
   const reject = useCallback((id: string) => send({ type: 'reject', id }), [send])
   const editQueueItem = useCallback((id: string, detail: string) => send({ type: 'edit_queue_item', id, detail }), [send])
-  const completeTodo = useCallback((id: string) => send({ type: 'complete_todo', id }), [send])
-  const deleteTodo = useCallback((id: string) => send({ type: 'delete_todo', id }), [send])
   const connectIntegration = useCallback((slug: string, params?: Record<string, string>) => send({ type: 'integration_connect', slug, params }), [send])
   const disconnectIntegration = useCallback((slug: string) => send({ type: 'integration_disconnect', slug }), [send])
+
+  const updateSkill = useCallback((name: string, description: string, instructions: string) => {
+    send({ type: 'update_skill', name, description, instructions })
+  }, [send])
+  const deleteSkill = useCallback((name: string) => {
+    send({ type: 'delete_skill', name })
+  }, [send])
 
   const updateSettings = useCallback((patch: Partial<AgentSettings>) => {
     send({ type: 'update_settings', patch })
@@ -301,10 +323,6 @@ export function useAgent() {
 
   const setModel = useCallback((model: string) => {
     send({ type: 'set_model', model })
-  }, [send])
-
-  const updateApiKeys = useCallback((keys: { anthropic?: string; composio?: string; openai?: string }) => {
-    send({ type: 'update_api_keys', keys })
   }, [send])
 
   const updateAuth = useCallback((method: AuthMethod, credential: string) => send({ type: 'update_auth', method, credential }), [send])
@@ -373,5 +391,16 @@ export function useAgent() {
     send({ type: 'delete_calendar_entry', id })
   }, [send])
 
-  return { queue, done, todos, messages, streamingText, thinking, processing, toolLabel, connected, lastHeartbeat, skills, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, apiKeyStatus, pendingFields, setPendingFields, updateApiKeys, setModel, chat, approve, reject, editQueueItem, completeTodo, deleteTodo, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry }
+  const confirmCapabilities = useCallback((selected: string[]) => {
+    send({ type: 'capability_confirm', capabilities: selected })
+    setTimeout(() => setCapabilityCard(null), 1500)
+  }, [send])
+
+  const deleteCustomIntegration = useCallback((slug: string) => send({ type: 'custom_integration_delete', slug }), [send])
+
+  const toggleTrigger = useCallback((triggerSlug: string, appSlug: string, enabled: boolean) => {
+    send({ type: 'toggle_trigger', triggerSlug, appSlug, enabled })
+  }, [send])
+
+  return { queue, done, messages, streamingText, thinking, processing, toolLabel, connected, lastHeartbeat, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, pendingFields, setPendingFields, setModel, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger }
 }

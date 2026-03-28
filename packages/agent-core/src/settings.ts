@@ -1,9 +1,9 @@
 // packages/agent-core/src/settings.ts
 import { readFile, writeFile, mkdir } from 'fs/promises'
 import { join } from 'path'
-import type { AgentSettings, ApiKeys, Autonomy, DayName } from '@coagent/shared'
+import type { AgentSettings, Autonomy, DayName } from '@coagent/shared'
 
-export type { AgentSettings, ApiKeys, Autonomy, DayName }
+export type { AgentSettings, Autonomy, DayName }
 
 const DAY_NAMES: DayName[] = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']
 
@@ -18,10 +18,10 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   autonomy: 'balanced',
   heartbeat_interval: 60,
   powerModel: 'claude-sonnet-4-6',
-  apiKeys: { anthropic: '', composio: '', openai: '' },
   voice_enabled: false,
   voice_response: false,
   voice_hotkey: 'Control+Alt+Space',
+  voice_voice: 'alloy',
 }
 
 const VALID_DAYS: DayName[] = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
@@ -43,12 +43,10 @@ export async function readSettings(dataDir: string): Promise<AgentSettings> {
       autonomy: parsed.autonomy ?? DEFAULT_SETTINGS.autonomy,
       heartbeat_interval: parsed.heartbeat_interval ?? DEFAULT_SETTINGS.heartbeat_interval,
       powerModel: parsed.powerModel ?? DEFAULT_SETTINGS.powerModel,
-      // apiKeys are NOT stored in settings.json — they live in .env only.
-      // Return empty strings so the shape is always complete.
-      apiKeys: DEFAULT_SETTINGS.apiKeys,
       voice_enabled: parsed.voice_enabled ?? DEFAULT_SETTINGS.voice_enabled,
       voice_response: parsed.voice_response ?? DEFAULT_SETTINGS.voice_response,
       voice_hotkey: parsed.voice_hotkey ?? DEFAULT_SETTINGS.voice_hotkey,
+      voice_voice: parsed.voice_voice ?? DEFAULT_SETTINGS.voice_voice,
     }
   } catch (err: any) {
     if (err?.code !== 'ENOENT') {
@@ -89,16 +87,13 @@ export async function writeSettings(dataDir: string, patch: Partial<AgentSetting
       ? Math.max(0, Math.min(1440, Math.round(patch.heartbeat_interval)))
       : current.heartbeat_interval,
     powerModel: patch.powerModel ?? current.powerModel,
-    // apiKeys are stored in .env, not settings.json — always return empty shape here
-    apiKeys: DEFAULT_SETTINGS.apiKeys,
     voice_enabled: patch.voice_enabled !== undefined ? patch.voice_enabled : current.voice_enabled,
     voice_response: patch.voice_response !== undefined ? patch.voice_response : current.voice_response,
     voice_hotkey: patch.voice_hotkey !== undefined ? patch.voice_hotkey : current.voice_hotkey,
+    voice_voice: patch.voice_voice !== undefined ? patch.voice_voice : current.voice_voice,
   }
 
-  // Persist everything except apiKeys (those live in .env, managed by auth.ts)
-  const { apiKeys: _omitted, ...persistable } = updated
-  await writeFile(join(dataDir, SETTINGS_FILE), JSON.stringify(persistable, null, 2), 'utf-8')
+  await writeFile(join(dataDir, SETTINGS_FILE), JSON.stringify(updated, null, 2), 'utf-8')
   return updated
 }
 

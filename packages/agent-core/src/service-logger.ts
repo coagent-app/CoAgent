@@ -3,6 +3,7 @@ import { join } from 'path'
 import { mkdir } from 'fs/promises'
 import Anthropic from '@anthropic-ai/sdk'
 import { recordUsage } from './usage-tracker.js'
+import { getRelayConfig } from './auth.js'
 import { embed } from './tool-embeddings.js'
 import { connect, Table } from '@lancedb/lancedb'
 
@@ -239,7 +240,10 @@ export async function extractInsights(
   const log: ToolLogEntry[] = JSON.parse(readFileSync(logFile, 'utf-8'))
   if (log.length === 0) return
 
-  const anthropic = new Anthropic({ apiKey: apiKey || process.env.ANTHROPIC_API_KEY })
+  const relay = getRelayConfig()
+  const anthropic = relay
+    ? new Anthropic({ baseURL: relay.url, apiKey: relay.token })
+    : new Anthropic()
 
   // Group logs by integration
   const byService = new Map<string, ToolLogEntry[]>()

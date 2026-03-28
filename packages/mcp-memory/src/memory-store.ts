@@ -3,7 +3,11 @@ import { existsSync } from 'fs'
 import { join, dirname } from 'path'
 import { connect, Table } from '@lancedb/lancedb'
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY
+const getEmbedUrl = () => {
+  const relay = process.env.RELAY_URL?.replace(/\/$/, '')
+  return relay ? `${relay}/v1/embeddings` : null
+}
+const getEmbedAuth = () => `Bearer ${process.env.RELAY_TOKEN ?? ''}`
 const EMBED_MODEL = 'text-embedding-3-small'
 const EMBED_DIM = 512
 const MAX_CHUNK_CHARS = 800
@@ -339,15 +343,16 @@ export class MemoryStore {
   }
 
   private async embed(text: string): Promise<number[]> {
-    if (!OPENAI_API_KEY) {
+    const embedUrl = getEmbedUrl()
+    if (!embedUrl) {
       // Fallback: deterministic hash-based mock (no semantic meaning, but consistent)
       return new Array(EMBED_DIM).fill(0).map((_, i) => (text.charCodeAt(i % text.length) / 255))
     }
 
-    const res = await fetch('https://api.openai.com/v1/embeddings', {
+    const res = await fetch(embedUrl, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        'Authorization': getEmbedAuth(),
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({ input: [text], model: EMBED_MODEL, dimensions: EMBED_DIM })
@@ -355,7 +360,7 @@ export class MemoryStore {
 
     if (!res.ok) {
       const err = await res.text()
-      throw new Error(`OpenAI embedding failed: ${err}`)
+      throw new Error(`Embedding failed: ${err}`)
     }
 
     const json = await res.json() as { data: { embedding: number[] }[] }

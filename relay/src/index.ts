@@ -1,10 +1,11 @@
 export interface Env {
   TUNNEL_SECRET: string
   ANTHROPIC_API_KEY: string
-  VOYAGE_API_KEY: string
+  OPENAI_API_KEY: string
   COMPOSIO_API_KEY: string
   STRIPE_WEBHOOK_SECRET: string
   TOKENS: KVNamespace
+  USER_SESSION: DurableObjectNamespace
 }
 
 // --- Token data stored in KV ---
@@ -19,11 +20,16 @@ interface UsageData {
   embeddingCostUsd: number
   composioActions: number
   composioCostUsd: number
+  ttsCharacters: number
+  ttsCostUsd: number
+  whisperSeconds: number
+  whisperCostUsd: number
   totalCostUsd: number
   periodStart: string   // ISO date — resets monthly
 }
 
 interface TokenData {
+  userId: number          // numeric user ID for Composio isolation
   stripeCustomerId: string
   model: string           // chosen model id e.g. 'claude-sonnet-4-6'
   supportAmount: number   // monthly support amount in cents
@@ -125,8 +131,12 @@ function generateToken(): string {
   return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
 }
 
-// Voyage pricing: $0.02 per 1M tokens (voyage-3-lite)
-const VOYAGE_COST_PER_TOKEN = 0.00000002
+// OpenAI embeddings pricing: $0.02 per 1M tokens (text-embedding-3-small)
+const OPENAI_EMBED_COST_PER_TOKEN = 0.00000002
+// OpenAI TTS-1 pricing: $15 per 1M characters
+const TTS_COST_PER_CHAR = 0.000015
+// OpenAI Whisper pricing: $0.006 per minute
+const WHISPER_COST_PER_SECOND = 0.0001
 // Composio pricing: $0.02 per 1,000 actions
 const COMPOSIO_COST_PER_ACTION = 0.00002
 
@@ -141,6 +151,10 @@ function freshUsage(): UsageData {
     embeddingCostUsd: 0,
     composioActions: 0,
     composioCostUsd: 0,
+    ttsCharacters: 0,
+    ttsCostUsd: 0,
+    whisperSeconds: 0,
+    whisperCostUsd: 0,
     totalCostUsd: 0,
     periodStart: new Date().toISOString(),
   }
@@ -272,43 +286,94 @@ async function proxyAnthropic(body: ChatRequest, model: ModelConfig, env: Env): 
   })
 }
 
-// --- Voyage embedding proxy ---
+// --- OpenAI embedding proxy ---
 
-async function proxyVoyage(request: Request, env: Env, token: string, data: TokenData): Promise<Response> {
-  const body = await request.json() as { input: string | string[]; model?: string }
-
-  const res = await fetch('https://api.voyageai.com/v1/embeddings', {
+async function proxyOpenAIEmbeddings(request: Request, env: Env, token: string, data: TokenData): Promise<Response> {
+  const body = await request.json() as { input: string | string[]; model?: string; dimensions?: number }
+  const res = await fetch('https://api.openai.com/v1/embeddings', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${env.VOYAGE_API_KEY}`,
+      'Authorization': `Bearer ${env.OPENAI_API_KEY}`,
     },
     body: JSON.stringify({
       input: body.input,
-      model: body.model || 'voyage-3-lite',
+      model: body.model || 'text-embedding-3-small',
+      ...(body.dimensions ? { dimensions: body.dimensions } : {}),
     }),
   })
-
-  // Track usage from Voyage's response (includes usage.total_tokens)
   if (res.status === 200) {
     try {
       const clone = res.clone()
       const resBody = await clone.json() as { usage?: { total_tokens?: number } }
       const tokens = resBody.usage?.total_tokens || 0
-      const cost = tokens * VOYAGE_COST_PER_TOKEN
+      const cost = tokens * OPENAI_EMBED_COST_PER_TOKEN
       data.usage.embeddingTokens += tokens
       data.usage.embeddingCostUsd += cost
       data.usage.totalCostUsd += cost
       saveToken(env, token, data).catch(() => {})
-    } catch {
-      // Usage tracking is best-effort
-    }
+    } catch {}
   }
-
   return new Response(res.body, {
     status: res.status,
     headers: { 'Content-Type': 'application/json', ...corsHeaders() },
   })
+}
+
+// --- OpenAI audio proxy (TTS + transcription) ---
+
+async function proxyOpenAITts(request: Request, env: Env, token: string, data: TokenData): Promise<Response> {
+  const body = await request.clone().json() as { input?: string }
+  const chars = (body.input || '').length
+
+  const headers = new Headers(request.headers)
+  headers.set('Authorization', `Bearer ${env.OPENAI_API_KEY}`)
+  headers.delete('host')
+  const res = await fetch('https://api.openai.com/v1/audio/speech', {
+    method: 'POST',
+    headers,
+    body: request.body,
+  })
+
+  if (res.ok && chars > 0) {
+    const cost = chars * TTS_COST_PER_CHAR
+    data.usage.ttsCharacters += chars
+    data.usage.ttsCostUsd += cost
+    data.usage.totalCostUsd += cost
+    saveToken(env, token, data).catch(() => {})
+  }
+
+  const respHeaders: Record<string, string> = { ...corsHeaders() }
+  const ct = res.headers.get('content-type')
+  if (ct) respHeaders['Content-Type'] = ct
+  return new Response(res.body, { status: res.status, headers: respHeaders })
+}
+
+async function proxyOpenAITranscription(request: Request, env: Env, token: string, data: TokenData): Promise<Response> {
+  const headers = new Headers(request.headers)
+  headers.set('Authorization', `Bearer ${env.OPENAI_API_KEY}`)
+  headers.delete('host')
+  const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+    method: 'POST',
+    headers,
+    body: request.body,
+  })
+
+  if (res.ok) {
+    // Estimate audio duration from content-length (rough: ~16KB/s for ogg/opus)
+    const contentLength = parseInt(request.headers.get('content-length') || '0')
+    const estimatedSeconds = contentLength > 0 ? Math.max(1, contentLength / 16000) : 5
+    const cost = estimatedSeconds * WHISPER_COST_PER_SECOND
+    data.usage.whisperSeconds += estimatedSeconds
+    data.usage.whisperCostUsd += cost
+    data.usage.totalCostUsd += cost
+    saveToken(env, token, data).catch(() => {})
+  }
+
+  const respHeaders: Record<string, string> = { ...corsHeaders() }
+  const ct = res.headers.get('content-type')
+  if (ct) respHeaders['Content-Type'] = ct
+  return new Response(res.body, { status: res.status, headers: respHeaders })
 }
 
 // --- Composio proxy (whitelisted endpoints only) ---
@@ -319,6 +384,16 @@ const COMPOSIO_ALLOWED: { method: string; pattern: RegExp }[] = [
   { method: 'DELETE', pattern: /^\/connected_accounts\/[a-zA-Z0-9_-]+$/ },
   { method: 'POST', pattern: /^\/trigger_instances\/[a-zA-Z0-9_-]+\/upsert$/ },
   { method: 'POST', pattern: /^\/actions\/[a-zA-Z0-9_-]+\/execute$/ },
+  { method: 'GET', pattern: /^\/toolkits\/[a-zA-Z0-9_-]+$/ },
+  { method: 'GET', pattern: /^\/auth_configs$/ },
+  { method: 'POST', pattern: /^\/auth_configs$/ },
+  { method: 'GET', pattern: /^\/mcp\/servers$/ },
+  { method: 'POST', pattern: /^\/mcp\/servers$/ },
+  { method: 'PATCH', pattern: /^\/mcp\/[a-zA-Z0-9_-]+$/ },
+  { method: 'POST', pattern: /^\/files\/upload\/request$/ },
+  { method: 'GET', pattern: /^\/triggers_types$/ },
+  { method: 'GET', pattern: /^\/triggers_types\/list\/enum$/ },
+  { method: 'GET', pattern: /^\/triggers_types\/[a-zA-Z0-9_-]+$/ },
 ]
 
 async function proxyComposio(request: Request, env: Env, token: string, data: TokenData): Promise<Response> {
@@ -417,7 +492,14 @@ async function handleStripeWebhook(request: Request, env: Env): Promise<Response
     case 'checkout.session.completed': {
       const session = event.data.object
       const token = generateToken()
+
+      // Assign a numeric user ID (atomic increment via KV)
+      const prevId = parseInt(await env.TOKENS.get('_next_user_id') || '0')
+      const userId = prevId + 1
+      await env.TOKENS.put('_next_user_id', String(userId))
+
       const tokenData: TokenData = {
+        userId,
         stripeCustomerId: session.customer,
         model: 'claude-sonnet-4-6',
         supportAmount: 0,
@@ -430,12 +512,9 @@ async function handleStripeWebhook(request: Request, env: Env): Promise<Response
       // Store reverse lookup: stripeCustomerId → token
       await env.TOKENS.put(`stripe:${session.customer}`, token)
 
-      // Stripe metadata gets the token back to the user via success page / email
-      // You'd call Stripe API here to update the session metadata with the token
-      // For now, log it
-      console.log(`New token for ${session.customer}: ${token}`)
+      console.log(`New user #${userId} for ${session.customer}: ${token}`)
 
-      return jsonResponse({ ok: true, token })
+      return jsonResponse({ ok: true, token, userId })
     }
 
     // Subscription cancelled → revoke token
@@ -542,6 +621,103 @@ async function handleMessagesProxy(request: Request, env: Env, ctx: ExecutionCon
   })
 }
 
+// --- UserSession Durable Object ---
+
+export class UserSession {
+  private state: DurableObjectState
+  private env: Env
+
+  constructor(state: DurableObjectState, env: Env) {
+    this.state = state
+    this.env = env
+    this.state.blockConcurrencyWhile(async () => {
+      this.state.storage.sql.exec(`
+        CREATE TABLE IF NOT EXISTS webhook_queue (
+          id TEXT PRIMARY KEY,
+          trigger_name TEXT NOT NULL,
+          payload TEXT NOT NULL,
+          received_at TEXT NOT NULL
+        )
+      `)
+    })
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url)
+
+    // WebSocket upgrade — queued events flush on first client ping, not during handshake
+    if (request.headers.get('Upgrade') === 'websocket') {
+      const pair = new WebSocketPair()
+      this.state.acceptWebSocket(pair[1])
+      return new Response(null, { status: 101, webSocket: pair[0] })
+    }
+
+    // POST /push — receive a webhook payload and deliver or queue it
+    if (request.method === 'POST' && url.pathname === '/push') {
+      const payload = await request.json()
+      const sockets = this.state.getWebSockets()
+      if (sockets.length > 0) {
+        const msg = JSON.stringify({ type: 'webhook', payload })
+        for (const ws of sockets) {
+          ws.send(msg)
+        }
+      } else {
+        const id = crypto.randomUUID()
+        const receivedAt = new Date().toISOString()
+        this.state.storage.sql.exec(
+          `INSERT INTO webhook_queue (id, trigger_name, payload, received_at) VALUES (?, ?, ?, ?)`,
+          id,
+          (payload as { trigger_name?: string }).trigger_name ?? 'unknown',
+          JSON.stringify(payload),
+          receivedAt,
+        )
+      }
+      return new Response('OK', { status: 200 })
+    }
+
+    return new Response('Not found', { status: 404 })
+  }
+
+  webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
+    if (message === 'ping') {
+      // Flush any queued webhooks on ping (no-op when queue is empty)
+      this.flushQueue(ws)
+      ws.send('pong')
+    }
+  }
+
+  webSocketClose(ws: WebSocket, code: number, reason: string): void {
+    ws.close(code, reason)
+  }
+
+  webSocketError(ws: WebSocket, _error: unknown): void {
+    ws.close(1011, 'WebSocket error')
+  }
+
+  private flushQueue(ws: WebSocket): void {
+    // Delete events older than 48 hours
+    const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString()
+    this.state.storage.sql.exec(`DELETE FROM webhook_queue WHERE received_at < ?`, cutoff)
+
+    // Send remaining queued events in order
+    const rows = this.state.storage.sql.exec(
+      `SELECT id, payload, received_at FROM webhook_queue ORDER BY received_at ASC`
+    ).toArray()
+
+    for (const row of rows) {
+      ws.send(JSON.stringify({
+        type: 'webhook',
+        payload: JSON.parse(row.payload as string),
+        queued: true,
+        receivedAt: row.received_at,
+      }))
+    }
+
+    // Clear queue after flushing
+    this.state.storage.sql.exec(`DELETE FROM webhook_queue`)
+  }
+}
+
 // --- Main router ---
 
 export default {
@@ -558,19 +734,37 @@ export default {
       return handleStripeWebhook(request, env)
     }
 
-    // --- Webhook relay (existing) ---
-    if (request.method === 'POST' && url.pathname.startsWith('/webhook/')) {
+    // WebSocket connection
+    if (request.headers.get('Upgrade') === 'websocket' && url.pathname.startsWith('/ws/')) {
       const userId = url.pathname.split('/')[2]
+      const token = url.searchParams.get('token')
+      if (!token) return new Response('Missing token', { status: 401 })
+      const data = await getToken(env, token)
+      if (!data || !data.active) return new Response('Invalid token', { status: 401 })
+      const doId = env.USER_SESSION.idFromName(userId)
+      const stub = env.USER_SESSION.get(doId)
+      return stub.fetch(request)
+    }
+
+    // Composio webhook → push to user's DO (secured by tunnel secret)
+    if (request.method === 'POST' && url.pathname.startsWith('/webhook/')) {
+      const secret = request.headers.get('x-tunnel-secret')
+      if (!secret || secret !== env.TUNNEL_SECRET) {
+        return new Response('Unauthorized', { status: 401 })
+      }
+      const userId = url.pathname.split('/')[2]
+      if (!userId) return new Response('Missing userId', { status: 400 })
       const payload = await request.json()
-
-      const tunnelUrl = `https://${userId}.coagent-tunnel.example.com/webhook`
-      await fetch(tunnelUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Relay-Secret': env.TUNNEL_SECRET },
-        body: JSON.stringify(payload),
-      })
-
-      return new Response('OK', { status: 200 })
+      const doId = env.USER_SESSION.idFromName(userId)
+      const stub = env.USER_SESSION.get(doId)
+      ctx.waitUntil(
+        stub.fetch(new Request('https://internal/push', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+          headers: { 'Content-Type': 'application/json' },
+        }))
+      )
+      return new Response('OK', { status: 200, headers: corsHeaders() })
     }
 
     // --- Available models (public, no auth) ---
@@ -608,6 +802,7 @@ export default {
 
       const { data } = result
       return jsonResponse({
+        userId: data.userId,
         model: data.model,
         supportAmount: data.supportAmount,
         usage: data.usage,
@@ -620,11 +815,25 @@ export default {
       return handleMessagesProxy(request, env, ctx)
     }
 
-    // --- Voyage embedding proxy ---
+    // --- OpenAI embedding proxy ---
     if (request.method === 'POST' && url.pathname === '/v1/embeddings') {
       const result = await validateRequest(request, env)
       if (result instanceof Response) return result
-      return proxyVoyage(request, env, result.token, result.data)
+      return proxyOpenAIEmbeddings(request, env, result.token, result.data)
+    }
+
+    // --- OpenAI TTS proxy ---
+    if (request.method === 'POST' && url.pathname === '/v1/audio/speech') {
+      const result = await validateRequest(request, env)
+      if (result instanceof Response) return result
+      return proxyOpenAITts(request, env, result.token, result.data)
+    }
+
+    // --- OpenAI transcription proxy ---
+    if (request.method === 'POST' && url.pathname === '/v1/audio/transcriptions') {
+      const result = await validateRequest(request, env)
+      if (result instanceof Response) return result
+      return proxyOpenAITranscription(request, env, result.token, result.data)
     }
 
     // --- Composio proxy (all methods) ---

@@ -156,6 +156,49 @@ export function playTtsAudio(base64Mp3: string) {
   audio.play().catch(err => console.error('[Voice] TTS playback failed:', err))
 }
 
+// Streaming TTS — accumulate chunks into a growing blob, start playback on first chunk
+let ttsChunks: Uint8Array[] = []
+let ttsStreamUrl: string | null = null
+
+export function handleTtsChunk(base64Chunk: string, seq: number) {
+  const bytes = Uint8Array.from(atob(base64Chunk), c => c.charCodeAt(0))
+  ttsChunks.push(bytes)
+
+  // Start playback on first chunk
+  if (seq === 0) {
+    if (ttsAudio) { ttsAudio.pause(); ttsAudio = null }
+    if (ttsStreamUrl) { URL.revokeObjectURL(ttsStreamUrl); ttsStreamUrl = null }
+    // Build blob from what we have so far and start playing
+    const blob = new Blob(ttsChunks, { type: 'audio/ogg; codecs=opus' })
+    ttsStreamUrl = URL.createObjectURL(blob)
+    const audio = new Audio(ttsStreamUrl)
+    ttsAudio = audio
+    audio.onended = () => { ttsAudio = null }
+    audio.play().catch(err => console.error('[Voice] TTS stream play failed:', err))
+  }
+}
+
+export function handleTtsDone() {
+  // Rebuild the full blob and swap the audio source for complete playback
+  if (ttsChunks.length === 0) return
+  const fullBlob = new Blob(ttsChunks, { type: 'audio/ogg; codecs=opus' })
+  const fullUrl = URL.createObjectURL(fullBlob)
+
+  if (ttsAudio) {
+    const currentTime = ttsAudio.currentTime
+    const wasPlaying = !ttsAudio.paused
+    ttsAudio.pause()
+    if (ttsStreamUrl) URL.revokeObjectURL(ttsStreamUrl)
+    ttsStreamUrl = fullUrl
+    const audio = new Audio(fullUrl)
+    ttsAudio = audio
+    audio.currentTime = currentTime
+    audio.onended = () => { ttsAudio = null; URL.revokeObjectURL(fullUrl) }
+    if (wasPlaying) audio.play().catch(() => {})
+  }
+  ttsChunks = []
+}
+
 // Show tool activity in the pill (e.g. "Reading email...")
 export function showVoiceToolLabel(label: string) {
   updatePill('working', label)

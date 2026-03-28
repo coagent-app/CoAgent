@@ -10,12 +10,6 @@ export interface AuthStatus {
 
 export type DayName = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun'
 
-export interface ApiKeys {
-  anthropic: string   // required for the agent to function
-  composio: string    // optional — enables integrations
-  openai: string      // optional — enables semantic file search (embeddings)
-}
-
 export interface AgentSettings {
   name: string
   email: string
@@ -26,10 +20,10 @@ export interface AgentSettings {
   autonomy: Autonomy
   heartbeat_interval: number // minutes between heartbeats (0 = disabled)
   powerModel: string
-  apiKeys: ApiKeys
   voice_enabled: boolean   // global toggle for voice pill
   voice_response: boolean  // TTS read-back of summary
   voice_hotkey: string     // shortcut string e.g. "Control+Space"
+  voice_voice: string      // OpenAI TTS voice: alloy, echo, fable, onyx, nova, shimmer
 }
 
 export type TriggerSource = 'heartbeat' | 'webhook' | 'manual' | 'memory_cleanup' | 'todo_due' | 'routine' | 'task_due'
@@ -63,20 +57,18 @@ export interface TodoItem {
   createdAt: string
 }
 
-export type CalendarEntryType = 'routine' | 'task' | 'event'
+export type CalendarEntryType = 'routine' | 'task' | 'followup'
 
 export interface CalendarEntry {
   id: string
   type: CalendarEntryType
   label: string
   cron?: string         // routine: "0 9 * * 1-5"
-  due?: string          // task: ISO datetime "2026-03-28T14:30:00"
-  start?: string        // event: ISO datetime
-  end?: string          // event: ISO datetime
-  instruction?: string  // what the agent executes (routines, tasks only)
-  notes?: string        // contextual info (all types — meeting agenda, reminder details, etc.)
+  due?: string          // task/followup: ISO datetime "2026-03-28T14:30:00"
+  instruction?: string  // what the agent executes when entry fires
+  notes?: string        // contextual info for any entry type
   enabled: boolean
-  completed?: boolean   // for tasks
+  completed?: boolean   // for tasks and followups
   createdAt: string
 }
 
@@ -84,6 +76,13 @@ export interface AgentMessage {
   role: 'user' | 'assistant'
   content: string
   timestamp: string
+}
+
+export interface TriggerInfo {
+  slug: string       // e.g. 'GMAIL_NEW_GMAIL_MESSAGE'
+  label: string      // e.g. 'New email received'
+  appSlug: string    // e.g. 'gmail'
+  enabled: boolean   // whether currently subscribed
 }
 
 export interface Integration {
@@ -94,6 +93,9 @@ export interface Integration {
   description?: string
   capabilities?: string
   custom?: boolean
+  builtin?: boolean
+  icon?: string
+  triggers?: TriggerInfo[]
 }
 
 export interface FileEntry {
@@ -144,8 +146,6 @@ export type WSClientMessage =
   | { type: 'relay_activate'; token: string; relayUrl: string }
   | { type: 'get_relay_status' }
   | { type: 'set_model'; model: string }
-  | { type: 'update_api_keys'; keys: Partial<ApiKeys> }
-  | { type: 'get_api_keys' }
   | { type: 'voice_chat'; message: string }
   | { type: 'voice_audio'; data: string }
   | { type: 'get_usage' }
@@ -153,6 +153,12 @@ export type WSClientMessage =
   | { type: 'get_calendar' }
   | { type: 'complete_calendar_entry'; id: string }
   | { type: 'delete_calendar_entry'; id: string }
+  | { type: 'capability_confirm'; capabilities: string[] }
+  | { type: 'custom_integration_delete'; slug: string }
+  | { type: 'get_skills' }
+  | { type: 'update_skill'; name: string; description: string; instructions: string }
+  | { type: 'delete_skill'; name: string }
+  | { type: 'toggle_trigger'; triggerSlug: string; appSlug: string; enabled: boolean }
 
 export type WSServerMessage =
   | { type: 'queue_update'; items: ApprovalItem[] }
@@ -165,7 +171,8 @@ export type WSServerMessage =
   | { type: 'error'; message: string }
   | { type: 'integrations_update'; integrations: Integration[] }
   | { type: 'integration_auth_url'; slug: string; url: string }
-  | { type: 'integration_needs_fields'; slug: string; fields: { name: string; displayName: string; description: string }[] }
+  | { type: 'integration_needs_fields'; slug: string; fields: { name: string; displayName: string; description: string; helpUrl?: string; helpText?: string }[] }
+  | { type: 'integration_fda_required'; slug: string; message: string }
   | { type: 'chat_history'; messages: AgentMessage[] }
   | { type: 'tool_start'; tool: string; label: string }
   | { type: 'tool_end'; tool: string }
@@ -176,16 +183,19 @@ export type WSServerMessage =
   | { type: 'files_search_result'; files: FileEntry[] }
   | { type: 'auth_status'; status: AuthStatus }
   | { type: 'relay_status'; active: boolean; model: string | null; usage: RelayUsage | null }
-  | { type: 'api_keys_status'; keys: { anthropic: boolean; composio: boolean; openai: boolean } }
   | { type: 'heartbeat'; status: 'started' | 'done' | 'skipped' | 'escalated'; summary?: string }
-  | { type: 'skills_update'; skills: { name: string; description: string }[] }
+  | { type: 'skills_update'; skills: { name: string; description: string; instructions: string; builtin?: boolean }[] }
   | { type: 'file_ingested'; id: string; filename: string }
   | { type: 'voice_summary'; summary: string }
   | { type: 'voice_tts_audio'; data: string }
+  | { type: 'voice_tts_chunk'; seq: number; data: string }
+  | { type: 'voice_tts_done' }
   | { type: 'voice_transcribed'; text: string }
   | { type: 'usage_update'; usage: UsageSummary }
   | { type: 'auto_organize_done'; folders: string[]; moved: number }
   | { type: 'calendar_update'; entries: CalendarEntry[] }
+  | { type: 'capability_card'; name: string; capabilities: { name: string; description: string; checked: boolean }[] }
+  | { type: 'whatsapp_qr'; dataUrl: string }
 
 export interface RelayUsage {
   inputTokens: number

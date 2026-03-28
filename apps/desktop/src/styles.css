@@ -69,28 +69,6 @@
   }
 }
 
-/* macOS traffic light dots */
-.window-chrome {
-  height: 44px;
-  background: #FAFAFA;
-  border-bottom: 1px solid #E5E5E5;
-  display: flex;
-  align-items: center;
-  padding: 0 16px;
-  gap: 8px;
-  flex-shrink: 0;
-  -webkit-app-region: drag;
-}
-
-.dark .window-chrome {
-  background: #171717;
-  border-bottom-color: #262626;
-}
-.chrome-dot { width: 12px; height: 12px; border-radius: 50%; }
-.chrome-dot.red    { background: #FF5F57; }
-.chrome-dot.yellow { background: #FFBD2E; }
-.chrome-dot.green  { background: #28CA41; }
-
 .app-body {
   display: flex;
   flex: 1;

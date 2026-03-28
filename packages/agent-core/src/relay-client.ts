@@ -2,10 +2,9 @@ import { readFile, writeFile, mkdir } from 'fs/promises'
 import { existsSync } from 'fs'
 import { join } from 'path'
 import WebSocket from 'ws'
+import { getOpenAIProxy } from './auth.js'
 
 const EVENT_STORE_FILE = 'event-store.json'
-// Read at call time so dotenv has a chance to load first
-const getVoyageKey = () => process.env.VOYAGE_API_KEY ?? ''
 const EVENT_TTL_MS = 60 * 60 * 1000 // 1h
 
 // ── Pre-processor constants ──────────────────────────────────────────────────
@@ -52,10 +51,12 @@ interface StoreEntry {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 async function embedText(text: string): Promise<number[]> {
-  const res = await fetch('https://api.voyageai.com/v1/embeddings', {
+  const proxy = getOpenAIProxy()
+  if (!proxy) throw new Error('No relay configured for embeddings')
+  const res = await fetch(`${proxy.baseUrl}/v1/embeddings`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${getVoyageKey()}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ input: [text], model: 'voyage-3-lite' })
+    headers: { Authorization: proxy.authHeader, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ input: text, model: 'text-embedding-3-small' })
   })
   const data = await res.json() as { data: { embedding: number[] }[] }
   return data.data[0].embedding
@@ -156,8 +157,8 @@ async function appendToEventStore(dataDir: string, trigger: string, payload: Rec
     console.log(`[EventStore] Dropped (noise): ${trigger}`)
     return
   }
-  if (!getVoyageKey()) {
-    console.warn('[EventStore] getVoyageKey() not set — event not stored')
+  if (!getOpenAIProxy()) {
+    console.warn('[EventStore] No relay configured — event not stored')
     return
   }
 
@@ -187,7 +188,7 @@ export async function searchEventStore(
   query: string,
   limit = 5
 ): Promise<{ id: string; trigger: string; event: Record<string, unknown>; receivedAt: string; score: number }[]> {
-  if (!getVoyageKey()) return []
+  if (!getOpenAIProxy()) return []
   const queryEmb = await embedText(query)
   const entries = await readStore(dataDir)
 
@@ -204,16 +205,21 @@ export async function searchEventStore(
   return top.map(e => ({ id: e.id, trigger: e.trigger, event: e.event, receivedAt: e.receivedAt, score: e.score }))
 }
 
+export async function getUnprocessedEvents(dataDir: string): Promise<{ id: string; trigger: string; event: Record<string, unknown>; receivedAt: string }[]> {
+  const entries = await readStore(dataDir)
+  const unprocessed = entries.filter(e => !e.done && !e.retrieved)
+  // Mark them as retrieved so they don't show up again
+  if (unprocessed.length > 0) {
+    const ids = new Set(unprocessed.map(e => e.id))
+    await writeStore(dataDir, entries.map(e => ids.has(e.id) ? { ...e, retrieved: true } : e))
+  }
+  return unprocessed.map(e => ({ id: e.id, trigger: e.trigger, event: e.event, receivedAt: e.receivedAt }))
+}
+
 export async function markEventsDone(dataDir: string, ids: string[]): Promise<void> {
   const entries = await readStore(dataDir)
   const idSet = new Set(ids)
   await writeStore(dataDir, entries.map(e => idSet.has(e.id) ? { ...e, done: true } : e))
-}
-
-export async function hasUnreadEvents(dataDir: string): Promise<boolean> {
-  const entries = await readStore(dataDir)
-  const cutoff = Date.now() - EVENT_TTL_MS
-  return entries.some(e => !e.done && !e.retrieved && new Date(e.receivedAt).getTime() > cutoff)
 }
 
 export async function purgeEventStore(dataDir: string): Promise<void> {
@@ -239,6 +245,7 @@ export class RelayClient {
   private relayUrl: string | null
   private relayWs: WebSocket | null = null
   private localWs: WebSocket | null = null
+  private pingInterval: ReturnType<typeof setInterval> | null = null
   private backoffMs = MIN_BACKOFF_MS
   private stopped = false
 
@@ -252,7 +259,8 @@ export class RelayClient {
     if (!base) return null
     const userId = process.env.RELAY_USER_ID ?? ''
     const token = process.env.RELAY_TOKEN ?? ''
-    let url = `${base.replace(/\/$/, '')}/agent/${userId}`
+    const wsBase = base.replace(/^http/, 'ws').replace(/\/$/, '')
+    let url = `${wsBase}/ws/${userId}`
     if (token) url += `?token=${encodeURIComponent(token)}`
     return url
   }
@@ -265,6 +273,7 @@ export class RelayClient {
 
   stop(): void {
     this.stopped = true
+    if (this.pingInterval) clearInterval(this.pingInterval)
     this.relayWs?.terminate()
     this.localWs?.terminate()
     this.relayWs = null
@@ -281,11 +290,18 @@ export class RelayClient {
     ws.on('open', () => {
       console.log('[Relay] Connected')
       this.backoffMs = MIN_BACKOFF_MS
+      // Ping keepalive every 30s — triggers queue flush on first ping
+      this.pingInterval = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) ws.send('ping')
+      }, 30_000)
+      ws.send('ping') // initial ping to flush queued events
       this.openLocalConnection()
     })
 
     ws.on('message', (raw) => {
       const str = raw.toString()
+      // Ignore keepalive pong responses
+      if (str === 'pong') return
       // Webhook payloads go to the event store, everything else → local agent
       try {
         const msg = JSON.parse(str)
@@ -320,6 +336,7 @@ export class RelayClient {
     })
 
     ws.on('close', () => {
+      if (this.pingInterval) clearInterval(this.pingInterval)
       if (this.stopped) return
       console.log('[Relay] Disconnected')
       this.localWs?.terminate()

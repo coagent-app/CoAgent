@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react'
-import { ChevronLeft, ChevronRight, Circle, Trash2, Repeat, Calendar as CalendarIcon } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Circle, Trash2, Repeat, Clock, X, CheckCircle } from 'lucide-react'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { cn } from '@/lib/utils'
 import {
@@ -21,14 +21,19 @@ interface CalendarPaneProps {
 }
 
 const TYPE_COLORS = {
-  routine: { bg: 'bg-sky-100 dark:bg-sky-900/30', text: 'text-sky-700 dark:text-sky-300', dot: 'bg-sky-400' },
-  task:    { bg: 'bg-amber-100 dark:bg-amber-900/30', text: 'text-amber-700 dark:text-amber-300', dot: 'bg-amber-400' },
-  event:   { bg: 'bg-blue-100 dark:bg-blue-900/30', text: 'text-blue-700 dark:text-blue-300', dot: 'bg-blue-500' },
+  routine:  { bg: 'bg-sky-100 dark:bg-sky-900/30',    text: 'text-sky-700 dark:text-sky-300',    dot: 'bg-sky-400' },
+  task:     { bg: 'bg-amber-100 dark:bg-amber-900/30', text: 'text-amber-700 dark:text-amber-300', dot: 'bg-amber-400' },
+  followup: { bg: 'bg-purple-100 dark:bg-purple-900/30', text: 'text-purple-700 dark:text-purple-300', dot: 'bg-purple-500' },
+} as const
+
+function typeColors(type: string) {
+  return TYPE_COLORS[type as keyof typeof TYPE_COLORS] ?? TYPE_COLORS.task
 }
 
 export function CalendarPane({ entries, onComplete, onDelete, activeHours = { start: 7, end: 24 } }: CalendarPaneProps) {
   const [view, setView] = useState<CalendarView>('week')
   const [anchor, setAnchor] = useState(new Date())
+  const [selectedEntry, setSelectedEntry] = useState<CalendarEntry | null>(null)
 
   const navigate = (dir: -1 | 1) => {
     if (view === 'week') setAnchor(d => dir === 1 ? addWeeks(d, 1) : subWeeks(d, 1))
@@ -47,6 +52,20 @@ export function CalendarPane({ entries, onComplete, onDelete, activeHours = { st
     if (view === 'month') return format(anchor, 'MMMM yyyy')
     return 'Agenda'
   }, [view, anchor])
+
+  const handleSelect = (entry: CalendarEntry) => {
+    setSelectedEntry(prev => prev?.id === entry.id ? null : entry)
+  }
+
+  const handleComplete = (id: string) => {
+    onComplete(id)
+    if (selectedEntry?.id === id) setSelectedEntry(null)
+  }
+
+  const handleDelete = (id: string) => {
+    onDelete(id)
+    if (selectedEntry?.id === id) setSelectedEntry(null)
+  }
 
   return (
     <div className="flex-1 flex flex-col bg-white dark:bg-neutral-950 overflow-hidden">
@@ -81,12 +100,137 @@ export function CalendarPane({ entries, onComplete, onDelete, activeHours = { st
         </div>
       </div>
 
-      {/* View content */}
-      <div className="flex-1 overflow-hidden px-4">
-        {view === 'agenda' && <AgendaView entries={entries} onComplete={onComplete} onDelete={onDelete} />}
-        {view === 'week' && <WeekView entries={entries} anchor={anchor} activeHours={activeHours} />}
-        {view === 'month' && <MonthView entries={entries} anchor={anchor} />}
-        {view === 'day' && <DayView entries={entries} anchor={anchor} activeHours={activeHours} />}
+      {/* View content + detail panel */}
+      <div className="flex-1 flex overflow-hidden">
+        <div className="flex-1 overflow-hidden px-4">
+          {view === 'agenda' && <AgendaView entries={entries} onComplete={handleComplete} onDelete={handleDelete} onSelect={handleSelect} selectedId={selectedEntry?.id} />}
+          {view === 'week' && <WeekView entries={entries} anchor={anchor} activeHours={activeHours} onSelect={handleSelect} selectedId={selectedEntry?.id} />}
+          {view === 'month' && <MonthView entries={entries} anchor={anchor} onSelect={handleSelect} selectedId={selectedEntry?.id} />}
+          {view === 'day' && <DayView entries={entries} anchor={anchor} activeHours={activeHours} onSelect={handleSelect} selectedId={selectedEntry?.id} />}
+        </div>
+
+        {selectedEntry && (
+          <EntryDetailPanel
+            entry={selectedEntry}
+            onComplete={handleComplete}
+            onDelete={handleDelete}
+            onClose={() => setSelectedEntry(null)}
+          />
+        )}
+      </div>
+    </div>
+  )
+}
+
+/* ── Entry Detail Panel ─────────────────────────────── */
+
+function EntryDetailPanel({
+  entry,
+  onComplete,
+  onDelete,
+  onClose,
+}: {
+  entry: CalendarEntry
+  onComplete: (id: string) => void
+  onDelete: (id: string) => void
+  onClose: () => void
+}) {
+  const colors = typeColors(entry.type)
+  const canComplete = entry.type === 'task' || entry.type === 'followup'
+
+  const timingLabel = (() => {
+    if (entry.cron) return entry.cron
+    if (entry.due) return formatTime(entry.due)
+    return 'No time set'
+  })()
+
+  const typeLabel = entry.type.charAt(0).toUpperCase() + entry.type.slice(1)
+
+  return (
+    <div className="w-[260px] flex-shrink-0 border-l border-neutral-100 dark:border-neutral-800 bg-white dark:bg-neutral-950 flex flex-col overflow-hidden">
+      {/* Panel header */}
+      <div className="px-4 pt-4 pb-3 flex items-start justify-between border-b border-neutral-100 dark:border-neutral-800">
+        <span className={cn('text-[10px] font-semibold uppercase tracking-widest px-2 py-0.5 rounded-full', colors.bg, colors.text)}>
+          {typeLabel}
+        </span>
+        <button
+          onClick={onClose}
+          className="text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300 transition-colors"
+        >
+          <X size={14} />
+        </button>
+      </div>
+
+      {/* Panel body */}
+      <ScrollArea className="flex-1">
+        <div className="px-4 py-3 space-y-4">
+          {/* Label */}
+          <p className="text-[15px] font-semibold text-neutral-900 dark:text-neutral-100 leading-snug">
+            {entry.label}
+          </p>
+
+          {/* Timing */}
+          <div>
+            <p className="text-[10px] font-semibold text-neutral-400 dark:text-neutral-500 uppercase tracking-widest mb-1">
+              {entry.cron ? 'Schedule' : 'Due'}
+            </p>
+            <p className={cn('text-[12px]', colors.text)}>{timingLabel}</p>
+          </div>
+
+          {/* Instruction */}
+          {entry.instruction && (
+            <div>
+              <p className="text-[10px] font-semibold text-neutral-400 dark:text-neutral-500 uppercase tracking-widest mb-1">
+                Instruction
+              </p>
+              <p className="text-[12px] text-neutral-700 dark:text-neutral-300 leading-relaxed whitespace-pre-wrap">
+                {entry.instruction}
+              </p>
+            </div>
+          )}
+
+          {/* Notes */}
+          {entry.notes && (
+            <div>
+              <p className="text-[10px] font-semibold text-neutral-400 dark:text-neutral-500 uppercase tracking-widest mb-1">
+                Notes
+              </p>
+              <p className="text-[12px] text-neutral-700 dark:text-neutral-300 leading-relaxed whitespace-pre-wrap">
+                {entry.notes}
+              </p>
+            </div>
+          )}
+
+          {/* Created */}
+          <div>
+            <p className="text-[10px] font-semibold text-neutral-400 dark:text-neutral-500 uppercase tracking-widest mb-1">
+              Created
+            </p>
+            <p className="text-[11px] text-neutral-400 dark:text-neutral-500">
+              {formatTime(entry.createdAt)}
+            </p>
+          </div>
+        </div>
+      </ScrollArea>
+
+      {/* Actions */}
+      <div className="px-4 py-3 border-t border-neutral-100 dark:border-neutral-800 flex flex-col gap-2">
+        {canComplete && !entry.completed && (
+          <button
+            onClick={() => onComplete(entry.id)}
+            className="flex items-center justify-center gap-1.5 w-full text-[12px] font-medium text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/20 hover:bg-emerald-100 dark:hover:bg-emerald-900/40 rounded-md px-3 py-1.5 transition-colors"
+          >
+            <CheckCircle size={13} />
+            Mark complete
+          </button>
+        )}
+        <button
+          onClick={() => onDelete(entry.id)}
+          className="flex items-center justify-center gap-1.5 w-full text-[12px] font-medium text-red-500 dark:text-red-400 bg-red-50 dark:bg-red-900/20 hover:bg-red-100 dark:hover:bg-red-900/40 rounded-md px-3 py-1.5 transition-colors"
+        >
+          <Trash2 size={13} />
+          Delete
+        </button>
       </div>
     </div>
   )
@@ -94,11 +238,23 @@ export function CalendarPane({ entries, onComplete, onDelete, activeHours = { st
 
 /* ── Agenda View ────────────────────────────────────── */
 
-function AgendaView({ entries, onComplete, onDelete }: { entries: CalendarEntry[]; onComplete: (id: string) => void; onDelete: (id: string) => void }) {
+function AgendaView({
+  entries,
+  onComplete,
+  onDelete,
+  onSelect,
+  selectedId,
+}: {
+  entries: CalendarEntry[]
+  onComplete: (id: string) => void
+  onDelete: (id: string) => void
+  onSelect: (entry: CalendarEntry) => void
+  selectedId?: string
+}) {
   const uncompleted = entries.filter(e => !e.completed)
   const tasks = uncompleted.filter(e => e.type === 'task')
   const routines = uncompleted.filter(e => e.type === 'routine')
-  const events = uncompleted.filter(e => e.type === 'event')
+  const followups = uncompleted.filter(e => e.type === 'followup')
 
   return (
     <ScrollArea className="h-full">
@@ -107,9 +263,9 @@ function AgendaView({ entries, onComplete, onDelete }: { entries: CalendarEntry[
           <p className="text-[14px] text-neutral-400 dark:text-neutral-500 mt-4">No calendar entries yet. Ask Co-Agent to add one.</p>
         ) : (
           <>
-            {tasks.length > 0 && <AgendaSection title="Tasks" entries={tasks} onComplete={onComplete} onDelete={onDelete} />}
-            {routines.length > 0 && <AgendaSection title="Routines" entries={routines} onComplete={onComplete} onDelete={onDelete} />}
-            {events.length > 0 && <AgendaSection title="Events" entries={events} onComplete={onComplete} onDelete={onDelete} />}
+            {tasks.length > 0 && <AgendaSection title="Tasks" entries={tasks} onComplete={onComplete} onDelete={onDelete} onSelect={onSelect} selectedId={selectedId} />}
+            {routines.length > 0 && <AgendaSection title="Routines" entries={routines} onComplete={onComplete} onDelete={onDelete} onSelect={onSelect} selectedId={selectedId} />}
+            {followups.length > 0 && <AgendaSection title="Followups" entries={followups} onComplete={onComplete} onDelete={onDelete} onSelect={onSelect} selectedId={selectedId} />}
           </>
         )}
       </div>
@@ -117,28 +273,62 @@ function AgendaView({ entries, onComplete, onDelete }: { entries: CalendarEntry[
   )
 }
 
-function AgendaSection({ title, entries, onComplete, onDelete }: { title: string; entries: CalendarEntry[]; onComplete: (id: string) => void; onDelete: (id: string) => void }) {
-  const colors = TYPE_COLORS[entries[0]?.type || 'task']
+function AgendaSection({
+  title,
+  entries,
+  onComplete,
+  onDelete,
+  onSelect,
+  selectedId,
+}: {
+  title: string
+  entries: CalendarEntry[]
+  onComplete: (id: string) => void
+  onDelete: (id: string) => void
+  onSelect: (entry: CalendarEntry) => void
+  selectedId?: string
+}) {
+  const colors = typeColors(entries[0]?.type || 'task')
   return (
     <div className="mb-6">
       <p className="text-[10px] font-semibold text-neutral-400 dark:text-neutral-500 uppercase tracking-widest mb-2">{title}</p>
       <div className="flex flex-col divide-y divide-neutral-100 dark:divide-neutral-800">
         {entries.map(entry => (
-          <div key={entry.id} className="flex items-start gap-3 py-3 group">
+          <div
+            key={entry.id}
+            onClick={() => onSelect(entry)}
+            className={cn(
+              'flex items-start gap-3 py-3 group cursor-pointer rounded-sm',
+              selectedId === entry.id && 'bg-neutral-50 dark:bg-neutral-900'
+            )}
+          >
             {entry.type === 'task' && (
-              <button onClick={() => onComplete(entry.id)} className="mt-0.5 flex-shrink-0 text-neutral-300 dark:text-neutral-600 hover:text-emerald-500 transition-colors">
+              <button
+                onClick={e => { e.stopPropagation(); onComplete(entry.id) }}
+                className="mt-0.5 flex-shrink-0 text-neutral-300 dark:text-neutral-600 hover:text-emerald-500 transition-colors"
+              >
                 <Circle size={15} strokeWidth={1.75} />
               </button>
             )}
+            {entry.type === 'followup' && (
+              <button
+                onClick={e => { e.stopPropagation(); onComplete(entry.id) }}
+                className="mt-0.5 flex-shrink-0 text-neutral-300 dark:text-neutral-600 hover:text-emerald-500 transition-colors"
+              >
+                <Clock size={14} strokeWidth={1.75} />
+              </button>
+            )}
             {entry.type === 'routine' && <Repeat size={14} className={cn('mt-0.5 flex-shrink-0', colors.text)} />}
-            {entry.type === 'event' && <CalendarIcon size={14} className={cn('mt-0.5 flex-shrink-0', colors.text)} />}
             <div className="flex-1 min-w-0">
               <p className="text-[14px] text-neutral-800 dark:text-neutral-200 leading-relaxed">{entry.label}</p>
               <p className={cn('text-[12px] mt-0.5', colors.text)}>
-                {entry.cron || (entry.due && formatTime(entry.due)) || (entry.start && `${formatTime(entry.start)}${entry.end ? ` – ${formatTime(entry.end)}` : ''}`)}
+                {entry.cron || (entry.due && formatTime(entry.due)) || ''}
               </p>
             </div>
-            <button onClick={() => onDelete(entry.id)} className="opacity-0 group-hover:opacity-100 transition-opacity text-neutral-300 dark:text-neutral-600 hover:text-red-500 flex-shrink-0 mt-0.5">
+            <button
+              onClick={e => { e.stopPropagation(); onDelete(entry.id) }}
+              className="opacity-0 group-hover:opacity-100 transition-opacity text-neutral-300 dark:text-neutral-600 hover:text-red-500 flex-shrink-0 mt-0.5"
+            >
               <Trash2 size={13} />
             </button>
           </div>
@@ -157,7 +347,19 @@ function formatTime(iso: string): string {
 
 /* ── Week View ──────────────────────────────────────── */
 
-function WeekView({ entries, anchor, activeHours }: { entries: CalendarEntry[]; anchor: Date; activeHours: { start: number; end: number } }) {
+function WeekView({
+  entries,
+  anchor,
+  activeHours,
+  onSelect,
+  selectedId,
+}: {
+  entries: CalendarEntry[]
+  anchor: Date
+  activeHours: { start: number; end: number }
+  onSelect: (entry: CalendarEntry) => void
+  selectedId?: string
+}) {
   const weekStart = startOfWeek(anchor, { weekStartsOn: 0 })
   const days = eachDayOfInterval({ start: weekStart, end: endOfWeek(anchor, { weekStartsOn: 0 }) })
   const hours = Array.from({ length: 24 }, (_, i) => i)
@@ -198,7 +400,16 @@ function WeekView({ entries, anchor, activeHours }: { entries: CalendarEntry[]; 
                     isOffHour(hour) && 'bg-neutral-50 dark:bg-neutral-900/50'
                   )}>
                   {dayEntries.map(entry => (
-                    <div key={entry.id} className={cn('absolute inset-x-0.5 top-0.5 rounded px-1 py-0.5 text-[10px] truncate', TYPE_COLORS[entry.type].bg, TYPE_COLORS[entry.type].text)}>
+                    <div
+                      key={entry.id}
+                      onClick={() => onSelect(entry)}
+                      className={cn(
+                        'absolute inset-x-0.5 top-0.5 rounded px-1 py-0.5 text-[10px] truncate cursor-pointer',
+                        typeColors(entry.type).bg,
+                        typeColors(entry.type).text,
+                        selectedId === entry.id && 'ring-1 ring-current'
+                      )}
+                    >
                       {entry.label}
                     </div>
                   ))}
@@ -214,7 +425,17 @@ function WeekView({ entries, anchor, activeHours }: { entries: CalendarEntry[]; 
 
 /* ── Month View ─────────────────────────────────────── */
 
-function MonthView({ entries, anchor }: { entries: CalendarEntry[]; anchor: Date }) {
+function MonthView({
+  entries,
+  anchor,
+  onSelect,
+  selectedId,
+}: {
+  entries: CalendarEntry[]
+  anchor: Date
+  onSelect: (entry: CalendarEntry) => void
+  selectedId?: string
+}) {
   const monthStart = startOfMonth(anchor)
   const monthEnd = endOfMonth(anchor)
   const calStart = startOfWeek(monthStart, { weekStartsOn: 0 })
@@ -240,7 +461,16 @@ function MonthView({ entries, anchor }: { entries: CalendarEntry[]; anchor: Date
             )}>
               <p className={cn('text-[11px] font-medium mb-0.5', isToday(day) ? 'text-blue-600' : 'text-neutral-500')}>{format(day, 'd')}</p>
               {dayEntries.slice(0, 3).map(entry => (
-                <div key={entry.id} className={cn('text-[9px] truncate rounded px-1 mb-0.5', TYPE_COLORS[entry.type].bg, TYPE_COLORS[entry.type].text)}>
+                <div
+                  key={entry.id}
+                  onClick={() => onSelect(entry)}
+                  className={cn(
+                    'text-[9px] truncate rounded px-1 mb-0.5 cursor-pointer',
+                    typeColors(entry.type).bg,
+                    typeColors(entry.type).text,
+                    selectedId === entry.id && 'ring-1 ring-current'
+                  )}
+                >
                   {entry.label}
                 </div>
               ))}
@@ -257,7 +487,19 @@ function MonthView({ entries, anchor }: { entries: CalendarEntry[]; anchor: Date
 
 /* ── Day View ───────────────────────────────────────── */
 
-function DayView({ entries, anchor, activeHours }: { entries: CalendarEntry[]; anchor: Date; activeHours: { start: number; end: number } }) {
+function DayView({
+  entries,
+  anchor,
+  activeHours,
+  onSelect,
+  selectedId,
+}: {
+  entries: CalendarEntry[]
+  anchor: Date
+  activeHours: { start: number; end: number }
+  onSelect: (entry: CalendarEntry) => void
+  selectedId?: string
+}) {
   const hours = Array.from({ length: 24 }, (_, i) => i)
   const isOffHour = (h: number) => h < activeHours.start || h >= activeHours.end
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -282,7 +524,16 @@ function DayView({ entries, anchor, activeHours }: { entries: CalendarEntry[]; a
               </div>
               <div className="flex-1 py-0.5">
                 {hourEntries.map(entry => (
-                  <div key={entry.id} className={cn('rounded px-2 py-1 mb-0.5 text-[12px]', TYPE_COLORS[entry.type].bg, TYPE_COLORS[entry.type].text)}>
+                  <div
+                    key={entry.id}
+                    onClick={() => onSelect(entry)}
+                    className={cn(
+                      'rounded px-2 py-1 mb-0.5 text-[12px] cursor-pointer',
+                      typeColors(entry.type).bg,
+                      typeColors(entry.type).text,
+                      selectedId === entry.id && 'ring-1 ring-current'
+                    )}
+                  >
                     {entry.label}
                   </div>
                 ))}
@@ -301,7 +552,6 @@ function getEntriesForDay(entries: CalendarEntry[], day: Date): CalendarEntry[] 
   return entries.filter(e => {
     if (e.completed) return false
     if (e.due) return isSameDay(parseISO(e.due), day)
-    if (e.start) return isSameDay(parseISO(e.start), day)
     if (e.cron) return cronMatchesDay(e.cron, day)
     return false
   })
@@ -312,10 +562,6 @@ function getEntriesForHour(entries: CalendarEntry[], day: Date, hour: number): C
     if (e.completed) return false
     if (e.due && e.due.includes('T')) {
       const d = parseISO(e.due)
-      return isSameDay(d, day) && getHours(d) === hour
-    }
-    if (e.start && e.start.includes('T')) {
-      const d = parseISO(e.start)
       return isSameDay(d, day) && getHours(d) === hour
     }
     if (e.cron) {

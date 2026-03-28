@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { Send, Square, FileText, Sheet, File, X, ChevronLeft, ChevronRight, ExternalLink, Paperclip } from 'lucide-react'
+import { CapabilityCard } from '@/components/CapabilityCard'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { invoke } from '@tauri-apps/api/core'
 import { Button } from '@/components/ui/button'
@@ -22,10 +23,11 @@ interface ChatPaneProps {
   onStop?: () => void
   onIngestFile?: (filename: string, mimeType: string, data: string) => void
   files: FileEntry[]
-  apiKeyStatus?: { anthropic: boolean; composio: boolean; openai: boolean } | null
   onNavigateToSettings?: () => void
   lastHeartbeat?: { time: Date; status: string } | null
   skills?: { name: string; description: string }[]
+  capabilityCard?: { name: string; capabilities: { name: string; description: string; checked: boolean }[] } | null
+  onConfirmCapabilities?: (selected: string[]) => void
   className?: string
 }
 
@@ -333,7 +335,7 @@ const AgentBubble = React.memo(function AgentBubble({ content, files }: { conten
   )
 })
 
-export function ChatPane({ messages, streamingText, thinking, processing, toolLabel, connected, onChat, onSteer, onStop, onIngestFile, files, apiKeyStatus, onNavigateToSettings, lastHeartbeat, skills = [], className }: ChatPaneProps) {
+export function ChatPane({ messages, streamingText, thinking, processing, toolLabel, connected, onChat, onSteer, onStop, onIngestFile, files, onNavigateToSettings, lastHeartbeat, skills = [], capabilityCard, onConfirmCapabilities, className }: ChatPaneProps) {
   const [input, setInput] = useState('')
   const [skillQuery, setSkillQuery] = useState<string | null>(null)
   const [selectedSkillIdx, setSelectedSkillIdx] = useState(0)
@@ -481,20 +483,7 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
         <div className="px-7 py-5 flex flex-col gap-3">
           {messages.length === 0 && !isActive && (
             <div className="flex justify-start">
-              {apiKeyStatus && !apiKeyStatus.anthropic ? (
-                <div className="bg-neutral-100 dark:bg-neutral-800 text-neutral-800 dark:text-neutral-200 rounded-2xl rounded-tl-sm px-4 py-3 max-w-[620px] text-[13.5px] leading-relaxed">
-                  <p className="mb-2 font-semibold">Welcome to Co-Agent</p>
-                  <p className="mb-3">To get started, add your API keys in Settings.</p>
-                  <button
-                    onClick={onNavigateToSettings}
-                    className="text-[12.5px] font-medium px-3 py-1.5 rounded-lg bg-neutral-900 text-white hover:bg-neutral-700 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-300 transition-colors"
-                  >
-                    Open Settings
-                  </button>
-                </div>
-              ) : (
-                <AgentBubble content="Hello. I'm Co-Agent. I'm watching your queue and ready to help. What do you need?" files={files} />
-              )}
+              <AgentBubble content="Hello. I'm Co-Agent. I'm watching your queue and ready to help. What do you need?" files={files} />
             </div>
           )}
 
@@ -526,6 +515,16 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
           {streamingText !== null && (
             <div className="flex justify-start">
               <AgentBubble content={streamingText} files={files} />
+            </div>
+          )}
+
+          {capabilityCard && onConfirmCapabilities && (
+            <div className="flex justify-start">
+              <CapabilityCard
+                name={capabilityCard.name}
+                capabilities={capabilityCard.capabilities}
+                onConfirm={onConfirmCapabilities}
+              />
             </div>
           )}
 

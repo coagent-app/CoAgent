@@ -6,12 +6,12 @@ import { createHash } from 'crypto'
 import { MCPManager, MCPServerConfig } from './mcp-manager.js'
 import { ApprovalQueue } from './queue.js'
 import { CalendarStore } from './calendar-store.js'
-import { searchEventStore, markEventsDone } from './relay-client.js'
+import { searchEventStore, markEventsDone, getUnprocessedEvents } from './relay-client.js'
 import { readSettings, writeSettings } from './settings.js'
 import type { AgentSettings } from './settings.js'
 import type { AgentTrigger } from '@coagent/shared'
 import { searchFiles, readFileContent, readFileBase64, deleteFileEntry, getStorageStats, listFiles } from './file-store.js'
-import { embedTools, searchToolsAndSchema, clearToolEmbeddings, setToolEmbeddingsDir } from './tool-embeddings.js'
+import { embedTools, searchToolsAndSchema, setToolEmbeddingsDir } from './tool-embeddings.js'
 import { logToolCall, extractIntegration, searchToolLogs } from './service-logger.js'
 import { recordUsage } from './usage-tracker.js'
 import { getRelayConfig } from './auth.js'
@@ -19,7 +19,7 @@ import { getRelayConfig } from './auth.js'
 const HISTORY_WINDOW = 50        // total pool — recent + TF-IDF ranked
 
 // --- Skills ---
-const DEFAULT_SKILL_NAMES = new Set(['skill-creator'])
+const DEFAULT_SKILL_NAMES = new Set(['skill-creator', 'integration-builder'])
 interface Skill { name: string; description: string; instructions: string }
 
 async function skillsDir(dataDir: string): Promise<string> {
@@ -58,7 +58,9 @@ async function deleteSkill(dataDir: string, name: string): Promise<boolean> {
 
 // ── Composio S3 file upload for email attachments ──────────────────────────
 
-const COMPOSIO_FILES_URL = 'https://backend.composio.dev/api/v3/files/upload/request'
+const COMPOSIO_FILES_URL = process.env.RELAY_URL
+  ? `${process.env.RELAY_URL.replace(/\/$/, '')}/v1/composio/files/upload/request`
+  : 'https://backend.composio.dev/api/v3/files/upload/request'
 
 /**
  * Upload a file to Composio's S3 via presigned URL.
@@ -71,15 +73,15 @@ async function uploadToComposioS3(
   toolSlug: string,
   toolkitSlug: string
 ): Promise<{ name: string; mimetype: string; s3key: string }> {
-  const composioKey = process.env.COMPOSIO_API_KEY
-  if (!composioKey) throw new Error('No COMPOSIO_API_KEY set')
+  const authKey = process.env.RELAY_TOKEN
+  if (!authKey) throw new Error('No RELAY_TOKEN set')
 
   const md5 = createHash('md5').update(fileBuffer).digest('hex')
 
   // Step 1: Get presigned upload URL
   const presignRes = await fetch(COMPOSIO_FILES_URL, {
     method: 'POST',
-    headers: { 'X-API-KEY': composioKey, 'Content-Type': 'application/json' },
+    headers: { 'X-API-KEY': authKey, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       filename,
       md5,
@@ -294,22 +296,20 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'schedule',
-    description: 'Unified schedule for routines, tasks, and events. Actions: create (type+label+timing), update (id+fields), delete (id), complete (id — tasks only), list (optional type filter). Type rules: routine = recurring agent action (cron + instruction, fires and executes), task = one-time to-do (due + instruction, fires at due time and executes), event = calendar block (start+end + notes, display only, no execution). Tasks with a due time MUST have an instruction so the agent knows what to do when it fires. Reminders and to-dos are TASKS, not events.',
+    description: 'Unified schedule for routines, tasks, and followups. Actions: create (type+label+timing), update (id+fields), delete (id), complete (id — tasks and followups only), list (optional type filter). Type rules: routine = recurring agent action (cron + instruction, fires on schedule and executes), task = one-time to-do (due + instruction, fires at due time and executes), followup = check back on something at due time (due + instruction, fires like a task — agent checks status and asks user what to do next: reschedule, nudge, or mark done). Tasks with a due time MUST have an instruction. Followup instructions must be specific and actionable: who/what to check, where to look, what to do based on the outcome. Example: instead of "Check if Sarah replied" write "Check Gmail for a reply from sarah@acme.com about the Q1 proposal sent March 28. If replied, summarize response and ask user if they want to respond. If not replied, ask user if they want to send a nudge." IMPORTANT: when creating a followup, always ASK the user when they want the followup before creating it — do not assume timing.',
     input_schema: {
       type: 'object' as const,
       properties: {
         action: { type: 'string', enum: ['create', 'update', 'delete', 'complete', 'list'] },
-        type: { type: 'string', enum: ['routine', 'task', 'event'], description: 'routine = recurring (cron+instruction), task = one-time to-do (due+instruction), event = meeting/appointment (start+end+notes)' },
+        type: { type: 'string', enum: ['routine', 'task', 'followup'], description: 'routine = recurring (cron+instruction), task = one-time to-do (due+instruction), followup = check-back (due+instruction, fires like task then asks user what to do next)' },
         id: { type: 'string', description: 'Entry ID (for update/delete/complete)' },
         label: { type: 'string', description: 'Display name' },
         cron: { type: 'string', description: 'Cron expression for routines, e.g. "0 9 * * 1-5"' },
-        due: { type: 'string', description: 'ISO datetime for tasks, e.g. "2026-03-28T14:30:00"' },
-        start: { type: 'string', description: 'ISO datetime for event start' },
-        end: { type: 'string', description: 'ISO datetime for event end' },
-        instruction: { type: 'string', description: 'What the agent executes when routine/task fires. Required for tasks with due time.' },
-        notes: { type: 'string', description: 'Context/details for any entry type (meeting agenda, reminder details, etc.)' },
+        due: { type: 'string', description: 'ISO datetime for tasks/followups, e.g. "2026-03-28T14:30:00"' },
+        instruction: { type: 'string', description: 'What the agent executes when the entry fires. Required for tasks/followups with due time. Must be detailed and actionable.' },
+        notes: { type: 'string', description: 'Context/details for any entry type' },
         enabled: { type: 'boolean', description: 'Enable/disable (default true)' },
-        filter_type: { type: 'string', enum: ['routine', 'task', 'event'], description: 'Filter for list action' },
+        filter_type: { type: 'string', enum: ['routine', 'task', 'followup'], description: 'Filter for list action' },
       },
       required: ['action']
     }
@@ -326,6 +326,50 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
         instructions: { type: 'string', description: 'Full instructions (for save)' }
       },
       required: ['action']
+    }
+  },
+  {
+    name: 'create_custom_integration',
+    description: 'Manage custom MCP integrations. Actions: "propose" shows capability checkboxes, "create" builds the server, "read" returns current code, "update" writes new code and restarts. Always include an icon SVG when creating — 32x32 viewBox, rounded rect background with brand color, white symbol on top.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        action: { type: 'string', enum: ['propose', 'create', 'read', 'update'], description: '"propose" sends capability card, "create" builds the server, "read" gets current code, "update" replaces code and restarts' },
+        name: { type: 'string', description: 'kebab-case name e.g. "notion", "airtable"' },
+        display_name: { type: 'string', description: 'Human-readable name e.g. "Notion"' },
+        description: { type: 'string', description: 'One-line description of what the integration does' },
+        capabilities: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string' },
+              description: { type: 'string' }
+            },
+            required: ['name', 'description']
+          },
+          description: 'List of capabilities the integration provides'
+        },
+        auth_fields: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string', description: 'env var name e.g. API_KEY' },
+              display_name: { type: 'string' },
+              description: { type: 'string' },
+              help_url: { type: 'string', description: 'Direct URL where the user can find/create this credential (e.g. https://app.gohighlevel.com/settings/api-keys)' },
+              help_text: { type: 'string', description: 'Short step-by-step instruction to find this credential (e.g. "Go to Settings → API Keys → Create New Key")' }
+            },
+            required: ['name', 'display_name', 'description', 'help_url', 'help_text']
+          },
+          description: 'Credential fields the user needs to provide'
+        },
+        code: { type: 'string', description: 'The full index.js MCP server source code' },
+        dependencies: { type: 'object', description: 'Additional npm dependencies beyond @modelcontextprotocol/sdk' },
+        icon: { type: 'string', description: 'SVG icon string (32x32 viewBox, rounded rect bg + white symbol). Example: <svg viewBox="0 0 32 32" fill="none"><rect width="32" height="32" rx="7" fill="#FF6B00"/><path d="..." fill="white"/></svg>' }
+      },
+      required: ['action', 'name']
     }
   },
   {
@@ -393,6 +437,7 @@ const TOOL_LABELS: Record<string, string> = {
   skills: 'Managing skills',
   memory: 'Checking memory',
   call_external_tool: 'Calling tool',
+  create_custom_integration: 'Building custom integration',
 }
 
 // Action-specific labels for consolidated tools
@@ -401,6 +446,7 @@ const ACTION_LABELS: Record<string, Record<string, string>> = {
   calendar: { create: 'Adding to calendar', update: 'Updating calendar entry', delete: 'Deleting calendar entry', complete: 'Completing task', list: 'Checking calendar' },
   skills: { save: 'Saving skill', list: 'Listing skills', delete: 'Deleting skill' },
   memory: { search: 'Searching memory', grep: 'Searching memory', read: 'Reading memory', write: 'Writing memory', edit: 'Editing memory', append: 'Updating memory', list: 'Listing memory', delete: 'Cleaning memory' },
+  create_custom_integration: { propose: 'Proposing capabilities', create: 'Building integration', read: 'Reading integration code', update: 'Updating integration' },
 }
 
 // "GMAIL_FETCH_EMAILS" → "Gmail: Fetch emails"
@@ -428,13 +474,15 @@ function humanizeToolName(name: string): string {
 }
 
 const HEARTBEAT_TOOLS = new Set([
-  'get_current_time', 'add_done_item', 'calendar', 'queue_approval', 'skills', 'memory',
+  'get_current_time', 'memory', 'search_tools',
 ])
 
-function getInternalTools(context: ToolContext): Anthropic.Tool[] {
+// Tools gated behind a skill — only included when the skill has been activated
+const SKILL_GATED_TOOLS = new Set(['create_custom_integration'])
 
+function getInternalTools(context: ToolContext, activeSkillTools?: Set<string>): Anthropic.Tool[] {
   if (context === 'heartbeat') return INTERNAL_TOOLS.filter(t => HEARTBEAT_TOOLS.has(t.name))
-  return INTERNAL_TOOLS
+  return INTERNAL_TOOLS.filter(t => !SKILL_GATED_TOOLS.has(t.name) || activeSkillTools?.has(t.name))
 }
 
 const AUTONOMY_DESCRIPTIONS: Record<string, string> = {
@@ -454,8 +502,19 @@ const ALWAYS_QUEUE_TOOLS = [
 ]
 
 
-function buildSystemPrompt(connectedServices: string[], agentProfilePath: string, settings: AgentSettings): string {
+function listMemoryFiles(dataDir: string): string[] {
+  const memDir = join(dataDir, 'memory')
+  try {
+    const { readdirSync } = require('fs') as typeof import('fs')
+    return readdirSync(memDir)
+      .filter((f: string) => f.endsWith('.md'))
+      .sort()
+  } catch { return [] }
+}
+
+function buildSystemPrompt(connectedServices: string[], agentProfilePath: string, settings: AgentSettings, dataDir: string): string {
   const isFirstRun = !existsSync(agentProfilePath)
+  const memoryFiles = listMemoryFiles(dataDir)
 
   const serviceSection = connectedServices.length > 0
     ? `Connected external services: ${connectedServices.join(', ')}. search_tools is how you find tools AND gather context for external services. It has 3 required params:
@@ -479,31 +538,35 @@ Current settings:
 - Timezone: ${settings.timezone || '(not set)'}
 - Active hours: ${formatHour(settings.active_hours.start)}–${formatHour(settings.active_hours.end)}
 - Active days: ${settings.active_days.join(', ')}
-- Heartbeat: ${settings.heartbeat_interval > 0 ? `every ${settings.heartbeat_interval} minutes — you are automatically woken up on this interval to check to-dos, monitor connected services, and handle pending tasks` : 'disabled — you only respond when the user messages you'}
+- Heartbeat: ${settings.heartbeat_interval > 0 ? `every ${settings.heartbeat_interval} minutes — processes incoming trigger events (emails, messages, etc.), checks memory for context, and escalates anything that needs action` : 'disabled — you only respond when the user messages you'}
 - Autonomy: ${settings.autonomy} — ${AUTONOMY_DESCRIPTIONS[settings.autonomy]}
 `
 
   return `You are CoAgent — a private AI agent running on the user's machine. Help with anything asked. Never refuse by saying something is outside your scope.
 
-IMPORTANT — Assume first, ask second: When the user asks you to do something, ALWAYS search memory or use search_tools with context to find what you need (contacts, user IDs, channels, emails). Only ask after you've searched and genuinely can't find it. Use context clues and serve the user as much as possible without prompting — only ask when obviously needed.
+CRITICAL — Before responding to ANY request, your FIRST action must be a memory search for relevant info (names, addresses, preferences, contacts, project details). NEVER ask the user for information that might be in memory. When using search_tools, use the context param. Only ask after you've searched and genuinely can't find it.
 
 ${serviceSection}
 ${settingsSection}
-Skills: Users invoke with @skill-name. When invoked, the skill's instructions appear in the message.
+Skills: reusable automation workflows (instructions you follow). Users invoke with @skill-name, but you can also use them proactively. When asked to do something unfamiliar, check skills first (skills tool, action: list).
+Integrations: connections to external services (Gmail, Slack, etc.). You can build NEW integrations from any API using create_custom_integration — this creates a real tool connection, not a skill. Use @integration-builder skill for the full workflow.
 
-File listings: plain text (e.g. "- report.md — summary"). Only use [filename](coagent-file:FILE_ID) when asked to open a specific file.
-Attaching files to emails: add coagent_file_ids as a TOP-LEVEL field in the parameters object of call_external_tool: {"recipient_email":"x@y.com","subject":"...","body":"...","coagent_file_ids":["FILE_ID"]}. Do NOT nest it inside "attachment". The system uploads the file automatically.
+File listings: plain text (e.g. "- report.md — summary"). Only use [filename](coagent-file:FILE_ID) when asked to open a specific file. To attach files to emails, include coagent_file_ids in the tool params — the system handles upload automatically.
 
-Memory: your long-term brain — history only shows recent messages. Use the memory tool directly (NOT search_tools). Prefer search (semantic) or grep (pattern match within a file) over read (dumps entire file). Only use read when you need the full file. Write things down immediately: names, dates, preferences, decisions. If unsure whether to save, save it. Always search memory before saying you don't know. Files: setup.md (read-only), agent.md, routines.md, preferences.md, contacts.md, projects.md. Update when you learn something new. Delete stale entries.
+Memory: your long-term brain — history only shows recent messages. Use the memory tool directly (NOT search_tools). Prefer search (semantic) or grep (pattern match within a file) over read. Write things down immediately. Your memory files contain info you've already learned — ALWAYS search before asking for ANY info. You can create custom .md files for broad categories (e.g. leads, contacts).
+Available files: ${memoryFiles.length > 0 ? memoryFiles.join(', ') : '(none yet)'}
 
 Routine tasks: act, then add_done_item. High-stakes actions: queue_approval with full draft in "detail" and recipient/subject in "metadata".
-On heartbeat: use memory tool (action: read, file: routines.md) to check routines, use schedule (action: list) to check routines and tasks, check queue. If nothing needs attention, reply "All clear." immediately.
 
-- **schedule** (create/update/delete/complete/list) — unified schedule for routines (recurring cron), tasks (one-time due), and events (informational).
+- **schedule** (create/update/delete/complete/list) — unified schedule for routines (recurring cron), tasks (one-time due), and followups (check-back reminders that fire like tasks then ask user what to do next).
+- **Proactive followups**: after sending emails, messages, proposals, etc., ask "Want me to follow up on this? When?" — never auto-create, always ask first.
 
 When you need multiple independent pieces of information, call all the tools in a single response (e.g. read memory + use schedule (action: list) to check routines and tasks + check time in one turn). This is faster and cheaper.
 
 You can search the web — use search_tools("web search") to find the right tool.
+${connectedServices.includes('coagent:imessage') ? `\niMessage is connected. search_tools("iMessage") to find tools for reading and sending messages. Queue sends for approval unless autonomy is "autonomous".` : ''}
+${connectedServices.includes('coagent:contacts') ? `\nContacts is connected. search_tools("contacts") to find tools for searching and looking up contact details.` : ''}
+[voice] = voice input. Reply in 1-2 short spoken sentences, no markdown. Use tools normally.
 
 Concise responses. No emojis. Markdown only when helpful.${onboardingSection}`
 }
@@ -531,9 +594,20 @@ export class Agent {
   public onSkillsChanged?: () => void
   public onSettingsChanged?: () => void
   public onCalendarChanged?: () => void
+  public onCustomIntegration?: (action: string, data: any) => Promise<string>
+  public activeSkillTools = new Set<string>()
 
-  async getSkills(): Promise<{ name: string; description: string }[]> {
-    return (await listSkills(this.dataDir)).map(s => ({ name: s.name, description: s.description }))
+  async getSkills(): Promise<{ name: string; description: string; instructions: string; builtin: boolean }[]> {
+    return (await listSkills(this.dataDir))
+      .map(s => ({ name: s.name, description: s.description, instructions: s.instructions, builtin: DEFAULT_SKILL_NAMES.has(s.name) }))
+  }
+
+  async updateSkill(name: string, description: string, instructions: string): Promise<void> {
+    await saveSkill(this.dataDir, { name, description, instructions })
+  }
+
+  async removeSkill(name: string): Promise<boolean> {
+    return deleteSkill(this.dataDir, name)
   }
 
   steer(message: string): void {
@@ -644,41 +718,36 @@ export class Agent {
       return
     }
 
-    // todo_due goes straight to Sonnet with full tools — no triage
+    // Heartbeat: fetch unprocessed events from the event store and inject them
+    if (isHeartbeat) {
+      const events = await getUnprocessedEvents(this.dataDir)
+      trigger = { ...trigger, payload: { ...trigger.payload, events } }
+      console.log(`[Agent] Heartbeat: ${events.length} new event(s), ${this.missedEvents.length} missed`)
+    }
+
     const context: ToolContext = isTodoDue ? 'chat'
       : isHeartbeat ? 'heartbeat'
       : trigger.source === 'webhook' ? 'webhook'
       : 'chat'
 
-    // On heartbeat, include any missed events in the triage prompt
-    let message = trigger.content ?? this.buildTriggerMessage(trigger)
-    if (isHeartbeat && this.missedEvents.length > 0) {
-      const missed = this.missedEvents.map(e =>
-        `- [${e.time}] ${e.source}: ${JSON.stringify(e.payload)}`
-      ).join('\n')
-      message += `\n\nMissed events since last check (${this.missedEvents.length}):\n${missed}`
-      this.missedEvents = []
-      console.log(`[Agent] Heartbeat includes ${this.missedEvents.length} missed events`)
-    }
-
+    const message = trigger.content ?? this.buildTriggerMessage(trigger)
     this.conversationHistory.push({ role: 'user', content: message })
 
-    // Pin scheduled-task messages so they stay in the context window even when
-    // the tool loop generates many messages that would push them out of RECENT_KEEP
+    // Pin scheduled-task messages so they stay in the context window
     if (isTodoDue) {
       this.pinnedTaskIdx = this.conversationHistory.length - 1
     }
 
-    this.runLoopPromise = this.runLoop(onChunk, context, onToolCall)
+    // Haiku triage is silent — no chunks or tool calls shown in UI
+    this.runLoopPromise = this.runLoop(undefined, context, undefined)
     try {
       const result = await this.runLoopPromise
 
-      // Heartbeat escalation: if Haiku found work to do, hand off to Sonnet
-      // Note: keep runLoopPromise set during escalation so concurrent triggers are blocked
+      // Heartbeat escalation: Haiku gathered context → pass to Sonnet with full tools
       if (context === 'heartbeat' && result && !result.toLowerCase().includes('all clear')) {
         console.log('[Agent] Heartbeat found action needed — escalating to Sonnet')
-        this.conversationHistory.push({ role: 'user', content: `[Escalated from heartbeat triage] Haiku identified the following. Take action now:\n\n${result}` })
-        this.runLoopPromise = this.runLoop(onChunk, 'webhook', onToolCall)
+        this.conversationHistory.push({ role: 'user', content: `[Heartbeat summary — act on this now]\n\n${result}` })
+        this.runLoopPromise = this.runLoop(onChunk, 'chat', onToolCall)
         await this.runLoopPromise
       }
     } finally {
@@ -691,14 +760,17 @@ export class Agent {
     message: string,
     onChunk?: (text: string) => void,
     onToolCall?: (tool: string, label: string) => void,
-    fileIds?: string[]
+    fileIds?: string[],
+    extraContent?: any[]
   ): Promise<string> {
     const resolved = await resolveSkillMentions(this.dataDir, message)
 
     // If files were attached, build a multi-part content block so Claude can see them
-    if (fileIds?.length) {
+    if (fileIds?.length || extraContent?.length) {
       const contentParts: any[] = []
-      for (const fid of fileIds) {
+      // Add any extra content blocks (e.g. images from WhatsApp)
+      if (extraContent) contentParts.push(...extraContent)
+      for (const fid of (fileIds || [])) {
         try {
           const { base64, filename, mimeType } = await readFileBase64(this.dataDir, fid)
           if (mimeType === 'application/pdf') {
@@ -744,12 +816,13 @@ export class Agent {
     const settings = await readSettings(this.dataDir)
 
     // Memoize system prompt — only rebuild when services or settings actually change
-    const promptKey = connectedServices.join(',') + '|' + JSON.stringify(settings)
+    const memFiles = listMemoryFiles(this.dataDir)
+    const promptKey = connectedServices.join(',') + '|' + JSON.stringify(settings) + '|' + memFiles.join(',')
     let systemPrompt: string
     if (this.cachedSystemPrompt && this.cachedPromptKey === promptKey) {
       systemPrompt = this.cachedSystemPrompt
     } else {
-      systemPrompt = buildSystemPrompt(connectedServices, this.agentProfilePath, settings)
+      systemPrompt = buildSystemPrompt(connectedServices, this.agentProfilePath, settings, this.dataDir)
       this.cachedSystemPrompt = systemPrompt
       this.cachedPromptKey = promptKey
       console.log('[Agent] System prompt rebuilt (settings or services changed)')
@@ -769,7 +842,7 @@ export class Agent {
     // Tools array is 100% stable — external tools go through call_external_tool proxy.
     // This means tools never change between API calls, so the cache prefix stays warm.
     const isBackground = context === 'heartbeat'
-    const contextTools = getInternalTools(context)
+    const contextTools = getInternalTools(context, this.activeSkillTools)
     const stableTools = [...contextTools]
 
     let finalText = ''
@@ -1031,8 +1104,6 @@ export class Agent {
                 label: input.label || 'Untitled',
                 cron: input.cron,
                 due: input.due,
-                start: input.start,
-                end: input.end,
                 instruction: input.instruction,
                 notes: input.notes,
                 enabled: input.enabled ?? true,
@@ -1060,7 +1131,7 @@ export class Agent {
                 result = 'No calendar entries.'
               } else {
                 result = entries.map((e: any) => {
-                  const timing = e.cron || e.due || (e.start && e.end ? `${e.start} → ${e.end}` : e.start) || 'no time'
+                  const timing = e.cron || e.due || 'no time'
                   const status = e.completed ? ' ✓' : e.enabled ? '' : ' (disabled)'
                   return `[${e.type}] ${e.label} — ${timing}${status} (${e.id})`
                 }).join('\n')
@@ -1126,6 +1197,10 @@ export class Agent {
               if (!skill) {
                 result = `Skill @${input.name} not found. Use skills(action: 'list') to see available skills.`
               } else {
+                // Activate any skill-gated tools for this skill
+                if (skill.name === 'integration-builder') {
+                  this.activeSkillTools.add('create_custom_integration')
+                }
                 result = `[Skill: ${skill.name}]\n${skill.instructions}\n[/Skill]\n\nFollow these instructions now.`
               }
             } else {
@@ -1266,6 +1341,24 @@ export class Agent {
               }
             }
 
+          } else if (block.name === 'create_custom_integration') {
+            const input = block.input as {
+              action: string
+              name: string
+              display_name?: string
+              description?: string
+              capabilities?: { name: string; description: string }[]
+              auth_fields?: { name: string; display_name: string; description: string }[]
+              code?: string
+              dependencies?: Record<string, string>
+              icon?: string
+            }
+            if (this.onCustomIntegration) {
+              result = await this.onCustomIntegration(input.action, input)
+            } else {
+              result = 'Custom integration handler not configured.'
+            }
+
           } else {
             result = `Unknown tool "${block.name}". For external integrations, use search_tools then call_external_tool.`
           }
@@ -1303,21 +1396,15 @@ export class Agent {
   private buildTriggerMessage(trigger: AgentTrigger): string {
     const time = new Date().toLocaleString('en-US', { timeStyle: 'short', dateStyle: 'medium' })
     if (trigger.source === 'heartbeat') {
-      // Only show overdue tasks. Future timed tasks have their own precise timers
-      // (task_due trigger) — don't let heartbeat surface them early.
-      const due = this.calendar.getTasksDue().filter(t => {
-        if (!t.due) return true // untimed tasks always show
-        // Only show if actually past due, not just "due today"
-        const dueTime = new Date(t.due)
-        return dueTime <= new Date()
-      })
-      const dueSection = due.length > 0
-        ? `\n\nOverdue/untimed tasks:\n${due.map(t => `- [${t.id}] ${t.label}${t.due ? ` (due: ${t.due})` : ''}`).join('\n')}`
+      const events = (trigger.payload as any)?.events as { trigger: string; event: Record<string, unknown>; receivedAt: string }[] | undefined
+      const eventsSection = events && events.length > 0
+        ? `\n\nNew events since last heartbeat (${events.length}):\n${events.map(e => `- [${e.receivedAt}] ${e.trigger}: ${JSON.stringify(e.event)}`).join('\n')}`
         : ''
-      const dayName = new Date().toLocaleDateString('en-US', { weekday: 'long' })
-      const hour = new Date().getHours()
-      const timeOfDay = hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : 'evening'
-      return `[Heartbeat triage — Current time: ${time}, ${dayName} ${timeOfDay}]\n\nYou are triaging. DO NOT take action — only assess and report.\n\n1. Use memory tool (action: read, file: routines.md) — only look at sections relevant to this time of day (${timeOfDay}).\n2. Use schedule (action: list) — check for due tasks and active routines.${dueSection}\n3. Check pending queue items.\n\nThe current time is ${time}. Focus on what's relevant RIGHT NOW. Use your judgment — not everything needs to be surfaced.\n\nIf nothing needs attention, reply exactly "All clear."\nOtherwise, reply with a brief summary of what needs to be done. Do NOT take action yourself — a more capable model will handle it.`
+      const missedSection = this.missedEvents.length > 0
+        ? `\n\nMissed events (agent was busy):\n${this.missedEvents.map(e => `- [${e.time}] ${e.source}: ${JSON.stringify(e.payload)}`).join('\n')}`
+        : ''
+      if (this.missedEvents.length > 0) this.missedEvents = []
+      return `[Heartbeat — ${time}]${eventsSection}${missedSection}\n\n1. Read heartbeat.md from memory — it contains custom user instructions for how to handle heartbeats.\n2. Search memory for context on these events (contacts, preferences, projects).\n3. Use search_tools if you need to look up tool capabilities.\n\nThen write a brief actionable summary:\n- What happened and who it involves\n- What action is recommended (with enough detail for another model to execute)\n- If nothing needs attention, reply exactly "All clear."`
     }
     if (trigger.source === 'todo_due' || trigger.source === 'task_due') {
       const payload = trigger.payload as any
@@ -1522,6 +1609,7 @@ export class Agent {
 
   clearHistory(): void {
     this.conversationHistory = []
+    this.activeSkillTools.clear()
     this.saveHistory().catch(console.error)
   }
 }

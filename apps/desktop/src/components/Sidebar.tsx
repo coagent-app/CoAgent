@@ -1,7 +1,7 @@
 import React from 'react'
 import {
   Inbox, MessageSquare, Settings,
-  ChevronRight, FolderOpen, Sun, Moon, Calendar as CalendarIcon
+  ChevronRight, FolderOpen, Sun, Moon, Calendar as CalendarIcon, Zap
 } from 'lucide-react'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
@@ -9,7 +9,7 @@ import { Separator } from '@/components/ui/separator'
 import { cn } from '@/lib/utils'
 import type { Integration } from '@coagent/shared'
 
-export type View = 'chat' | 'calendar' | 'queue' | 'files' | 'settings'
+export type View = 'chat' | 'calendar' | 'queue' | 'files' | 'skills' | 'settings'
 
 interface SidebarProps {
   view: View
@@ -83,12 +83,32 @@ function IntegrationItem({
       title={integration.connected ? `${integration.name} — click to disconnect` : `Connect ${integration.name}`}
       className="flex items-center gap-2.5 w-full px-2.5 py-1.5 rounded-md text-[13px] font-medium transition-colors text-left text-neutral-500 hover:bg-neutral-100 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
     >
-      <img
-        src={`https://logos.composio.dev/api/${integration.slug}`}
-        alt={integration.name}
-        className="w-4 h-4 object-contain flex-shrink-0"
-        onError={e => { (e.target as HTMLImageElement).style.opacity = '0' }}
-      />
+      {integration.slug === 'coagent:imessage' ? (
+        <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 32 32" fill="none">
+          <rect width="32" height="32" rx="7" fill="#34C759"/>
+          <path d="M16 7C10.477 7 6 10.582 6 15c0 2.52 1.537 4.768 3.938 6.254-.204 1.48-.89 2.87-.89 2.87s2.47-.354 4.072-1.372C14.05 23.23 15 23.35 16 23.35c5.523 0 10-3.582 10-7.35S21.523 7 16 7z" fill="white"/>
+        </svg>
+      ) : integration.slug === 'coagent:contacts' ? (
+        <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 32 32" fill="none">
+          <rect width="32" height="32" rx="7" fill="#A2845E"/>
+          <circle cx="16" cy="13" r="4.5" fill="white"/>
+          <path d="M8.5 24.5c0-4.142 3.358-7.5 7.5-7.5s7.5 3.358 7.5 7.5" stroke="white" strokeWidth="2.5" fill="none" strokeLinecap="round"/>
+        </svg>
+      ) : (integration as any).icon ? (
+        <div className="w-4 h-4 flex-shrink-0" dangerouslySetInnerHTML={{ __html: (integration as any).icon.replace(/viewBox/, 'class="w-4 h-4" viewBox') }} />
+      ) : (integration as any).builtin ? (
+        <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 32 32" fill="none">
+          <rect width="32" height="32" rx="7" fill="#34C759"/>
+          <path d="M16 7C10.477 7 6 10.582 6 15c0 2.52 1.537 4.768 3.938 6.254-.204 1.48-.89 2.87-.89 2.87s2.47-.354 4.072-1.372C14.05 23.23 15 23.35 16 23.35c5.523 0 10-3.582 10-7.35S21.523 7 16 7z" fill="white"/>
+        </svg>
+      ) : (
+        <img
+          src={`https://logos.composio.dev/api/${integration.slug}`}
+          alt={integration.name}
+          className="w-4 h-4 object-contain flex-shrink-0"
+          onError={e => { (e.target as HTMLImageElement).style.opacity = '0' }}
+        />
+      )}
       <span className="flex-1">{integration.name}</span>
       <span
         className={cn(
@@ -112,6 +132,7 @@ export function Sidebar({ view, onViewChange, queueCount, integrations, onConnec
 
       <div className="flex flex-col gap-0.5 mb-2">
         <NavItem icon={MessageSquare} label="Chat" active={view === 'chat'} onClick={() => onViewChange('chat')} />
+        <NavItem icon={Zap} label="Skills" active={view === 'skills'} onClick={() => onViewChange('skills')} />
         <NavItem icon={CalendarIcon} label="Schedule" active={view === 'calendar'} onClick={() => onViewChange('calendar')} />
         <NavItem icon={Inbox} label="Queue" active={view === 'queue'} onClick={() => onViewChange('queue')} badge={queueCount} />
         <NavItem icon={FolderOpen} label="Files" active={view === 'files'} onClick={() => onViewChange('files')} />

@@ -1,22 +1,35 @@
 import { config } from 'dotenv'
 import { WebSocketServer, WebSocket } from 'ws'
 import { writeFile, mkdir } from 'fs/promises'
-import { existsSync } from 'fs'
+import { existsSync, accessSync, constants } from 'fs'
 import { Agent } from './agent.js'
 import { MCPServerConfig } from './mcp-manager.js'
 import { setupComposioMcp } from './composio-setup.js'
-import { INTEGRATIONS, getIntegrationStatuses, generateAuthUrl, getRequiredFields, disconnectIntegration, getConnectedSlugs, subscribeTriggersForSlug, purgeExpiredAccounts } from './composio-integrations.js'
+import { INTEGRATIONS, getIntegrationStatuses, generateAuthUrl, getRequiredFields, disconnectIntegration, getConnectedSlugs, subscribeTriggersForSlug, subscribeSingleTrigger, purgeExpiredAccounts, getAvailableTriggersForSlug, getSubscribedTriggers, setTriggerEnabled } from './composio-integrations.js'
 import { startScheduler } from './scheduler.js'
 import { readSettings, writeSettings } from './settings.js'
 
 import { listFiles, listFolders, ingestFile, deleteFileEntry, createFolder, moveFile, moveFolder, renameFile, renameFolder, deleteFolder, saveFolderOrder, searchFiles, autoOrganizeFiles } from './file-store.js'
 import { embedTools, setToolEmbeddingsDir } from './tool-embeddings.js'
-import { writeRelayCredentials, getRelayConfig, writeApiKeys, loadApiKeysToEnv, getApiKeyStatus } from './auth.js'
+import { writeRelayCredentials, getRelayConfig, getOpenAIProxy, loadApiKeysToEnv } from './auth.js'
 import { getUsageSummary } from './usage-tracker.js'
+
+/** Returns the relay token for Composio API calls */
+function composioKey(): string | undefined {
+  return process.env.RELAY_TOKEN
+}
+
+/** Returns the per-user Composio entity ID — relay user ID when available, otherwise 'default' */
+function composioUserId(): string {
+  return process.env.RELAY_USER_ID || 'default'
+}
+
 import { RelayClient } from './relay-client.js'
+import { WhatsAppClient, WhatsAppMedia } from './whatsapp-client.js'
 import type { WSClientMessage, WSServerMessage } from '@coagent/shared'
 import { join } from 'path'
 import { homedir } from 'os'
+import { readRegistry, writeCustomMcpCredentials, disconnectCustomMcp, deleteCustomMcp, getCustomMcpConfigs, getCustomIntegrations, readCustomMcpCode, updateCustomMcpCode, getCustomMcpDir } from './custom-mcp.js'
 
 // Load from ~/.coagent/.env — the secure isolated folder on the user's machine.
 // loadApiKeysToEnv runs first so any keys already in process.env (e.g. from the
@@ -27,6 +40,7 @@ config({ path: join(homedir(), '.coagent', '.env') })
 // ── OpenAI TTS helper ─────────────────────────────────────────────────────────
 function stripMdForTts(s: string): string {
   return s
+    .replace(/```[\s\S]*?```/g, '')         // remove code blocks
     .replace(/\*\*(.+?)\*\*/g, '$1')
     .replace(/\*(.+?)\*/g, '$1')
     .replace(/__(.+?)__/g, '$1')
@@ -41,33 +55,40 @@ function stripMdForTts(s: string): string {
     .trim()
 }
 
-function firstNSentences(s: string, n: number): string {
-  let count = 0
-  const re = /[.!?]\s/g
-  let m: RegExpExecArray | null
-  let lastEnd = 0
-  while ((m = re.exec(s)) !== null) {
+/** Extract a short TTS-friendly summary — max ~200 chars, first 1-2 sentences */
+function ttsSnippet(s: string): string {
+  const clean = stripMdForTts(s)
+  if (!clean) return ''
+  // Try to grab first 2 sentences
+  const re = /[.!?](?:\s|$)/g
+  let count = 0, lastEnd = 0, m: RegExpExecArray | null
+  while ((m = re.exec(clean)) !== null) {
     count++
     lastEnd = m.index + 1
-    if (count >= n) break
+    if (count >= 2) break
   }
-  return count >= n ? s.slice(0, lastEnd) : s
+  const snippet = count >= 1 ? clean.slice(0, lastEnd) : clean
+  // Hard cap at 250 chars — cut at last word boundary
+  if (snippet.length <= 250) return snippet
+  const cut = snippet.slice(0, 250).replace(/\s\S*$/, '')
+  return cut + '.'
 }
 
-async function generateTts(text: string): Promise<string | null> {
-  const apiKey = process.env.OPENAI_API_KEY
-  if (!apiKey) { console.log('[TTS] No OpenAI key'); return null }
-  const clean = firstNSentences(stripMdForTts(text), 2)
+async function generateTts(text: string, voice?: string): Promise<string | null> {
+  const proxy = getOpenAIProxy()
+  if (!proxy) { console.log('[TTS] No relay configured'); return null }
+  const clean = ttsSnippet(text)
   if (!clean) { console.log('[TTS] No text after cleanup'); return null }
-  console.log('[TTS] Generating audio for:', clean.slice(0, 80))
+  const ttsVoice = voice || 'alloy'
+  console.log('[TTS] Generating audio (voice: %s) for:', ttsVoice, clean.slice(0, 80))
   try {
-    const res = await fetch('https://api.openai.com/v1/audio/speech', {
+    const res = await fetch(`${proxy.baseUrl}/v1/audio/speech`, {
       method: 'POST',
-      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'tts-1', input: clean, voice: 'alloy', response_format: 'mp3' }),
+      headers: { 'Authorization': proxy.authHeader, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'tts-1', input: clean, voice: ttsVoice, response_format: 'mp3' }),
     })
     if (!res.ok) {
-      console.error('[TTS] OpenAI error:', res.status, await res.text())
+      console.error('[TTS] Error:', res.status, await res.text())
       return null
     }
     const buf = Buffer.from(await res.arrayBuffer())
@@ -75,6 +96,34 @@ async function generateTts(text: string): Promise<string | null> {
   } catch (err: any) {
     console.error('[TTS] Failed:', err.message)
     return null
+  }
+}
+
+/** Stream TTS audio — sends chunks over WebSocket as they arrive from OpenAI */
+async function streamTts(text: string, voice: string | undefined, sendFn: (msg: any) => void): Promise<void> {
+  const proxy = getOpenAIProxy()
+  if (!proxy) return
+  const clean = stripMdForTts(text)
+  if (!clean) return
+  const ttsVoice = voice || 'alloy'
+  try {
+    const res = await fetch(`${proxy.baseUrl}/v1/audio/speech`, {
+      method: 'POST',
+      headers: { 'Authorization': proxy.authHeader, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'tts-1', input: clean, voice: ttsVoice, response_format: 'opus' }),
+    })
+    if (!res.ok || !res.body) return
+    const reader = res.body.getReader()
+    let seq = 0
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      sendFn({ type: 'voice_tts_chunk', seq, data: Buffer.from(value).toString('base64') })
+      seq++
+    }
+    sendFn({ type: 'voice_tts_done' })
+  } catch (err: any) {
+    console.error('[TTS] Stream failed:', err.message)
   }
 }
 
@@ -129,6 +178,44 @@ function resolveMcpMemory(): { command: string; args: string[] } {
   return { command: 'node', args: [mcpMemoryPath] }
 }
 
+function resolveMcpImessage(): { command: string; args: string[] } {
+  const { dirname } = require('path') as typeof import('path')
+  const sidecarPath = join(dirname(process.execPath), 'coagent-imessage')
+  if (existsSync(sidecarPath)) {
+    return { command: sidecarPath, args: [] }
+  }
+  const mcpPath = require.resolve('@coagent/mcp-imessage')
+  return { command: 'node', args: [mcpPath] }
+}
+
+function resolveMcpContacts(): { command: string; args: string[] } {
+  const { dirname } = require('path') as typeof import('path')
+  const sidecarPath = join(dirname(process.execPath), 'coagent-contacts')
+  if (existsSync(sidecarPath)) {
+    return { command: sidecarPath, args: [] }
+  }
+  const mcpPath = require.resolve('@coagent/mcp-contacts')
+  return { command: 'node', args: [mcpPath] }
+}
+
+function canAccessChatDb(): boolean {
+  try {
+    accessSync(join(homedir(), 'Library', 'Messages', 'chat.db'), constants.R_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function canAccessAddressBook(): boolean {
+  try {
+    accessSync(join(homedir(), 'Library', 'Application Support', 'AddressBook', 'AddressBook-v22.abcddb'), constants.R_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
 function buildMcpConfigs(): MCPServerConfig[] {
   const mem = resolveMcpMemory()
   return [
@@ -138,7 +225,8 @@ function buildMcpConfigs(): MCPServerConfig[] {
       args: mem.args,
       env: {
         COAGENT_DATA_DIR: join(homedir(), '.coagent'),
-        ...(process.env.OPENAI_API_KEY ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY } : {})
+        ...(process.env.RELAY_URL ? { RELAY_URL: process.env.RELAY_URL } : {}),
+        ...(process.env.RELAY_TOKEN ? { RELAY_TOKEN: process.env.RELAY_TOKEN } : {})
       } as Record<string, string>
     }
   ]
@@ -166,7 +254,7 @@ CoAgent is a personal AI assistant that runs privately on your computer. Nothing
 
 **I ask before doing anything risky.** If I'm about to do something that can't be undone — like sending an email or deleting something — I'll queue it up for you to approve first.
 
-**I keep a schedule.** Routines (recurring cron), tasks (one-time with due time), and events (informational) all live in one schedule. Routines fire on their cron schedule. Tasks fire at their due time. Events are display-only. Everything is managed through chat.
+**I keep a schedule.** Routines (recurring cron), tasks (one-time with due time), and followups (check-back reminders) all live in one schedule. Routines fire on their cron schedule. Tasks and followups fire at their due time. Everything is managed through chat.
 
 **I manage files.** Users can upload files (PDF, DOCX, XLSX, images, etc.) which are summarized and embedded for semantic search. An "Auto-organize" button clusters loose files into named folders using embeddings — files already in folders are left alone.
 
@@ -179,7 +267,7 @@ CoAgent is a personal AI assistant that runs privately on your computer. Nothing
 Consolidated tools — each handles multiple actions via an \`action\` parameter:
 - **memory** (search/grep/read/write/edit/append/list/delete) — long-term memory. Use directly, never via search_tools. Prefer search (semantic) or grep (pattern match within a file) over read.
 - **files** (list/search/read/delete/stats) — uploaded file management.
-- **schedule** (create/update/delete/complete/list) — unified schedule for routines (recurring cron), tasks (one-time due), and events (informational).
+- **schedule** (create/update/delete/complete/list) — unified schedule for routines (recurring cron), tasks (one-time due), and followups (check-back reminders that fire like tasks).
 - **skills** (save/list/delete/execute) — reusable automations. Use execute to run a skill by name — loads its full instructions for you to follow.
 - **search_tools** — find and load external service tools (Gmail, Calendar, Slack, etc.). Optional "context" param greps recent tool logs for activity context.
 - **queue_approval** / **add_done_item** — approval queue and activity log.
@@ -339,6 +427,157 @@ Examples to suggest if they need ideas:
 - client-recap: Search all integrations for a client name over the last 7 days. Timeline + open items.
 - weekly-recap: Summarize the week across calendar, email, Slack, to-dos. End with loose ends.
 - schedule-meeting: Check calendar availability, suggest slots, draft invite email. Queue for approval.`
+  },
+  'integration-builder': {
+    name: 'integration-builder',
+    description: 'Create custom integrations from any API — @integration-builder to start',
+    instructions: `The user wants to connect a new API as a custom integration. Follow these steps exactly:
+
+## Step 1: Identify the API
+
+Ask what service they want to connect, or infer from context. Get:
+- The service name (e.g. "Notion", "Airtable", "Stripe")
+- What they want to do with it (optional — helps filter capabilities)
+
+## Step 2: Research the API
+
+Use search_tools("web search") to find a web search tool, then search for the API documentation. Look for:
+- Base URL and authentication method (API key, Bearer token, etc.)
+- Available endpoints and what they do
+- Request/response formats
+
+## Step 3: Propose capabilities
+
+Based on the API docs, call create_custom_integration with:
+- action: "propose"
+- name: kebab-case (e.g. "notion")
+- display_name: human name (e.g. "Notion")
+- capabilities: array of {name, description} for each action the integration can do
+
+Example:
+create_custom_integration({
+  action: "propose",
+  name: "notion",
+  display_name: "Notion",
+  capabilities: [
+    { name: "Search pages", description: "Search across all pages and databases" },
+    { name: "Create page", description: "Create a new page in a database" },
+    { name: "Get page", description: "Read a page's content and properties" }
+  ]
+})
+
+Then tell the user to review and confirm the capabilities.
+
+## Step 4: Generate MCP server code
+
+After the user confirms capabilities, generate an MCP server following this EXACT template:
+
+\`\`\`javascript
+import { Server } from '@modelcontextprotocol/sdk/server/index.js'
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
+
+process.stdout.on('error', (err) => { if (err?.code === 'EPIPE') process.exit(0) })
+process.on('uncaughtException', (err) => {
+  if (err?.code === 'EPIPE' || err?.message?.includes('EPIPE')) process.exit(0)
+  console.error('[ServerName] Uncaught:', err)
+  process.exit(1)
+})
+
+const BASE_URL = 'https://api.example.com/v1'
+const API_KEY = process.env.API_KEY // loaded from .env
+
+const server = new Server(
+  { name: 'coagent-custom-SERVICE_NAME', version: '0.0.1' },
+  { capabilities: { tools: {} } }
+)
+
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: [
+    // One tool per confirmed capability
+    {
+      name: 'TOOL_NAME',
+      description: 'What the tool does',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          // Parameters from the API docs
+        },
+        required: []
+      }
+    }
+  ]
+}))
+
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const { name, arguments: args } = request.params
+  try {
+    if (name === 'TOOL_NAME') {
+      const res = await fetch(\`\${BASE_URL}/endpoint\`, {
+        method: 'POST',
+        headers: {
+          'Authorization': \`Bearer \${API_KEY}\`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(args)
+      })
+      if (!res.ok) throw new Error(\`API error: \${res.status} \${await res.text()}\`)
+      const data = await res.json()
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+    }
+    throw new Error(\`Unknown tool: \${name}\`)
+  } catch (err) {
+    return { content: [{ type: 'text', text: \`Error: \${err.message}\` }], isError: true }
+  }
+})
+
+async function main() {
+  const transport = new StdioServerTransport()
+  await server.connect(transport)
+}
+
+main().catch(console.error)
+\`\`\`
+
+CRITICAL RULES for generated code:
+- Use native fetch() (Node 18+, no axios needed)
+- Auth via process.env — the env var names MUST match the auth_fields names
+- One tool per confirmed capability
+- Always include EPIPE handlers
+- Return JSON.stringify(data, null, 2) for API responses
+- Handle errors with isError: true
+
+## Step 5: Create the integration
+
+Call create_custom_integration with action "create":
+- name, display_name, description
+- capabilities: confirmed list
+- auth_fields: credentials needed — ALWAYS include help_url (direct link) and help_text (short step-by-step) for each field (e.g. [{name: "API_KEY", display_name: "API Key", description: "Your Notion integration token", help_url: "https://www.notion.so/my-integrations", help_text: "Go to notion.so/my-integrations → New integration → copy the Internal Integration Secret"}])
+- code: the generated index.js
+- dependencies: {} (only @modelcontextprotocol/sdk is needed, it's added automatically)
+
+## Step 6: Done
+
+The system will prompt the user for credentials automatically. Tell them:
+"Done! Enter your API key in the form that just appeared. Once connected, I'll be able to use [service] tools automatically."
+
+## Iteration — fixing and improving
+
+If a custom integration tool fails when the user tries it, you can fix it:
+
+1. Read the current code: create_custom_integration({ action: "read", name: "service-name" })
+2. Fix the issue in the code
+3. Update it: create_custom_integration({ action: "update", name: "service-name", code: "..." })
+   - The MCP server restarts automatically after update
+   - If dependencies changed, pass dependencies: {} to re-run npm install
+
+Start simple (1-2 tools), get it working, then iterate to add more capabilities.
+
+## Important
+- The generated code is JavaScript (not TypeScript) — it runs directly with node
+- Always use the exact MCP SDK import paths shown in the template
+- Keep tool names UPPERCASE_SNAKE_CASE matching the service (e.g. NOTION_SEARCH_PAGES)
+- Match the existing naming convention from Composio tools`
   }
 }
 
@@ -392,10 +631,247 @@ agent.onSkillsChanged = async () => {
   broadcast({ type: 'skills_update', skills })
 }
 
+agent.onCustomIntegration = async (action, data) => {
+  if (action === 'propose') {
+    const caps = (data.capabilities || []).map((c: any) => ({ name: c.name, description: c.description, checked: true }))
+    broadcast({ type: 'capability_card', name: data.display_name || data.name, capabilities: caps })
+    return 'Capabilities proposed to the user. They will see checkboxes to confirm which capabilities they want. Ask them to review and confirm.'
+  }
+
+  if (action === 'create') {
+    if (!data.code) return 'Error: code is required for create action.'
+    if (!data.display_name) return 'Error: display_name is required for create action.'
+
+    const name = data.name
+    const displayName = data.display_name
+    const description = data.description || ''
+    const capabilities = (data.capabilities || []).map((c: any) => c.name)
+    const authFields = (data.auth_fields || []).map((f: any) => ({
+      name: f.name,
+      displayName: f.display_name,
+      description: f.description,
+      helpUrl: f.help_url || undefined,
+      helpText: f.help_text || undefined,
+    }))
+
+    const deps: Record<string, string> = {
+      '@modelcontextprotocol/sdk': '^1.0.0',
+      ...(data.dependencies || {})
+    }
+    const pkg = JSON.stringify({
+      name: `coagent-custom-${name}`,
+      version: '0.0.1',
+      type: 'module',
+      dependencies: deps
+    }, null, 2)
+
+    try {
+      const { addCustomMcp, getCustomMcpDir } = await import('./custom-mcp.js')
+      await addCustomMcp({
+        name,
+        displayName,
+        description,
+        capabilities,
+        createdAt: new Date().toISOString(),
+        connected: false,
+        authFields,
+        ...(data.icon ? { icon: data.icon } : {})
+      }, data.code, pkg)
+
+      // Run npm install
+      const { execSync } = await import('child_process')
+      const dir = getCustomMcpDir(name)
+      console.log(`[Custom MCP] Installing dependencies in ${dir}...`)
+      execSync('npm install --production', { cwd: dir, stdio: 'pipe', timeout: 60000 })
+      console.log(`[Custom MCP] Dependencies installed for ${name}`)
+
+      // Send credential form to frontend
+      if (authFields.length > 0) {
+        broadcast({ type: 'integration_needs_fields', slug: `custom:${name}`, fields: authFields })
+      }
+
+      // Refresh integrations list
+      sendIntegrations(Array.from(wss!.clients)[0] as WebSocket).catch(() => {})
+
+      return `Integration "${displayName}" created and dependencies installed. ${authFields.length > 0 ? 'The user has been prompted to enter their credentials.' : 'No credentials needed — connecting now.'}`
+    } catch (err: any) {
+      console.error(`[Custom MCP] Failed to create ${name}:`, err.message)
+      return `Error creating integration: ${err.message}`
+    }
+  }
+
+  if (action === 'read') {
+    const code = readCustomMcpCode(data.name)
+    if (!code) return `No custom integration found with name "${data.name}".`
+    const stderr = agent.mcpManager.getStderr(`custom:${data.name}`)
+    const stderrSection = stderr ? `\n\nRecent stderr output:\n\`\`\`\n${stderr}\n\`\`\`` : ''
+    return `Current index.js for "${data.name}":\n\n\`\`\`javascript\n${code}\n\`\`\`${stderrSection}`
+  }
+
+  if (action === 'update') {
+    if (!data.code) return 'Error: code is required for update action.'
+    try {
+      await updateCustomMcpCode(data.name, data.code)
+
+      // If deps changed, re-run npm install
+      if (data.dependencies) {
+        const { readFile, writeFile } = await import('fs/promises')
+        const dir = getCustomMcpDir(data.name)
+        const pkgPath = `${dir}/package.json`
+        const pkg = JSON.parse(await readFile(pkgPath, 'utf-8'))
+        pkg.dependencies = { '@modelcontextprotocol/sdk': '^1.0.0', ...data.dependencies }
+        await writeFile(pkgPath, JSON.stringify(pkg, null, 2), 'utf-8')
+        const { execSync } = await import('child_process')
+        execSync('npm install --production', { cwd: dir, stdio: 'pipe', timeout: 60000 })
+      }
+
+      // Restart the MCP if it's currently connected
+      const slug = `custom:${data.name}`
+      await agent.mcpManager.disconnect(slug)
+      // Re-connect will happen on next tool call or we can trigger it now
+      const configs = await getCustomMcpConfigs()
+      const cfg = configs.find(c => c.name === slug)
+      if (cfg) {
+        await agent.mcpManager.connect([cfg])
+        console.log(`[Custom MCP] Restarted ${slug} with updated code`)
+        embedToolsFromMcp().catch(() => {})
+      }
+
+      return `Integration "${data.name}" updated and restarted.`
+    } catch (err: any) {
+      console.error(`[Custom MCP] Failed to update ${data.name}:`, err.message)
+      return `Error updating integration: ${err.message}`
+    }
+  }
+
+  return `Unknown action: ${action}`
+}
+
 const relay = new RelayClient(DATA_DIR)
 
 // Track which slugs are currently loaded in MCP so we can detect changes
 let currentMcpSlugs: string[] = []
+let imessageConnected = false
+let contactsConnected = false
+let whatsappConnected = false
+let whatsAppClient: WhatsAppClient | null = null
+const whatsappQueue: { jid: string; name: string; text: string; media?: WhatsAppMedia }[] = []
+let processingWhatsApp = false
+
+async function transcribeAudio(buffer: Buffer, mimetype: string): Promise<string | null> {
+  const proxy = getOpenAIProxy()
+  if (!proxy) {
+    console.log('[WhatsApp] No relay configured — cannot transcribe audio')
+    return null
+  }
+  try {
+    // WhatsApp sends ogg/opus; Whisper accepts ogg, mp3, wav, webm, etc.
+    const ext = mimetype.includes('ogg') ? 'ogg' : mimetype.includes('mp4') ? 'mp4' : 'ogg'
+    const blob = new Blob([buffer], { type: mimetype })
+    const form = new FormData()
+    form.append('file', blob, `voice.${ext}`)
+    form.append('model', 'whisper-1')
+    form.append('language', 'en')
+    form.append('temperature', '0.2')
+
+    const res = await fetch(`${proxy.baseUrl}/v1/audio/transcriptions`, {
+      method: 'POST',
+      headers: { 'Authorization': proxy.authHeader },
+      body: form,
+    })
+    const data = await res.json() as { text?: string; error?: { message: string } }
+    if (data.error) {
+      console.error('[WhatsApp] Whisper error:', data.error.message)
+      return null
+    }
+    return data.text?.trim() || null
+  } catch (err: any) {
+    console.error('[WhatsApp] Transcription failed:', err.message)
+    return null
+  }
+}
+
+async function processWhatsAppQueue(): Promise<void> {
+  if (processingWhatsApp || whatsappQueue.length === 0) return
+  processingWhatsApp = true
+
+  // Keep machine awake while processing, then release
+  let cafProc: any = null
+  if (process.platform === 'darwin') {
+    const { spawn } = require('child_process')
+    cafProc = spawn('caffeinate', ['-is', '-t', '300'], { stdio: 'ignore', detached: false })
+    cafProc.on('error', () => {})
+  }
+
+  const { jid, name, text, media } = whatsappQueue.shift()!
+
+  const label = name || jid.replace(/@.*/, '')
+  let messageText = text
+
+  // Handle audio: transcribe to text
+  if (media?.type === 'audio') {
+    const transcription = await transcribeAudio(media.buffer, media.mimetype)
+    if (transcription) {
+      console.log(`[WhatsApp] Transcribed audio: ${transcription.slice(0, 80)}`)
+      messageText = messageText ? `${messageText}\n\n[Voice note]: ${transcription}` : transcription
+    } else {
+      if (!messageText) {
+        processingWhatsApp = false
+        processWhatsAppQueue()
+        return
+      }
+    }
+  }
+
+  // Handle image: encode as base64 for Claude vision
+  let imageBase64: string | undefined
+  let imageMime: string | undefined
+  if (media?.type === 'image') {
+    imageBase64 = media.buffer.toString('base64')
+    imageMime = media.mimetype
+    if (!messageText) messageText = 'What is this image?'
+    console.log(`[WhatsApp] Image attached (${media.buffer.length} bytes)`)
+  }
+
+  const prompt = `[WhatsApp from ${label}]: ${messageText}\n\n(This is a WhatsApp message. No markdown in your reply.)`
+
+  broadcast({ type: 'chat_response', message: { role: 'user', content: `[WhatsApp from ${label}]: ${messageText}`, timestamp: new Date().toISOString() } })
+  broadcast({ type: 'agent_thinking' })
+
+  try {
+    let streamed = ''
+    const extraContent = imageBase64 && imageMime
+      ? [{ type: 'image', source: { type: 'base64', media_type: imageMime, data: imageBase64 } }]
+      : undefined
+    const response = await agent.chat(
+      prompt,
+      (chunk) => { streamed += chunk; broadcast({ type: 'chat_chunk', text: chunk }) },
+      (tool, toolLabel) => { broadcast({ type: 'chat_segment_end' }); broadcast({ type: 'tool_start', tool, label: toolLabel }) },
+      undefined,
+      extraContent
+    )
+    const fullResponse = streamed || response
+    broadcast({ type: 'chat_response', message: { role: 'assistant', content: fullResponse, timestamp: new Date().toISOString() } })
+    broadcast({ type: 'queue_update', items: agent.queue.getPending() })
+    broadcast({ type: 'done_update', items: agent.queue.getDone() })
+    broadcast({ type: 'calendar_update', entries: agent.calendar.getAll() })
+
+    // Send response back to WhatsApp
+    if (whatsAppClient?.isConnected) {
+      await whatsAppClient.sendMessage(jid, fullResponse).catch(err =>
+        console.error('[WhatsApp] Failed to send reply:', err.message)
+      )
+    }
+  } catch (err: any) {
+    console.error('[WhatsApp] Chat error:', err.message)
+    broadcast({ type: 'error', message: `WhatsApp message failed: ${err.message}` })
+    broadcast({ type: 'agent_stopped' })
+  }
+
+  if (cafProc) cafProc.kill()
+  processingWhatsApp = false
+  processWhatsAppQueue()
+}
 
 // Always-on toolkits that require no auth — loaded regardless of user connections
 const ALWAYS_ON_TOOLKITS = ['composio_search', 'text_to_pdf']
@@ -417,7 +893,7 @@ async function refreshComposioMcp(slugs: string[]): Promise<void> {
   // (Composio may report them as not-yet-ACTIVE during OAuth flow)
   const mergedSlugs = [...new Set([...currentMcpSlugs, ...slugs])]
   const allToolkits = [...new Set([...ALWAYS_ON_TOOLKITS, ...mergedSlugs])]
-  const { url, apiKey } = await setupComposioMcp(process.env.COMPOSIO_API_KEY!, allToolkits, 'default', true)
+  const { url, apiKey } = await setupComposioMcp(composioKey()!, allToolkits, composioUserId(), true)
   // Only reconnect the composio HTTP client — don't touch the memory MCP
   await agent.mcpManager.connectHttp('composio', url, apiKey)
   currentMcpSlugs = mergedSlugs
@@ -427,18 +903,18 @@ async function refreshComposioMcp(slugs: string[]): Promise<void> {
   embedToolsFromMcp().catch(() => {})
 }
 
-if (process.env.COMPOSIO_API_KEY) {
+if (composioKey()) {
   console.log('[Composio] API key present, initializing MCP connection...')
   // Clean up any stale expired accounts on boot to prevent duplicate buildup
-  purgeExpiredAccounts(process.env.COMPOSIO_API_KEY)
+  purgeExpiredAccounts(composioKey()!, composioUserId())
     .catch(err => console.error('[Composio] Failed to purge expired accounts:', err.message))
 
-  getConnectedSlugs(process.env.COMPOSIO_API_KEY).then(async (slugs) => {
+  getConnectedSlugs(composioKey()!, composioUserId()).then(async (slugs) => {
     console.log(`[Composio] Found ${slugs.length} connected integrations: ${slugs.join(', ') || 'none'}`)
     // Default to all supported integrations so tools are available even before user connects
     const userToolkits = slugs.length > 0 ? slugs : ['gmail', 'googlecalendar']
     const toolkits = [...new Set([...ALWAYS_ON_TOOLKITS, ...userToolkits])]
-    const { url, apiKey } = await setupComposioMcp(process.env.COMPOSIO_API_KEY!, toolkits)
+    const { url, apiKey } = await setupComposioMcp(composioKey()!, toolkits, composioUserId())
     console.log('[Composio] MCP URL obtained, connecting HTTP client...')
     await agent.mcpManager.connectHttp('composio', url, apiKey)
     currentMcpSlugs = userToolkits
@@ -447,15 +923,20 @@ if (process.env.COMPOSIO_API_KEY) {
     // Embed tools + params on connect so they're ready before the first message
     setToolEmbeddingsDir(DATA_DIR)
     embedToolsFromMcp().catch(() => {})
-    // Subscribe triggers for all currently connected integrations
-    for (const slug of slugs) {
-      subscribeTriggersForSlug(process.env.COMPOSIO_API_KEY!, slug)
-        .catch(err => console.error(`[Composio] Trigger subscribe failed for ${slug}:`, err.message))
-    }
   }).catch(err => console.error('[Composio] Failed to connect MCP:', err.message))
 } else {
   console.log('[Composio] No API key found, skipping MCP connection')
 }
+
+// Connect custom MCPs on startup
+getCustomMcpConfigs().then(async (configs) => {
+  if (configs.length > 0) {
+    console.log(`[Custom MCP] Connecting ${configs.length} custom integration(s)...`)
+    await agent.mcpManager.connect(configs)
+    console.log('[Custom MCP] Connected:', configs.map(c => c.name).join(', '))
+    embedToolsFromMcp().catch(() => {})
+  }
+}).catch(err => console.error('[Custom MCP] Failed to connect:', err.message))
 
 // Kill any stale process on the port before starting
 try {
@@ -488,12 +969,60 @@ function broadcast(msg: WSServerMessage): void {
 }
 
 async function sendIntegrations(ws: WebSocket): Promise<void> {
-  if (!process.env.COMPOSIO_API_KEY) {
-    // No key — show all integrations as disconnected so user sees what's possible
-    send(ws, { type: 'integrations_update', integrations: INTEGRATIONS.map(({ slug, name, category, description, capabilities }) => ({ slug, name, category, description, capabilities, connected: false })) })
-    return
+  let integrations: any[]
+  if (!composioKey()) {
+    integrations = INTEGRATIONS.map(({ slug, name, category, description, capabilities }) => ({ slug, name, category, description, capabilities, connected: false }))
+  } else {
+    integrations = await getIntegrationStatuses(composioKey()!, composioUserId())
   }
-  const integrations = await getIntegrationStatuses(process.env.COMPOSIO_API_KEY)
+
+  // Enrich Composio integrations with available trigger info
+  const subscribedSet = getSubscribedTriggers()
+  integrations = integrations.map(integration => {
+    const availableTriggers = getAvailableTriggersForSlug(integration.slug)
+    if (availableTriggers.length === 0) return integration
+    const triggers = availableTriggers.map(t => ({
+      slug: t.slug,
+      label: t.label,
+      appSlug: integration.slug,
+      enabled: subscribedSet.has(t.slug),
+    }))
+    return { ...integration, triggers }
+  })
+
+  const custom = await getCustomIntegrations()
+  const builtins: any[] = []
+  // WhatsApp — cross-platform, always shown
+  builtins.push({
+    slug: 'coagent:whatsapp',
+    name: 'WhatsApp',
+    connected: whatsappConnected,
+    category: 'CoAgent',
+    description: 'Receive and reply to WhatsApp messages through your agent. Pair with QR code.',
+    capabilities: 'Receive messages, Reply to conversations, Cross-platform messaging',
+    builtin: true
+  })
+  if (process.platform === 'darwin') {
+    builtins.push({
+      slug: 'coagent:imessage',
+      name: 'iMessage',
+      connected: imessageConnected,
+      category: 'CoAgent',
+      description: 'Read and send iMessages. Search conversations, get message history, send texts.',
+      capabilities: 'Search messages, Get conversations, List recent chats, Send iMessages',
+      builtin: true
+    })
+    builtins.push({
+      slug: 'coagent:contacts',
+      name: 'Contacts',
+      connected: contactsConnected,
+      category: 'CoAgent',
+      description: 'Search and look up contacts from macOS Contacts. Find phone numbers, emails, addresses.',
+      capabilities: 'Search contacts, Get contact details, List recent contacts',
+      builtin: true
+    })
+  }
+  integrations = [...builtins, ...custom, ...integrations]
   send(ws, { type: 'integrations_update', integrations })
 }
 
@@ -529,7 +1058,6 @@ wss.on('connection', (ws) => {
   sendFilesAndFolders(ws).catch(console.error)
   readSettings(DATA_DIR).then(settings => send(ws, { type: 'settings_update', settings })).catch(console.error)
   sendRelayStatus(ws).catch(console.error)
-  send(ws, { type: 'api_keys_status', keys: getApiKeyStatus() })
   agent.getSkills().then(skills => send(ws, { type: 'skills_update', skills })).catch(console.error)
 
   ws.on('message', async (raw) => {
@@ -548,10 +1076,10 @@ wss.on('connection', (ws) => {
     }
 
     if (msg.type === 'chat') {
-      if (!process.env.ANTHROPIC_API_KEY) {
+      if (!getRelayConfig()) {
         send(ws, {
           type: 'chat_response',
-          message: { role: 'assistant', content: 'I need an API key before I can help. Head to **Settings → API Keys** and add your Anthropic API key to get started.', timestamp: new Date().toISOString() }
+          message: { role: 'assistant', content: 'I need a relay connection before I can help. Activate your relay in **Settings** to get started.', timestamp: new Date().toISOString() }
         })
         return
       }
@@ -587,8 +1115,9 @@ wss.on('connection', (ws) => {
 
     if (msg.type === 'voice_audio') {
       // Receive base64 audio from frontend, transcribe with Whisper, then process as voice chat
-      if (!process.env.OPENAI_API_KEY) {
-        send(ws, { type: 'error', message: 'Add your OpenAI API key in Settings → API Keys to use voice input.' })
+      const voiceProxy = getOpenAIProxy()
+      if (!voiceProxy) {
+        send(ws, { type: 'error', message: 'Relay not configured — voice input unavailable.' })
         return
       }
       try {
@@ -601,9 +1130,9 @@ wss.on('connection', (ws) => {
         form.append('prompt', 'This is a voice command to a personal AI assistant called Co-Agent. The user is speaking naturally in English.')
         form.append('temperature', '0.2')
 
-        const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+        const res = await fetch(`${voiceProxy.baseUrl}/v1/audio/transcriptions`, {
           method: 'POST',
-          headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}` },
+          headers: { 'Authorization': voiceProxy.authHeader },
           body: form,
         })
         const data = await res.json() as { text?: string; error?: { message: string } }
@@ -618,19 +1147,27 @@ wss.on('connection', (ws) => {
         console.log('[Voice] Transcribed:', text)
 
         // Process as a voice chat message
-        if (!process.env.ANTHROPIC_API_KEY) {
-          send(ws, { type: 'chat_response', message: { role: 'assistant', content: 'I need an Anthropic API key to respond.', timestamp: new Date().toISOString() } })
+        if (!getRelayConfig()) {
+          send(ws, { type: 'chat_response', message: { role: 'assistant', content: 'Relay not configured — cannot respond.', timestamp: new Date().toISOString() } })
           return
         }
         // Show transcribed text immediately, then process
         send(ws, { type: 'voice_transcribed', text })
         send(ws, { type: 'agent_thinking' })
         let streamed = ''
+        let ttsFired = false
+        const settingsForTts = await readSettings(DATA_DIR)
+        const voicePrompt = text + ' [voice]'
         const response = await agent.chat(
-          text,
+          voicePrompt,
           (chunk) => {
             streamed += chunk
             send(ws, { type: 'chat_chunk', text: chunk })
+            // Fire TTS on first sentence boundary — don't wait for full response
+            if (!ttsFired && settingsForTts.voice_response && getOpenAIProxy() && /[.!?]\s/.test(streamed)) {
+              ttsFired = true
+              streamTts(streamed, settingsForTts.voice_voice, (msg) => send(ws, msg as any))
+            }
           },
           (tool, label) => {
             send(ws, { type: 'chat_segment_end' })
@@ -644,12 +1181,9 @@ wss.on('connection', (ws) => {
         send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
         sendFilesAndFolders(ws).catch(console.error)
         send(ws, { type: 'voice_summary', summary: fullResponse })
-        // TTS read-back if enabled
-        const settings = await readSettings(DATA_DIR)
-        if (settings.voice_response && process.env.OPENAI_API_KEY) {
-          generateTts(fullResponse).then(audio => {
-            if (audio) send(ws, { type: 'voice_tts_audio', data: audio })
-          })
+        // If TTS didn't fire during streaming (no sentence boundary), fire on full response
+        if (!ttsFired && settingsForTts.voice_response && getOpenAIProxy()) {
+          streamTts(fullResponse, settingsForTts.voice_voice, (msg) => send(ws, msg as any))
         }
       } catch (err: any) {
         console.error('[Voice] Transcription/chat error:', err.message)
@@ -659,21 +1193,29 @@ wss.on('connection', (ws) => {
     }
 
     if (msg.type === 'voice_chat') {
-      if (!process.env.ANTHROPIC_API_KEY) {
+      if (!getRelayConfig()) {
         send(ws, {
           type: 'chat_response',
-          message: { role: 'assistant', content: 'I need an API key before I can help. Head to **Settings → API Keys** and add your Anthropic API key to get started.', timestamp: new Date().toISOString() }
+          message: { role: 'assistant', content: 'I need a relay connection before I can help. Activate your relay in **Settings** to get started.', timestamp: new Date().toISOString() }
         })
         return
       }
       send(ws, { type: 'agent_thinking' })
       try {
         let streamed = ''
+        let ttsFired = false
+        const settingsForTts = await readSettings(DATA_DIR)
+        const voicePrompt = msg.message + ' [voice]'
         const response = await agent.chat(
-          msg.message,
+          voicePrompt,
           (chunk) => {
             streamed += chunk
             send(ws, { type: 'chat_chunk', text: chunk })
+            // Fire TTS on first sentence boundary — don't wait for full response
+            if (!ttsFired && settingsForTts.voice_response && getOpenAIProxy() && /[.!?]\s/.test(streamed)) {
+              ttsFired = true
+              streamTts(streamed, settingsForTts.voice_voice, (m) => send(ws, m as any))
+            }
           },
           (tool, label) => {
             send(ws, { type: 'chat_segment_end' })
@@ -690,12 +1232,9 @@ wss.on('connection', (ws) => {
         send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
         sendFilesAndFolders(ws).catch(console.error)
         send(ws, { type: 'voice_summary', summary: fullResp })
-        // TTS read-back if enabled
-        const settings = await readSettings(DATA_DIR)
-        if (settings.voice_response && process.env.OPENAI_API_KEY) {
-          generateTts(fullResp).then(audio => {
-            if (audio) send(ws, { type: 'voice_tts_audio', data: audio })
-          })
+        // If TTS didn't fire during streaming (no sentence boundary), fire on full response
+        if (!ttsFired && settingsForTts.voice_response && getOpenAIProxy()) {
+          streamTts(fullResp, settingsForTts.voice_voice, (m) => send(ws, m as any))
         }
       } catch (err: any) {
         console.error('[Server] voice_chat error:', err.message)
@@ -785,27 +1324,150 @@ wss.on('connection', (ws) => {
     }
 
     if (msg.type === 'get_integrations') {
-      if (process.env.COMPOSIO_API_KEY) {
-        const slugs = await getConnectedSlugs(process.env.COMPOSIO_API_KEY)
+      if (composioKey()) {
+        const slugs = await getConnectedSlugs(composioKey()!, composioUserId())
         const newSlugs = slugs.filter(s => !currentMcpSlugs.includes(s))
         if (newSlugs.length > 0) {
           await refreshComposioMcp(slugs).catch(console.error)
-          // Auto-subscribe triggers for each newly connected integration
-          for (const slug of newSlugs) {
-            subscribeTriggersForSlug(process.env.COMPOSIO_API_KEY!, slug)
-              .catch(err => console.error(`[Composio] Trigger subscribe failed for ${slug}:`, err.message))
-          }
+          // Triggers are user-controlled — no auto-subscribe
         }
       }
       await sendIntegrations(ws)
     }
 
     if (msg.type === 'integration_connect') {
-      if (!process.env.COMPOSIO_API_KEY) {
+      if (msg.slug === 'coagent:whatsapp') {
+        console.log('[WhatsApp] Connect requested...')
+        try {
+          // Disconnect existing if any
+          if (whatsAppClient) {
+            whatsAppClient.disconnect()
+            whatsAppClient = null
+          }
+          whatsAppClient = new WhatsAppClient(DATA_DIR, {
+            onQr: (dataUrl) => {
+              console.log('[WhatsApp] QR code generated, sending to UI')
+              broadcast({ type: 'whatsapp_qr', dataUrl } as any)
+            },
+            onConnected: () => {
+              whatsappConnected = true
+              sendIntegrations(ws).catch(console.error)
+            },
+            onDisconnected: () => {
+              whatsappConnected = false
+              whatsAppClient = null
+              sendIntegrations(ws).catch(console.error)
+            },
+            onMessage: (jid, pushName, text, media) => {
+              console.log(`[WhatsApp] Message from ${pushName || jid}: ${text ? text.slice(0, 80) : `[${media?.type || 'empty'}]`}`)
+              whatsappQueue.push({ jid, name: pushName, text, media })
+              processWhatsAppQueue()
+            }
+          })
+          await whatsAppClient.connect()
+        } catch (err: any) {
+          console.error('[WhatsApp] Connect failed:', err.message)
+          send(ws, { type: 'error', message: `Failed to connect WhatsApp: ${err.message}` })
+        }
+        return
+      }
+      if (msg.slug === 'coagent:imessage') {
+        console.log('[iMessage] Connect requested...')
+        // In production, check FDA first. Skip in dev since the parent app may differ.
+        const skipFdaCheck = process.env.NODE_ENV === 'development' || process.env.TAURI_ENV_DEBUG === 'true'
+        if (!skipFdaCheck && !canAccessChatDb()) {
+          console.log('[iMessage] FDA check failed — opening settings')
+          try {
+            const { execSync } = require('child_process')
+            execSync('open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"')
+          } catch {}
+          send(ws, {
+            type: 'integration_fda_required' as any,
+            slug: msg.slug,
+            message: 'Enable Full Disk Access for CoAgent in the Settings window that just opened, then restart and click Connect again.'
+          })
+          return
+        }
+        console.log('[iMessage] Connecting MCP...')
+        try {
+          const imsg = resolveMcpImessage()
+          await agent.mcpManager.disconnect('coagent:imessage')
+          await agent.mcpManager.connect([{
+            name: 'coagent:imessage',
+            command: imsg.command,
+            args: imsg.args
+          }])
+          imessageConnected = true
+          embedToolsFromMcp().catch(() => {})
+          await sendIntegrations(ws)
+        } catch (err: any) {
+          send(ws, { type: 'error', message: `Failed to connect iMessage: ${err.message}` })
+        }
+        return
+      }
+      if (msg.slug === 'coagent:contacts') {
+        console.log('[Contacts] Connect requested...')
+        const skipFdaCheck = process.env.NODE_ENV === 'development' || process.env.TAURI_ENV_DEBUG === 'true'
+        if (!skipFdaCheck && !canAccessAddressBook()) {
+          console.log('[Contacts] FDA check failed — opening settings')
+          try {
+            const { execSync } = require('child_process')
+            execSync('open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"')
+          } catch {}
+          send(ws, {
+            type: 'integration_fda_required' as any,
+            slug: msg.slug,
+            message: 'Enable Full Disk Access for CoAgent in the Settings window that just opened, then restart and click Connect again.'
+          })
+          return
+        }
+        console.log('[Contacts] Connecting MCP...')
+        try {
+          const contacts = resolveMcpContacts()
+          await agent.mcpManager.disconnect('coagent:contacts')
+          await agent.mcpManager.connect([{
+            name: 'coagent:contacts',
+            command: contacts.command,
+            args: contacts.args
+          }])
+          contactsConnected = true
+          embedToolsFromMcp().catch(() => {})
+          await sendIntegrations(ws)
+        } catch (err: any) {
+          send(ws, { type: 'error', message: `Failed to connect Contacts: ${err.message}` })
+        }
+        return
+      }
+      if (msg.slug.startsWith('custom:')) {
+        const name = msg.slug.slice(7)
+        if (msg.params) {
+          try {
+            await writeCustomMcpCredentials(name, msg.params)
+            await agent.mcpManager.disconnect(`custom:${name}`)
+            const configs = await getCustomMcpConfigs()
+            const config = configs.find(c => c.name === `custom:${name}`)
+            if (config) {
+              await agent.mcpManager.connect([config])
+              embedToolsFromMcp().catch(() => {})
+            }
+            await sendIntegrations(ws)
+          } catch (err: any) {
+            send(ws, { type: 'error', message: err.message })
+          }
+        } else {
+          const registry = await readRegistry()
+          const entry = registry.find(e => e.name === name)
+          if (entry && entry.authFields.length > 0) {
+            send(ws, { type: 'integration_needs_fields', slug: msg.slug, fields: entry.authFields })
+          }
+        }
+        return
+      }
+      if (!composioKey()) {
         send(ws, { type: 'error', message: 'Add your Composio API key in Settings → API Keys to connect integrations.' })
       } else {
         try {
-          const url = await generateAuthUrl(process.env.COMPOSIO_API_KEY, msg.slug, 'default', msg.params)
+          const url = await generateAuthUrl(composioKey()!, msg.slug, composioUserId(), msg.params)
           send(ws, { type: 'integration_auth_url', slug: msg.slug, url })
         } catch (err: any) {
           if (err.message === 'NEEDS_FIELDS') {
@@ -818,19 +1480,114 @@ wss.on('connection', (ws) => {
     }
 
     if (msg.type === 'integration_disconnect') {
-      if (!process.env.COMPOSIO_API_KEY) {
+      if (msg.slug === 'coagent:whatsapp') {
+        try {
+          whatsAppClient?.disconnect()
+          whatsAppClient = null
+          whatsappConnected = false
+          await sendIntegrations(ws)
+        } catch (err: any) {
+          send(ws, { type: 'error', message: err.message })
+        }
+        return
+      }
+      if (msg.slug === 'coagent:imessage') {
+        try {
+          await agent.mcpManager.disconnect('coagent:imessage')
+          imessageConnected = false
+          await sendIntegrations(ws)
+        } catch (err: any) {
+          send(ws, { type: 'error', message: err.message })
+        }
+        return
+      }
+      if (msg.slug === 'coagent:contacts') {
+        try {
+          await agent.mcpManager.disconnect('coagent:contacts')
+          contactsConnected = false
+          await sendIntegrations(ws)
+        } catch (err: any) {
+          send(ws, { type: 'error', message: err.message })
+        }
+        return
+      }
+      if (msg.slug.startsWith('custom:')) {
+        const name = msg.slug.slice(7)
+        try {
+          await agent.mcpManager.disconnect(`custom:${name}`)
+          await disconnectCustomMcp(name)
+          await sendIntegrations(ws)
+        } catch (err: any) {
+          send(ws, { type: 'error', message: err.message })
+        }
+        return
+      }
+      if (!composioKey()) {
         send(ws, { type: 'error', message: 'No Composio API key configured.' })
       } else {
         try {
-          await disconnectIntegration(process.env.COMPOSIO_API_KEY, msg.slug)
+          await disconnectIntegration(composioKey()!, msg.slug, composioUserId())
           // Explicitly remove from tracked slugs so refreshComposioMcp doesn't re-add it
           currentMcpSlugs = currentMcpSlugs.filter(s => s !== msg.slug)
-          const slugs = await getConnectedSlugs(process.env.COMPOSIO_API_KEY)
+          const slugs = await getConnectedSlugs(composioKey()!, composioUserId())
           await refreshComposioMcp(slugs)
           await sendIntegrations(ws)
         } catch (err: any) {
           send(ws, { type: 'error', message: err.message })
         }
+      }
+    }
+
+    if (msg.type === 'toggle_trigger') {
+      const { triggerSlug, appSlug, enabled } = msg
+      if (enabled) {
+        subscribeSingleTrigger(composioKey()!, triggerSlug, appSlug, composioUserId())
+          .then(() => sendIntegrations(ws))
+          .catch(err => console.error('[Composio] Failed to subscribe trigger:', err.message))
+      } else {
+        setTriggerEnabled(triggerSlug, false)
+        sendIntegrations(ws).catch(console.error)
+      }
+    }
+
+    if (msg.type === 'custom_integration_delete') {
+      const name = msg.slug.startsWith('custom:') ? msg.slug.slice(7) : msg.slug
+      try {
+        await agent.mcpManager.disconnect(`custom:${name}`)
+        await deleteCustomMcp(name)
+        await sendIntegrations(ws)
+      } catch (err: any) {
+        send(ws, { type: 'error', message: err.message })
+      }
+    }
+
+    if (msg.type === 'capability_confirm') {
+      const selected = msg.capabilities.join(', ')
+      const chatMsg = `The user confirmed these capabilities for the custom integration: ${selected}. Now generate the MCP server code and call create_custom_integration with action "create" to build it.`
+      send(ws, { type: 'agent_thinking' })
+      try {
+        let streamed = ''
+        const response = await agent.chat(
+          chatMsg,
+          (chunk) => {
+            streamed += chunk
+            send(ws, { type: 'chat_chunk', text: chunk })
+          },
+          (tool, label) => {
+            send(ws, { type: 'chat_segment_end' })
+            send(ws, { type: 'tool_start', tool, label })
+          }
+        )
+        send(ws, {
+          type: 'chat_response',
+          message: { role: 'assistant', content: streamed || response, timestamp: new Date().toISOString() }
+        })
+        send(ws, { type: 'queue_update', items: agent.queue.getPending() })
+        send(ws, { type: 'done_update', items: agent.queue.getDone() })
+      } catch (err: any) {
+        console.error('[Server] capability_confirm error:', err.message)
+        send(ws, { type: 'error', message: err.message ?? 'Something went wrong.' })
+        send(ws, { type: 'agent_stopped' })
       }
     }
 
@@ -851,6 +1608,30 @@ wss.on('connection', (ws) => {
         if (msg.patch.heartbeat_interval !== undefined || msg.patch.active_hours !== undefined || msg.patch.active_days !== undefined) {
           scheduler.rescheduleHeartbeat()
         }
+      } catch (err: any) {
+        send(ws, { type: 'error', message: err.message })
+      }
+    }
+
+    if (msg.type === 'get_skills') {
+      agent.getSkills().then(skills => send(ws, { type: 'skills_update', skills })).catch(console.error)
+    }
+
+    if (msg.type === 'update_skill') {
+      try {
+        await agent.updateSkill(msg.name, msg.description, msg.instructions)
+        const skills = await agent.getSkills()
+        send(ws, { type: 'skills_update', skills })
+      } catch (err: any) {
+        send(ws, { type: 'error', message: err.message })
+      }
+    }
+
+    if (msg.type === 'delete_skill') {
+      try {
+        await agent.removeSkill(msg.name)
+        const skills = await agent.getSkills()
+        send(ws, { type: 'skills_update', skills })
       } catch (err: any) {
         send(ws, { type: 'error', message: err.message })
       }
@@ -1030,10 +1811,6 @@ wss.on('connection', (ws) => {
       sendRelayStatus(ws).catch(console.error)
     }
 
-    if (msg.type === 'get_api_keys') {
-      send(ws, { type: 'api_keys_status', keys: getApiKeyStatus() })
-    }
-
     if (msg.type === 'get_usage') {
       const usage = await getUsageSummary(DATA_DIR)
       send(ws, { type: 'usage_update', usage })
@@ -1050,59 +1827,6 @@ wss.on('connection', (ws) => {
       }
     }
 
-    if (msg.type === 'update_api_keys') {
-      try {
-        await writeApiKeys(DATA_DIR, msg.keys)
-        agent.reinitClient()
-
-        // If Composio key changed, reinitialise MCP and refresh integrations
-        if (msg.keys.composio !== undefined) {
-          if (process.env.COMPOSIO_API_KEY) {
-            // Key was set — connect MCP and load integrations
-            purgeExpiredAccounts(process.env.COMPOSIO_API_KEY)
-              .catch(err => console.error('[Composio] Failed to purge expired accounts:', err.message))
-
-            getConnectedSlugs(process.env.COMPOSIO_API_KEY).then(async (slugs) => {
-              const userToolkits = slugs.length > 0 ? slugs : ['gmail', 'googlecalendar']
-              await refreshComposioMcp(userToolkits)
-              for (const slug of slugs) {
-                subscribeTriggersForSlug(process.env.COMPOSIO_API_KEY!, slug)
-                  .catch(err => console.error(`[Composio] Trigger subscribe failed for ${slug}:`, err.message))
-              }
-              // Broadcast updated integrations to all clients
-              for (const client of wss.clients) {
-                if (client.readyState === WebSocket.OPEN) sendIntegrations(client).catch(console.error)
-              }
-            }).catch(err => console.error('[Composio] Failed to reinit MCP after key update:', err.message))
-          } else {
-            // Key was cleared — disconnect MCP and show all as disconnected
-            await agent.mcpManager.disconnectAll()
-            await agent.mcpManager.connect(buildMcpConfigs())
-            currentMcpSlugs = []
-            for (const client of wss.clients) {
-              if (client.readyState === WebSocket.OPEN) sendIntegrations(client).catch(console.error)
-            }
-          }
-        }
-
-        // If OpenAI key changed, restart memory MCP so it picks up the new key
-        if (msg.keys.openai !== undefined) {
-          await agent.mcpManager.disconnectAll()
-          await agent.mcpManager.connect(buildMcpConfigs())
-          // Re-connect Composio MCP if it was active
-          if (process.env.COMPOSIO_API_KEY && currentMcpSlugs.length > 0) {
-            const allToolkits = [...new Set([...ALWAYS_ON_TOOLKITS, ...currentMcpSlugs])]
-            const { url, apiKey } = await setupComposioMcp(process.env.COMPOSIO_API_KEY, allToolkits)
-            await agent.mcpManager.connectHttp('composio', url, apiKey)
-          }
-          console.log('[Server] Memory MCP restarted with updated OpenAI key')
-        }
-
-        send(ws, { type: 'api_keys_status', keys: getApiKeyStatus() })
-      } catch (err: any) {
-        send(ws, { type: 'error', message: `Failed to save API keys: ${err.message}` })
-      }
-    }
 
   })
 })
