@@ -25,6 +25,7 @@ function composioUserId(): string {
 }
 
 import { RelayClient } from './relay-client.js'
+import { TeamClient } from '@coagent/team-core'
 import { WhatsAppClient, WhatsAppMedia } from './whatsapp-client.js'
 import type { WSClientMessage, WSServerMessage } from '@coagent/shared'
 import { join } from 'path'
@@ -752,6 +753,7 @@ agent.onCustomIntegration = async (action, data) => {
 }
 
 const relay = new RelayClient(DATA_DIR)
+let teamClient: TeamClient | null = null
 
 // Track which slugs are currently loaded in MCP so we can detect changes
 let currentMcpSlugs: string[] = []
@@ -970,6 +972,38 @@ try {
 wss = new WebSocketServer({ host: '127.0.0.1', port: PORT })
 
 relay.connect()
+
+// Team client
+try {
+  if (process.env.RELAY_URL && process.env.RELAY_TOKEN) {
+    teamClient = new TeamClient({
+      relayUrl: process.env.RELAY_URL.replace(/\/$/, ''),
+      relayToken: process.env.RELAY_TOKEN,
+      userId: process.env.RELAY_USER_ID || '',
+      dataDir: DATA_DIR,
+      onTaggedMessage: async (message) => {
+        const teamPrompt = `[TEAM MESSAGE from ${message.from.name} (${message.from.role})]\n${message.visible}\n\n[Agent Context]: ${message.agentContext}\n\nRespond to this team message. Use the send_team_message tool to reply in the team channel.`
+        try {
+          const response = await agent.chat(teamPrompt, (text) => broadcast({ type: 'chat_chunk', text }), (tool, label) => broadcast({ type: 'tool_start', tool, label } as any))
+          broadcast({ type: 'chat_response', message: { role: 'assistant', content: response, timestamp: new Date().toISOString() } })
+        } catch (err) {
+          console.warn('[Team] Failed to process tagged message:', err)
+        }
+      },
+      onHumanNotify: async (message) => {
+        broadcast({ type: 'push_notification', title: message.from.name, body: message.visible } as any)
+      }
+    })
+    agent.teamClient = teamClient
+    teamClient.init().then(() => teamClient!.connect()).catch(err => {
+      console.warn('[Team] Failed to initialize team client:', err)
+      teamClient = null
+      agent.teamClient = null
+    })
+  }
+} catch (err) {
+  console.warn('[Team] Failed to initialize team client:', err)
+}
 
 function send(ws: WebSocket, msg: WSServerMessage): void {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg))
@@ -1995,6 +2029,35 @@ wss.on('connection', (ws) => {
       }
     }
 
+    // Handle team messages from desktop client
+    if (msg.type === 'team_send') {
+      if (teamClient) {
+        await teamClient.sendHumanMessage((msg as any).message, (msg as any).to || null)
+      }
+    }
+
+    if (msg.type === 'get_team_info') {
+      if (teamClient && teamClient.teamId) {
+        send(ws, {
+          type: 'team_info',
+          team: { teamId: teamClient.teamId, name: teamClient.teamName || '', ownerId: '', created: '', members: teamClient.getRoster() }
+        } as any)
+      } else {
+        send(ws, { type: 'team_info', team: null } as any)
+      }
+    }
+
+    if (msg.type === 'team_history') {
+      if (teamClient && teamClient.teamId && process.env.RELAY_URL && process.env.RELAY_TOKEN) {
+        try {
+          const res = await fetch(`${process.env.RELAY_URL.replace(/\/$/, '')}/team/history?limit=${(msg as any).limit || 50}`, {
+            headers: { 'Authorization': `Bearer ${process.env.RELAY_TOKEN}` }
+          })
+          const messages = await res.json()
+          send(ws, { type: 'team_history', messages } as any)
+        } catch {}
+      }
+    }
 
   })
 })

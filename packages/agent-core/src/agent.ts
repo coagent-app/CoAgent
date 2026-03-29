@@ -6,6 +6,7 @@ import { createHash } from 'crypto'
 import { MCPManager, MCPServerConfig } from './mcp-manager.js'
 import { ApprovalQueue } from './queue.js'
 import { CalendarStore } from './calendar-store.js'
+import type { TeamClient } from '@coagent/team-core'
 import { searchEventStore, markEventsDone, getUnprocessedEvents } from './relay-client.js'
 import { readSettings, writeSettings } from './settings.js'
 import type { AgentSettings } from './settings.js'
@@ -430,6 +431,31 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
       required: ['tool_name', 'parameters']
     }
   },
+  {
+    name: 'send_team_message',
+    description: 'Send a message to your team channel. Use when your user asks you to share info with the team or notify someone. Set "to" to "@name-agent" for AI processing, "@name" for human notification, or omit for broadcast.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        message: { type: 'string', description: 'The visible message (humans see this)' },
+        agent_context: { type: 'string', description: 'Hidden context for other agents' },
+        to: { type: 'string', description: '@name-agent for AI, @name for human, omit for broadcast' }
+      },
+      required: ['message']
+    }
+  },
+  {
+    name: 'read_team',
+    description: 'Read recent team messages or get team roster.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        action: { type: 'string', enum: ['recent_messages', 'roster'], description: 'What to read' },
+        limit: { type: 'number', description: 'Number of recent messages (default 20)' }
+      },
+      required: ['action']
+    }
+  },
 ]
 
 // Map consolidated memory actions → MCP tool names
@@ -466,6 +492,8 @@ const TOOL_LABELS: Record<string, string> = {
   call_external_tool: 'Calling tool',
   create_custom_integration: 'Building custom integration',
   notify_user: 'Sending notification',
+  send_team_message: 'Messaging team',
+  read_team: 'Checking team',
 }
 
 // Action-specific labels for consolidated tools
@@ -540,7 +568,7 @@ function listMemoryFiles(dataDir: string): string[] {
   } catch { return [] }
 }
 
-function buildSystemPrompt(connectedServices: string[], agentProfilePath: string, settings: AgentSettings, dataDir: string): string {
+function buildSystemPrompt(connectedServices: string[], agentProfilePath: string, settings: AgentSettings, dataDir: string, teamRoster?: any[], teamName?: string): string {
   const isFirstRun = !existsSync(agentProfilePath)
   const memoryFiles = listMemoryFiles(dataDir)
 
@@ -581,7 +609,7 @@ Call multiple tools in one response when independent — faster and cheaper. Be 
 ${connectedServices.includes('coagent:imessage') ? `iMessage connected. Queue sends for approval unless autonomous.` : ''}
 ${connectedServices.includes('coagent:contacts') ? `Contacts connected via search_tools.` : ''}
 [voice] = voice input. 1-2 short spoken sentences, no markdown.
-Notifications: title 2-4 words, body one sentence.${onboardingSection}`
+Notifications: title 2-4 words, body one sentence.${onboardingSection}${teamRoster && teamRoster.length > 0 ? `\n\n## Team: ${teamName || 'Your Team'}\n\nYou are part of a team. Members:\n${teamRoster.map((m: any) => `- ${m.name} / @${m.userId}-agent (${m.role}): ${m.handles}`).join('\n')}\n\nUse send_team_message to share info or notify team members.\n@name-agent = their AI processes. @name = human notification. Omit "to" = broadcast.\nInclude agent_context with relevant details for receiving agents.` : ''}`
 }
 
 export class Agent {
@@ -589,6 +617,7 @@ export class Agent {
   public mcpManager: MCPManager
   public queue: ApprovalQueue
   public calendar: CalendarStore
+  public teamClient: TeamClient | null = null
   private conversationHistory: Anthropic.MessageParam[] = []
   private historyPath: string
   private agentProfilePath: string
@@ -831,12 +860,15 @@ export class Agent {
 
     // Memoize system prompt — only rebuild when services or settings actually change
     const memFileCount = listMemoryFiles(this.dataDir).length
-    const promptKey = connectedServices.join(',') + '|' + JSON.stringify(settings) + '|' + memFileCount
+    const teamRosterKey = this.teamClient ? `${this.teamClient.teamId}|${this.teamClient.getRoster().length}` : ''
+    const promptKey = connectedServices.join(',') + '|' + JSON.stringify(settings) + '|' + memFileCount + '|' + teamRosterKey
     let systemPrompt: string
     if (this.cachedSystemPrompt && this.cachedPromptKey === promptKey) {
       systemPrompt = this.cachedSystemPrompt
     } else {
-      systemPrompt = buildSystemPrompt(connectedServices, this.agentProfilePath, settings, this.dataDir)
+      const teamRoster = this.teamClient?.getRoster()
+      const teamName = this.teamClient?.teamName ?? undefined
+      systemPrompt = buildSystemPrompt(connectedServices, this.agentProfilePath, settings, this.dataDir, teamRoster, teamName)
       this.cachedSystemPrompt = systemPrompt
       this.cachedPromptKey = promptKey
       console.log('[Agent] System prompt rebuilt (settings or services changed)')
@@ -1439,6 +1471,35 @@ export class Agent {
                   // Result wasn't JSON or download failed — not a file-producing tool, that's fine
                 }
               }
+            }
+
+          } else if (block.name === 'send_team_message') {
+            const input = block.input as { message: string; agent_context?: string; to?: string }
+            if (!this.teamClient) {
+              result = 'Not connected to a team.'
+            } else {
+              const toField = input.to
+                ? (input.to.includes(',') ? input.to.split(',').map((s: string) => s.trim()) : input.to)
+                : null
+              await this.teamClient.sendMessage(input.message, input.agent_context || '', toField)
+              result = `Message sent to team${input.to ? ` (tagged: ${input.to})` : ''}.`
+            }
+
+          } else if (block.name === 'read_team') {
+            const input = block.input as { action: string; limit?: number }
+            if (!this.teamClient) {
+              result = 'Not connected to a team.'
+            } else if (input.action === 'roster') {
+              const roster = this.teamClient.getRoster()
+              result = roster.length > 0
+                ? `Team: ${this.teamClient.teamName}\nMembers:\n${roster.map((m: any) => `- ${m.name} / @${m.userId}-agent (${m.role}): ${m.handles}`).join('\n')}`
+                : 'No team members found.'
+            } else {
+              const log = await this.teamClient.getTeamLog().readLog()
+              const recent = log.slice(-(input.limit || 20))
+              result = recent.length > 0
+                ? recent.map((m: any) => `[${m.timestamp}] ${m.from.name} (${m.from.role}): ${m.visible}${m.agentContext ? `\n  [context: ${m.agentContext}]` : ''}`).join('\n\n')
+                : 'No recent team messages.'
             }
 
           } else if (block.name === 'create_custom_integration') {
