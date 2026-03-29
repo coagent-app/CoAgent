@@ -979,19 +979,20 @@ export default {
 
       // POST /team/create — create a new team
       if (request.method === 'POST' && url.pathname === '/team/create') {
-        const body = await request.json() as { name?: string; role?: string }
+        const body = await request.json() as { name?: string; memberName?: string; memberRole?: string; memberHandles?: string; userId?: string }
         const teamId = crypto.randomUUID()
         const inviteCode = generateToken().slice(0, 16)
 
+        const memberUserId = body.userId || String(userId)
         const teamMeta = {
           teamId,
           name: body.name || 'My Team',
-          createdBy: userId,
+          createdBy: memberUserId,
           createdAt: new Date().toISOString(),
         }
         await env.TOKENS.put(`team:${teamId}:meta`, JSON.stringify(teamMeta))
 
-        const members = [{ userId, name: String((tokenData as any).stripeCustomerId || userId), role: body.role || 'owner', joinedAt: new Date().toISOString() }]
+        const members = [{ userId: memberUserId, name: body.memberName || 'Owner', role: body.memberRole || 'owner', handles: body.memberHandles || '', joinedAt: new Date().toISOString() }]
         await env.TOKENS.put(`team:${teamId}:members`, JSON.stringify(members))
         await env.TOKENS.put(`team:invite:${inviteCode}`, teamId)
 
@@ -1004,18 +1005,19 @@ export default {
 
       // POST /team/join — join a team via invite code
       if (request.method === 'POST' && url.pathname === '/team/join') {
-        const body = await request.json() as { inviteCode?: string; role?: string; name?: string }
+        const body = await request.json() as { inviteCode?: string; userId?: string; memberName?: string; memberRole?: string; memberHandles?: string }
         if (!body.inviteCode) return jsonResponse({ error: 'Missing inviteCode' }, 400)
 
         const teamId = await env.TOKENS.get(`team:invite:${body.inviteCode}`)
         if (!teamId) return jsonResponse({ error: 'Invalid invite code' }, 404)
 
+        const memberUserId = body.userId || String(userId)
         const membersJson = await env.TOKENS.get(`team:${teamId}:members`)
-        const members: { userId: string; name: string; role: string; joinedAt: string }[] = membersJson ? JSON.parse(membersJson) : []
+        const members: { userId: string; name: string; role: string; handles: string; joinedAt: string }[] = membersJson ? JSON.parse(membersJson) : []
 
         // Avoid duplicate membership
-        if (!members.find(m => m.userId === userId)) {
-          members.push({ userId, name: body.name || String((tokenData as any).stripeCustomerId || userId), role: body.role || 'member', joinedAt: new Date().toISOString() })
+        if (!members.find(m => m.userId === memberUserId)) {
+          members.push({ userId: memberUserId, name: body.memberName || 'Member', role: body.memberRole || 'member', handles: body.memberHandles || '', joinedAt: new Date().toISOString() })
           await env.TOKENS.put(`team:${teamId}:members`, JSON.stringify(members))
         }
 
