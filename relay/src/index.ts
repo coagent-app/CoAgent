@@ -6,6 +6,7 @@ export interface Env {
   STRIPE_WEBHOOK_SECRET: string
   TOKENS: KVNamespace
   USER_SESSION: DurableObjectNamespace
+  TEAM_CHANNEL: DurableObjectNamespace
 }
 
 // --- Token data stored in KV ---
@@ -820,6 +821,137 @@ export class UserSession {
   }
 }
 
+// --- TeamChannel Durable Object ---
+
+export class TeamChannel {
+  private state: DurableObjectState
+  private env: Env
+
+  constructor(state: DurableObjectState, env: Env) {
+    this.state = state
+    this.env = env
+    this.state.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS messages (
+        id TEXT PRIMARY KEY,
+        timestamp TEXT NOT NULL,
+        from_user_id TEXT NOT NULL,
+        from_name TEXT NOT NULL,
+        from_role TEXT NOT NULL,
+        is_agent INTEGER NOT NULL DEFAULT 1,
+        visible TEXT NOT NULL,
+        agent_context TEXT NOT NULL DEFAULT '',
+        to_target TEXT,
+        attachments TEXT NOT NULL DEFAULT '[]',
+        created_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )
+    `)
+    this.state.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS offline_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
+        message_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )
+    `)
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url)
+
+    if (request.headers.get('Upgrade') === 'websocket') {
+      const userId = url.searchParams.get('userId') || 'unknown'
+      const pair = new WebSocketPair()
+      this.state.acceptWebSocket(pair[1], [userId])
+
+      const queued = this.state.storage.sql.exec(
+        `SELECT message_json FROM offline_queue WHERE user_id = ? ORDER BY created_at ASC`, userId
+      ).toArray()
+      for (const row of queued) {
+        pair[1].send(row.message_json as string)
+      }
+      this.state.storage.sql.exec(`DELETE FROM offline_queue WHERE user_id = ?`, userId)
+
+      return new Response(null, { status: 101, webSocket: pair[0] })
+    }
+
+    if (request.method === 'POST' && url.pathname === '/message') {
+      const msg = await request.json() as any
+
+      this.state.storage.sql.exec(
+        `INSERT INTO messages (id, timestamp, from_user_id, from_name, from_role, is_agent, visible, agent_context, to_target, attachments) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        msg.id, msg.timestamp, msg.from.userId, msg.from.name, msg.from.role,
+        msg.from.isAgent ? 1 : 0, msg.visible, msg.agentContext || '',
+        JSON.stringify(msg.to), JSON.stringify(msg.attachments || [])
+      )
+
+      this.state.storage.sql.exec(
+        `DELETE FROM messages WHERE id NOT IN (SELECT id FROM messages ORDER BY created_at DESC LIMIT 500)`
+      )
+
+      const msgJson = JSON.stringify({ type: 'team_message', message: msg })
+
+      const sockets = this.state.getWebSockets()
+      const connectedUserIds = new Set<string>()
+      for (const ws of sockets) {
+        const tags = this.state.getTags(ws)
+        const uid = tags[0] || 'unknown'
+        connectedUserIds.add(uid)
+        if (uid !== msg.from.userId) {
+          ws.send(msgJson)
+        }
+      }
+
+      const teamKey = url.searchParams.get('teamId')
+      if (teamKey) {
+        const membersJson = await this.env.TOKENS.get(`team:${teamKey}:members`)
+        if (membersJson) {
+          const members = JSON.parse(membersJson) as { userId: string }[]
+          for (const member of members) {
+            if (!connectedUserIds.has(member.userId) && member.userId !== msg.from.userId) {
+              this.state.storage.sql.exec(
+                `INSERT INTO offline_queue (user_id, message_json) VALUES (?, ?)`,
+                member.userId, msgJson
+              )
+            }
+          }
+        }
+      }
+
+      return new Response('OK', { status: 200 })
+    }
+
+    if (request.method === 'GET' && url.pathname === '/history') {
+      const limit = parseInt(url.searchParams.get('limit') || '50')
+      const rows = this.state.storage.sql.exec(
+        `SELECT * FROM messages ORDER BY created_at DESC LIMIT ?`, limit
+      ).toArray()
+
+      const messages = rows.reverse().map((r: any) => ({
+        id: r.id,
+        teamId: url.searchParams.get('teamId') || '',
+        timestamp: r.timestamp,
+        from: { userId: r.from_user_id, name: r.from_name, role: r.from_role, isAgent: r.is_agent === 1 },
+        visible: r.visible,
+        agentContext: r.agent_context,
+        to: JSON.parse(r.to_target || 'null'),
+        attachments: JSON.parse(r.attachments)
+      }))
+
+      return new Response(JSON.stringify(messages), {
+        headers: { 'Content-Type': 'application/json' }
+      })
+    }
+
+    return new Response('Not found', { status: 404 })
+  }
+
+  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
+    if (message === 'ping') { ws.send('pong'); return }
+  }
+
+  async webSocketClose(_ws: WebSocket) {}
+}
+
 // --- Main router ---
 
 export default {
@@ -834,6 +966,138 @@ export default {
     // --- Stripe webhook ---
     if (request.method === 'POST' && url.pathname === '/stripe/webhook') {
       return handleStripeWebhook(request, env)
+    }
+
+    // --- Team endpoints ---
+
+    if (url.pathname.startsWith('/team/')) {
+      const token = request.headers.get('Authorization')?.replace('Bearer ', '') || request.headers.get('x-api-key') || ''
+      const authResult = await validateRequest(request, env)
+      if (authResult instanceof Response) return authResult
+      const tokenData = authResult.data
+      const userId = String((tokenData as any).userId)
+
+      // POST /team/create — create a new team
+      if (request.method === 'POST' && url.pathname === '/team/create') {
+        const body = await request.json() as { name?: string; role?: string }
+        const teamId = crypto.randomUUID()
+        const inviteCode = generateToken().slice(0, 16)
+
+        const teamMeta = {
+          teamId,
+          name: body.name || 'My Team',
+          createdBy: userId,
+          createdAt: new Date().toISOString(),
+        }
+        await env.TOKENS.put(`team:${teamId}:meta`, JSON.stringify(teamMeta))
+
+        const members = [{ userId, name: String((tokenData as any).stripeCustomerId || userId), role: body.role || 'owner', joinedAt: new Date().toISOString() }]
+        await env.TOKENS.put(`team:${teamId}:members`, JSON.stringify(members))
+        await env.TOKENS.put(`team:invite:${inviteCode}`, teamId)
+
+        // Associate user token with team
+        ;(tokenData as any).teamId = teamId
+        await saveToken(env, token, tokenData)
+
+        return jsonResponse({ ok: true, teamId, inviteCode, team: teamMeta })
+      }
+
+      // POST /team/join — join a team via invite code
+      if (request.method === 'POST' && url.pathname === '/team/join') {
+        const body = await request.json() as { inviteCode?: string; role?: string; name?: string }
+        if (!body.inviteCode) return jsonResponse({ error: 'Missing inviteCode' }, 400)
+
+        const teamId = await env.TOKENS.get(`team:invite:${body.inviteCode}`)
+        if (!teamId) return jsonResponse({ error: 'Invalid invite code' }, 404)
+
+        const membersJson = await env.TOKENS.get(`team:${teamId}:members`)
+        const members: { userId: string; name: string; role: string; joinedAt: string }[] = membersJson ? JSON.parse(membersJson) : []
+
+        // Avoid duplicate membership
+        if (!members.find(m => m.userId === userId)) {
+          members.push({ userId, name: body.name || String((tokenData as any).stripeCustomerId || userId), role: body.role || 'member', joinedAt: new Date().toISOString() })
+          await env.TOKENS.put(`team:${teamId}:members`, JSON.stringify(members))
+        }
+
+        ;(tokenData as any).teamId = teamId
+        await saveToken(env, token, tokenData)
+
+        const metaJson = await env.TOKENS.get(`team:${teamId}:meta`)
+        const meta = metaJson ? JSON.parse(metaJson) : { teamId }
+        return jsonResponse({ ok: true, teamId, team: meta, members })
+      }
+
+      // GET /team/roster — get team info and members
+      if (request.method === 'GET' && url.pathname === '/team/roster') {
+        const teamId = url.searchParams.get('teamId') || (tokenData as any).teamId
+        if (!teamId) return jsonResponse({ error: 'No team associated with this token' }, 404)
+
+        const [metaJson, membersJson] = await Promise.all([
+          env.TOKENS.get(`team:${teamId}:meta`),
+          env.TOKENS.get(`team:${teamId}:members`),
+        ])
+        if (!metaJson) return jsonResponse({ error: 'Team not found' }, 404)
+
+        const meta = JSON.parse(metaJson)
+        const members = membersJson ? JSON.parse(membersJson) : []
+        return jsonResponse({ team: meta, members })
+      }
+
+      // POST /team/invite — generate a new invite code
+      if (request.method === 'POST' && url.pathname === '/team/invite') {
+        const teamId = (tokenData as any).teamId
+        if (!teamId) return jsonResponse({ error: 'No team associated with this token' }, 404)
+
+        const inviteCode = generateToken().slice(0, 16)
+        await env.TOKENS.put(`team:invite:${inviteCode}`, teamId)
+        return jsonResponse({ ok: true, inviteCode })
+      }
+
+      // GET /team/ws — WebSocket upgrade to TeamChannel DO
+      if (request.headers.get('Upgrade') === 'websocket' && url.pathname === '/team/ws') {
+        const teamId = url.searchParams.get('teamId') || (tokenData as any).teamId
+        if (!teamId) return new Response('No team associated with this token', { status: 404 })
+
+        const doId = env.TEAM_CHANNEL.idFromName(teamId)
+        const stub = env.TEAM_CHANNEL.get(doId)
+        // Forward with userId so the DO can tag the socket
+        const doUrl = new URL(request.url)
+        doUrl.searchParams.set('userId', userId)
+        return stub.fetch(new Request(doUrl.toString(), request))
+      }
+
+      // POST /team/message — send message via REST to TeamChannel DO
+      if (request.method === 'POST' && url.pathname === '/team/message') {
+        const teamId = url.searchParams.get('teamId') || (tokenData as any).teamId
+        if (!teamId) return jsonResponse({ error: 'No team associated with this token' }, 404)
+
+        const doId = env.TEAM_CHANNEL.idFromName(teamId)
+        const stub = env.TEAM_CHANNEL.get(doId)
+        const doUrl = `https://internal/message?teamId=${teamId}`
+        return stub.fetch(new Request(doUrl, {
+          method: 'POST',
+          body: request.body,
+          headers: { 'Content-Type': 'application/json' },
+        }))
+      }
+
+      // GET /team/history — get message history from TeamChannel DO
+      if (request.method === 'GET' && url.pathname === '/team/history') {
+        const teamId = url.searchParams.get('teamId') || (tokenData as any).teamId
+        if (!teamId) return jsonResponse({ error: 'No team associated with this token' }, 404)
+
+        const limit = url.searchParams.get('limit') || '50'
+        const doId = env.TEAM_CHANNEL.idFromName(teamId)
+        const stub = env.TEAM_CHANNEL.get(doId)
+        const doUrl = `https://internal/history?teamId=${teamId}&limit=${limit}`
+        const res = await stub.fetch(new Request(doUrl))
+        return new Response(res.body, {
+          status: res.status,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders() },
+        })
+      }
+
+      return jsonResponse({ error: 'Not found' }, 404)
     }
 
     // WebSocket connection

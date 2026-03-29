@@ -10,6 +10,14 @@ id = "8d749fb9446e41eb987d9d6f39a72486"
 name = "USER_SESSION"
 class_name = "UserSession"
 
+[[durable_objects.bindings]]
+name = "TEAM_CHANNEL"
+class_name = "TeamChannel"
+
 [[migrations]]
 tag = "v3"
 new_sqlite_classes = ["UserSession"]
+
+[[migrations]]
+tag = "v4"
+new_sqlite_classes = ["TeamChannel"]
