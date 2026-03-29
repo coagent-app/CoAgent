@@ -947,9 +947,9 @@ try {
   const { execSync } = require('child_process')
   if (process.platform === 'win32') {
     const out = execSync(`netstat -ano | findstr ":${PORT}" | findstr LISTENING`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }).trim()
-    const pids = [...new Set(out.split('\n').map((l: string) => l.trim().split(/\s+/).pop()).filter(Boolean))]
+    const pids: string[] = out.split('\n').map((l: string) => l.trim().split(/\s+/).pop() || '').filter(Boolean)
     const myPid = String(process.pid)
-    const stale = pids.filter((p: string) => p !== myPid)
+    const stale = pids.filter(p => p !== myPid)
     if (stale.length > 0) {
       for (const pid of stale) { try { execSync(`taskkill /PID ${pid} /F`, { stdio: 'ignore' }) } catch {} }
       console.log(`[Server] Killed stale process(es) on port ${PORT}: ${stale.join(', ')}`)
