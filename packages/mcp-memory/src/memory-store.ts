@@ -237,7 +237,7 @@ export class MemoryStore {
 
     return results
       .filter(r => r.path && r.content)
-      .filter(r => (r._distance as number ?? 999) < 1.0) // drop low-confidence matches
+      .filter(r => (r._distance as number ?? 999) < 1.5) // drop low-confidence matches
       .map(r => ({
         path: r.path as string,
         chunkIndex: (r.chunkIndex as number) ?? 0,
