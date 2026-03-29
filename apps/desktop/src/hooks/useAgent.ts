@@ -45,6 +45,8 @@ export function useAgent() {
   const [isAdmin, setIsAdmin] = useState(false)
   const [adminUsers, setAdminUsers] = useState<AdminUser[]>([])
   const [adminNewToken, setAdminNewToken] = useState<{ token: string; userId: string } | null>(null)
+  const [teamInfo, setTeamInfo] = useState<any>(null)
+  const [teamMessages, setTeamMessages] = useState<any[]>([])
 
   useEffect(() => {
     let unmounted = false
@@ -56,6 +58,8 @@ export function useAgent() {
       socket.onopen = () => {
         setConnected(true)
         reconnectDelay.current = RECONNECT_BASE
+        socket.send(JSON.stringify({ type: 'get_team_info' }))
+        socket.send(JSON.stringify({ type: 'team_history', limit: 50 }))
       }
 
       socket.onclose = () => {
@@ -195,6 +199,9 @@ export function useAgent() {
         if (msg.type === 'admin_token_toggled') {
           setAdminUsers(prev => prev.map(u => u.token === msg.token ? { ...u, active: msg.active } : u))
         }
+        if ((msg as any).type === 'team_info') setTeamInfo((msg as any).team)
+        if ((msg as any).type === 'team_message') setTeamMessages(prev => [...prev, (msg as any).message])
+        if ((msg as any).type === 'team_history') setTeamMessages((msg as any).messages)
         if (msg.type === 'error') { setError(msg.message); setTimeout(() => setError(null), 5000) }
         if (msg.type === 'integration_needs_fields') {
           setPendingFields({ slug: msg.slug, fields: msg.fields })
@@ -442,5 +449,17 @@ export function useAgent() {
     setAdminNewToken(null)
   }, [])
 
-  return { queue, done, messages, streamingText, thinking, processing, toolLabel, connected, lastHeartbeat, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, pendingFields, setPendingFields, setModel, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken }
+  const sendTeamMessage = useCallback((message: string, to?: string) => {
+    send({ type: 'team_send', message, to } as any)
+  }, [send])
+
+  const getTeamInfo = useCallback(() => {
+    send({ type: 'get_team_info' } as any)
+  }, [send])
+
+  const getTeamHistory = useCallback((limit = 50) => {
+    send({ type: 'team_history', limit } as any)
+  }, [send])
+
+  return { queue, done, messages, streamingText, thinking, processing, toolLabel, connected, lastHeartbeat, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, pendingFields, setPendingFields, setModel, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, sendTeamMessage, getTeamInfo, getTeamHistory }
 }

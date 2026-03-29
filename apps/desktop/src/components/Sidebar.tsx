@@ -1,7 +1,7 @@
 import React from 'react'
 import {
   Inbox, MessageSquare, Settings,
-  ChevronRight, FolderOpen, Sun, Moon, Calendar as CalendarIcon, Zap
+  ChevronRight, FolderOpen, Sun, Moon, Calendar as CalendarIcon, Zap, Users
 } from 'lucide-react'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
@@ -9,7 +9,7 @@ import { Separator } from '@/components/ui/separator'
 import { cn } from '@/lib/utils'
 import type { Integration } from '@coagent/shared'
 
-export type View = 'chat' | 'calendar' | 'queue' | 'files' | 'skills' | 'settings'
+export type View = 'chat' | 'calendar' | 'queue' | 'files' | 'skills' | 'settings' | 'team'
 
 interface SidebarProps {
   view: View
@@ -136,6 +136,7 @@ export function Sidebar({ view, onViewChange, queueCount, integrations, onConnec
         <NavItem icon={CalendarIcon} label="Schedule" active={view === 'calendar'} onClick={() => onViewChange('calendar')} />
         <NavItem icon={Inbox} label="Queue" active={view === 'queue'} onClick={() => onViewChange('queue')} badge={queueCount} />
         <NavItem icon={FolderOpen} label="Files" active={view === 'files'} onClick={() => onViewChange('files')} />
+        <NavItem icon={Users} label="Team" active={view === 'team'} onClick={() => onViewChange('team')} />
       </div>
 
       <Separator className="my-3 dark:bg-neutral-800" />
