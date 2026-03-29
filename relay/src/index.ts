@@ -626,6 +626,7 @@ async function handleMessagesProxy(request: Request, env: Env, ctx: ExecutionCon
 export class UserSession {
   private state: DurableObjectState
   private env: Env
+  private cachedChatHistory: string | null = null
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state
@@ -639,6 +640,8 @@ export class UserSession {
           received_at TEXT NOT NULL
         )
       `)
+      // Restore cached chat history from storage
+      this.cachedChatHistory = (await this.state.storage.get<string>('chat_history')) ?? null
     })
   }
 
@@ -647,8 +650,22 @@ export class UserSession {
 
     // WebSocket upgrade — queued events flush on first client ping, not during handshake
     if (request.headers.get('Upgrade') === 'websocket') {
+      // Notify existing sockets that a new client connected (triggers state dump from agent)
+      const existing = this.state.getWebSockets()
+      if (existing.length > 0) {
+        const notify = JSON.stringify({ type: 'client_connected' })
+        for (const s of existing) {
+          try { s.send(notify) } catch { /* stale */ }
+        }
+      }
       const pair = new WebSocketPair()
-      this.state.acceptWebSocket(pair[1])
+      // Tag socket with client type so we can distinguish desktop/mobile later
+      const clientType = url.searchParams.get('client') || 'unknown'
+      this.state.acceptWebSocket(pair[1], [clientType])
+      // Send cached chat history directly to new client — no round-trip needed
+      if (this.cachedChatHistory) {
+        try { pair[1].send(this.cachedChatHistory) } catch { /* ignore */ }
+      }
       return new Response(null, { status: 101, webSocket: pair[0] })
     }
 
@@ -683,6 +700,56 @@ export class UserSession {
       // Flush any queued webhooks on ping (no-op when queue is empty)
       this.flushQueue(ws)
       ws.send('pong')
+      return
+    }
+
+    const data = typeof message === 'string' ? message : new TextDecoder().decode(message)
+
+    // Intercept push-management messages from mobile — handle in relay, don't forward
+    try {
+      const parsed = JSON.parse(data)
+      if (parsed?.type === 'register_push_token') {
+        this.state.storage.put('push_token', parsed.token)
+        console.log('[UserSession] Push token registered')
+        return
+      }
+      if (parsed?.type === 'update_notification_prefs') {
+        this.state.storage.put('notification_mode', parsed.mode)
+        console.log('[UserSession] Notification prefs updated:', parsed.mode)
+        return
+      }
+
+      // Intercept push_notification from agent — send Expo push + broadcast to clients
+      if (parsed?.type === 'push_notification') {
+        void this.maybeSendPush(parsed.title, parsed.body)
+        // Still broadcast so connected mobile clients can show in-app notification
+      }
+
+      // Cache chat_history and chat_response so new clients get history instantly
+      if (parsed?.type === 'chat_history') {
+        this.cachedChatHistory = data
+        this.state.storage.put('chat_history', data)
+      } else if (parsed?.type === 'chat_response') {
+        // Append new message to cached history
+        if (this.cachedChatHistory) {
+          try {
+            const cached = JSON.parse(this.cachedChatHistory)
+            cached.messages.push(parsed.message)
+            // Keep last 50 messages
+            if (cached.messages.length > 50) cached.messages = cached.messages.slice(-50)
+            this.cachedChatHistory = JSON.stringify(cached)
+            this.state.storage.put('chat_history', this.cachedChatHistory)
+          } catch { /* ignore parse errors */ }
+        }
+      }
+    } catch { /* non-JSON, skip caching */ }
+
+    // Broadcast to all OTHER connected sockets (agent ↔ mobile relay)
+    const sockets = this.state.getWebSockets()
+    for (const s of sockets) {
+      if (s !== ws) {
+        try { s.send(data) } catch { /* stale socket, ignore */ }
+      }
     }
   }
 
@@ -692,6 +759,40 @@ export class UserSession {
 
   webSocketError(ws: WebSocket, _error: unknown): void {
     ws.close(1011, 'WebSocket error')
+  }
+
+  /**
+   * Send an Expo push notification if conditions allow.
+   * Modes: always, away_only (default), never
+   */
+  private async maybeSendPush(title: string, body: string): Promise<void> {
+    const pushToken = await this.state.storage.get<string>('push_token')
+    if (!pushToken) return
+
+    const mode = (await this.state.storage.get<string>('notification_mode')) || 'away_only'
+    if (mode === 'never') return
+
+    // For 'away_only', check if a desktop client is connected
+    if (mode === 'away_only') {
+      const desktopSockets = this.state.getWebSockets('desktop')
+      if (desktopSockets.length > 0) return
+    }
+
+    try {
+      await fetch('https://exp.host/--/api/v2/push/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: pushToken,
+          title,
+          body,
+          sound: 'default',
+        }),
+      })
+      console.log('[UserSession] Push sent:', title)
+    } catch (err) {
+      console.error('[UserSession] Push failed:', err)
+    }
   }
 
   private flushQueue(ws: WebSocket): void {

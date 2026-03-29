@@ -1,0 +1,47 @@
+{
+  "expo": {
+    "name": "CoAgent",
+    "slug": "coagent-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "coagent",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.coagent.mobile",
+      "associatedDomains": [
+        "applinks:coagent.app"
+      ]
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Camera is used to scan QR codes for pairing with your CoAgent desktop."
+        }
+      ],
+      [
+        "expo-av",
+        {
+          "microphonePermission": "Microphone is used for voice conversations with your agent."
+        }
+      ],
+      "expo-secure-store",
+      "expo-audio"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "router": {
+        "origin": false
+      },
+      "eas": {
+        "projectId": "427fb8aa-cc70-41e2-b658-b01d47c4062a"
+      }
+    },
+    "owner": "brettponters"
+  }
+}

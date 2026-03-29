@@ -261,7 +261,11 @@ export class RelayClient {
     const token = process.env.RELAY_TOKEN ?? ''
     const wsBase = base.replace(/^http/, 'ws').replace(/\/$/, '')
     let url = `${wsBase}/ws/${userId}`
-    if (token) url += `?token=${encodeURIComponent(token)}`
+    if (token) {
+      url += `?token=${encodeURIComponent(token)}&client=desktop`
+    } else {
+      url += `?client=desktop`
+    }
     return url
   }
 

@@ -329,19 +329,30 @@ export async function searchToolsAndSchema(
       const schemas: { tool: string; params: string[]; score: number }[] = []
       const topForSchema = maxScored.slice(0, schemaLimit).filter(s => s.score > 0.35)
 
-      for (const { name, score } of topForSchema) {
-        const details = paramDetails.get(name) || []
-        const requiredParams = details.filter(d => d.required).map(d => d.param)
-        // Always include top params by score so the agent has enough to call the tool
-        const topOptional = details
-          .filter(d => !d.required)
-          .sort((a, b) => b.score - a.score)
-          .slice(0, 8)
-          .map(d => d.param)
-        const allParams = [...new Set([...requiredParams, ...topOptional])]
+      // Tools with complex schemas that need all params shown (no filtering)
+      const FULL_SCHEMA_PREFIXES = ['GOOGLESHEETS_', 'EXCEL_']
 
-        console.log(`[ToolEmbed] Schema "${schema}" → ${name}(${score.toFixed(2)}): required=[${requiredParams.join(',')}] top=[${topOptional.join(',')}]`)
-        schemas.push({ tool: name, params: allParams, score })
+      for (const { name, score } of topForSchema) {
+        const showAll = FULL_SCHEMA_PREFIXES.some(p => name.startsWith(p))
+
+        if (showAll) {
+          // Return empty params array — formatSchemaForResult shows all params when empty
+          console.log(`[ToolEmbed] Schema "${schema}" → ${name}(${score.toFixed(2)}): FULL SCHEMA (complex tool)`)
+          schemas.push({ tool: name, params: [], score })
+        } else {
+          const details = paramDetails.get(name) || []
+          const requiredParams = details.filter(d => d.required).map(d => d.param)
+          // Always include top params by score so the agent has enough to call the tool
+          const topOptional = details
+            .filter(d => !d.required)
+            .sort((a, b) => b.score - a.score)
+            .slice(0, 8)
+            .map(d => d.param)
+          const allParams = [...new Set([...requiredParams, ...topOptional])]
+
+          console.log(`[ToolEmbed] Schema "${schema}" → ${name}(${score.toFixed(2)}): required=[${requiredParams.join(',')}] top=[${topOptional.join(',')}]`)
+          schemas.push({ tool: name, params: allParams, score })
+        }
       }
 
       if (matched.length > 0) return { matches: matched, schemas }

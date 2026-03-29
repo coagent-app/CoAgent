@@ -169,7 +169,7 @@ export function handleTtsChunk(base64Chunk: string, seq: number) {
     if (ttsAudio) { ttsAudio.pause(); ttsAudio = null }
     if (ttsStreamUrl) { URL.revokeObjectURL(ttsStreamUrl); ttsStreamUrl = null }
     // Build blob from what we have so far and start playing
-    const blob = new Blob(ttsChunks, { type: 'audio/ogg; codecs=opus' })
+    const blob = new Blob(ttsChunks as BlobPart[], { type: 'audio/ogg; codecs=opus' })
     ttsStreamUrl = URL.createObjectURL(blob)
     const audio = new Audio(ttsStreamUrl)
     ttsAudio = audio
@@ -181,7 +181,7 @@ export function handleTtsChunk(base64Chunk: string, seq: number) {
 export function handleTtsDone() {
   // Rebuild the full blob and swap the audio source for complete playback
   if (ttsChunks.length === 0) return
-  const fullBlob = new Blob(ttsChunks, { type: 'audio/ogg; codecs=opus' })
+  const fullBlob = new Blob(ttsChunks as BlobPart[], { type: 'audio/ogg; codecs=opus' })
   const fullUrl = URL.createObjectURL(fullBlob)
 
   if (ttsAudio) {

@@ -22,6 +22,7 @@
     "date-fns": "^4.1.0",
     "lucide-react": "^0.575.0",
     "pdfjs-dist": "^5.4.624",
+    "qrcode": "^1.5.4",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
     "react-markdown": "^10.1.0",
@@ -32,6 +33,7 @@
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",
     "@types/node": "^20.19.33",
+    "@types/qrcode": "^1.5.6",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.0.0",

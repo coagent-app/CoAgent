@@ -1,5 +1,7 @@
 export type Autonomy = 'ask_first' | 'balanced' | 'autonomous'
 
+export type NotificationMode = 'always' | 'away_only' | 'never'
+
 export type AuthMethod = 'api_key' | 'oauth_token'
 
 export interface AuthStatus {
@@ -147,7 +149,7 @@ export type WSClientMessage =
   | { type: 'get_relay_status' }
   | { type: 'set_model'; model: string }
   | { type: 'voice_chat'; message: string }
-  | { type: 'voice_audio'; data: string }
+  | { type: 'voice_audio'; data: string; format?: 'm4a' | 'webm' }
   | { type: 'get_usage' }
   | { type: 'auto_organize' }
   | { type: 'get_calendar' }
@@ -159,6 +161,12 @@ export type WSClientMessage =
   | { type: 'update_skill'; name: string; description: string; instructions: string }
   | { type: 'delete_skill'; name: string }
   | { type: 'toggle_trigger'; triggerSlug: string; appSlug: string; enabled: boolean }
+  | { type: 'client_connected' }
+  | { type: 'get_relay_credentials' }
+  | { type: 'get_chat_history' }
+  | { type: 'get_file_content'; id: string }
+  | { type: 'register_push_token'; token: string }
+  | { type: 'update_notification_prefs'; mode: NotificationMode }
 
 export type WSServerMessage =
   | { type: 'queue_update'; items: ApprovalItem[] }
@@ -194,8 +202,13 @@ export type WSServerMessage =
   | { type: 'usage_update'; usage: UsageSummary }
   | { type: 'auto_organize_done'; folders: string[]; moved: number }
   | { type: 'calendar_update'; entries: CalendarEntry[] }
+  | { type: 'file_content'; id: string; filename: string; mimeType: string; data: string }
+  | { type: 'file_content_error'; id: string; error: string }
   | { type: 'capability_card'; name: string; capabilities: { name: string; description: string; checked: boolean }[] }
   | { type: 'whatsapp_qr'; dataUrl: string }
+  | { type: 'relay_credentials'; relayUrl: string; token: string; userId: string }
+  | { type: 'push_notification'; title: string; body: string }
+  | { type: 'notification_prefs'; mode: NotificationMode }
 
 export interface RelayUsage {
   inputTokens: number

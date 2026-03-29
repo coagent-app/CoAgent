@@ -24,6 +24,7 @@ export class RelayDO implements DurableObject {
   private token: string | null = null
   private agentSocket: WebSocket | null = null
   private clientSockets: Set<WebSocket> = new Set()
+  private clientTypes: Map<WebSocket, string> = new Map()
 
   constructor(state: DurableObjectState, env: DoEnv) {
     this.storage = state.storage
@@ -50,7 +51,7 @@ export class RelayDO implements DurableObject {
       case 'agent':
         return this.handleAgentUpgrade(request, url)
       case 'client':
-        return this.handleClientUpgrade(request)
+        return this.handleClientUpgrade(request, url)
       case 'webhook':
         return this.handleWebhook(request)
       default:
@@ -101,8 +102,18 @@ export class RelayDO implements DurableObject {
     this.agentSocket = server
 
     server.addEventListener('message', (event: MessageEvent) => {
-      // Agent -> broadcast to all connected clients.
-      this.broadcastToClients(event.data as string)
+      const data = event.data as string
+      // Intercept push_notification — deliver via Expo push AND broadcast to connected clients.
+      try {
+        const parsed = JSON.parse(data)
+        if (parsed?.type === 'push_notification') {
+          this.broadcastToClients(data) // In-app display for any connected clients
+          void this.maybeSendPush(parsed.title, parsed.body)
+          return
+        }
+      } catch { /* non-JSON — fall through */ }
+      // Normal: broadcast to all clients.
+      this.broadcastToClients(data)
     })
 
     server.addEventListener('close', () => {
@@ -126,7 +137,7 @@ export class RelayDO implements DurableObject {
   // Client connection (mobile / browser)
   // ---------------------------------------------------------------------------
 
-  private handleClientUpgrade(request: Request): Response {
+  private handleClientUpgrade(request: Request, url: URL): Response {
     if (request.headers.get('Upgrade') !== 'websocket') {
       return new Response('Expected WebSocket upgrade', { status: 426 })
     }
@@ -136,28 +147,50 @@ export class RelayDO implements DurableObject {
       return new Response('Agent not registered for this user', { status: 503 })
     }
 
-    if (!this.validateToken(request, new URL(request.url))) {
+    if (!this.validateToken(request, url)) {
       return new Response('Unauthorized', { status: 401 })
     }
+
+    const clientType = url.searchParams.get('client') || 'unknown'
 
     const { 0: client, 1: server } = new WebSocketPair()
 
     server.accept()
     this.clientSockets.add(server)
+    this.clientTypes.set(server, clientType)
+
+    // Tell agent a new client connected so it sends full state
+    this.forwardToAgent(JSON.stringify({ type: 'client_connected' }))
 
     server.addEventListener('message', (event: MessageEvent) => {
-      // Client -> forward to agent.
-      this.forwardToAgent(event.data as string)
+      const data = event.data as string
+      // Intercept push-management messages — handle in relay, don't forward to agent.
+      try {
+        const parsed = JSON.parse(data)
+        if (parsed?.type === 'register_push_token') {
+          void this.storage.put('push_token', parsed.token)
+          console.log('[RelayDO] Push token registered')
+          return
+        }
+        if (parsed?.type === 'update_notification_prefs') {
+          void this.storage.put('notification_mode', parsed.mode)
+          console.log('[RelayDO] Notification prefs updated:', parsed.mode)
+          return
+        }
+      } catch { /* non-JSON — fall through */ }
+      // Normal client message: forward to agent.
+      this.forwardToAgent(data)
     })
 
     const cleanup = (): void => {
       this.clientSockets.delete(server)
+      this.clientTypes.delete(server)
     }
 
     server.addEventListener('close', cleanup)
     server.addEventListener('error', cleanup)
 
-    console.log('[RelayDO] Client connected; total clients:', this.clientSockets.size)
+    console.log('[RelayDO] Client connected (type:', clientType, '); total clients:', this.clientSockets.size)
     return new Response(null, { status: 101, webSocket: client })
   }
 
@@ -248,6 +281,44 @@ export class RelayDO implements DurableObject {
     const headerToken = request.headers.get('X-Secret-Token')
     const queryToken = url.searchParams.get('token')
     return headerToken === this.token || queryToken === this.token
+  }
+
+  /**
+   * Send an Expo push notification if conditions allow.
+   *
+   * Modes (stored in durable storage as 'notification_mode'):
+   *   always     — always send push
+   *   away_only  — send push; TODO: suppress when desktop UI is in foreground
+   *                (not yet detectable from relay since the Tauri app connects
+   *                as the agent, not as a client socket)
+   *   never      — never send push
+   */
+  private async maybeSendPush(title: string, body: string): Promise<void> {
+    const pushToken = await this.storage.get<string>('push_token')
+    if (!pushToken) return
+
+    const mode = (await this.storage.get<string>('notification_mode')) || 'away_only'
+    if (mode === 'never') return
+
+    // mode === 'always' or 'away_only' — both send for now.
+    // Future: when a desktop client mechanism is available, 'away_only' can
+    // suppress the push while the desktop UI is in the foreground.
+
+    try {
+      await fetch('https://exp.host/--/api/v2/push/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: pushToken,
+          title,
+          body,
+          sound: 'default',
+        }),
+      })
+      console.log('[RelayDO] Push sent:', title)
+    } catch (err) {
+      console.error('[RelayDO] Push failed:', err)
+    }
   }
 
   /**

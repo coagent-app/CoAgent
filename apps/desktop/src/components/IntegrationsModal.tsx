@@ -2,10 +2,17 @@ import React, { useEffect, useState } from 'react'
 import { X, ArrowLeft } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { Integration } from '@coagent/shared'
+import QRCode from 'qrcode'
 
 interface PendingFields {
   slug: string
   fields: { name: string; displayName: string; description: string; helpUrl?: string; helpText?: string }[]
+}
+
+interface RelayCredentials {
+  relayUrl: string
+  token: string
+  userId: string
 }
 
 interface IntegrationsModalProps {
@@ -18,13 +25,37 @@ interface IntegrationsModalProps {
   pendingFields: PendingFields | null
   onClearPendingFields: () => void
   whatsappQr?: string | null
+  relayCredentials?: RelayCredentials | null
   onToggleTrigger?: (triggerSlug: string, appSlug: string, enabled: boolean) => void
 }
 
-export function IntegrationsModal({ open, onClose, integrations, onConnect, onDisconnect, onDelete, pendingFields, onClearPendingFields, whatsappQr, onToggleTrigger }: IntegrationsModalProps) {
+export function IntegrationsModal({ open, onClose, integrations, onConnect, onDisconnect, onDelete, pendingFields, onClearPendingFields, whatsappQr, relayCredentials, onToggleTrigger }: IntegrationsModalProps) {
   const [search, setSearch] = useState('')
   const [fieldValues, setFieldValues] = useState<Record<string, string>>({})
   const [detailSlug, setDetailSlug] = useState<string | null>(null)
+  const [mobileQrDataUrl, setMobileQrDataUrl] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!relayCredentials?.relayUrl || !relayCredentials.token) {
+      setMobileQrDataUrl(null)
+      return
+    }
+    const payload = JSON.stringify({
+      relayUrl: relayCredentials.relayUrl,
+      token: relayCredentials.token,
+      userId: relayCredentials.userId,
+    })
+    QRCode.toDataURL(payload, { width: 192, margin: 2 })
+      .then(url => setMobileQrDataUrl(url))
+      .catch(() => setMobileQrDataUrl(null))
+  }, [relayCredentials])
+
+  // Auto-fetch relay credentials when the mobile detail view is opened
+  useEffect(() => {
+    if (detailSlug === 'coagent:mobile') {
+      onConnect('coagent:mobile')
+    }
+  }, [detailSlug])
 
   // Reset field values when pending fields change
   useEffect(() => {
@@ -141,7 +172,13 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
               {/* App identity */}
               <div className="flex items-center gap-4 mb-5">
                 <div className="w-10 h-10 rounded-xl border border-neutral-100 dark:border-neutral-800 flex items-center justify-center bg-white dark:bg-neutral-800 flex-shrink-0">
-                  {detailIntegration.slug === 'coagent:whatsapp' ? (
+                  {detailIntegration.slug === 'coagent:mobile' ? (
+                    <svg className="w-6 h-6" viewBox="0 0 32 32" fill="none">
+                      <rect width="32" height="32" rx="7" fill="#1C1C1E"/>
+                      <rect x="11" y="6" width="10" height="20" rx="2" stroke="white" strokeWidth="1.5" fill="none"/>
+                      <circle cx="16" cy="23" r="1" fill="white"/>
+                    </svg>
+                  ) : detailIntegration.slug === 'coagent:whatsapp' ? (
                     <svg className="w-6 h-6" viewBox="0 0 32 32" fill="none">
                       <rect width="32" height="32" rx="7" fill="#25D366"/>
                       <path d="M16 7.5c-4.694 0-8.5 3.806-8.5 8.5 0 1.497.39 2.9 1.07 4.115L7.5 24.5l4.55-1.02A8.46 8.46 0 0016 24.5c4.694 0 8.5-3.806 8.5-8.5s-3.806-8.5-8.5-8.5zm4.15 11.47c-.175.49-.875.897-1.225.955-.35.058-.79.082-1.275-.08-.295-.1-.675-.232-1.16-.455-2.04-.935-3.375-2.99-3.475-3.13-.1-.14-.82-1.09-.82-2.08s.52-1.475.705-1.675c.185-.2.405-.25.54-.25h.39c.125 0 .295-.047.46.35.175.42.59 1.44.64 1.545.05.105.085.23.017.37-.068.14-.1.227-.2.35-.1.122-.21.273-.3.367-.1.1-.205.21-.088.41.117.2.52.855 1.115 1.385.765.68 1.41.89 1.61.99.2.1.315.085.43-.05.115-.135.49-.57.62-.765.13-.195.26-.163.44-.098.18.065 1.14.537 1.335.635.195.098.325.147.375.23.05.082.05.478-.125.968z" fill="white"/>
@@ -192,6 +229,25 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
                       </li>
                     ))}
                   </ul>
+                </div>
+              )}
+
+              {/* CoAgent Mobile QR code pairing */}
+              {detailIntegration.slug === 'coagent:mobile' && (
+                <div className="mb-5 p-4 rounded-xl border border-neutral-100 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-800 flex flex-col items-center gap-3">
+                  {mobileQrDataUrl ? (
+                    <>
+                      <p className="text-[12px] font-semibold text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">Scan with your iPhone camera to connect</p>
+                      <img src={mobileQrDataUrl} alt="CoAgent Mobile QR Code" className="w-48 h-48 rounded-lg" />
+                      <p className="text-[11px] text-neutral-400 dark:text-neutral-500 text-center">
+                        Open the CoAgent app on your iPhone and scan this code
+                      </p>
+                    </>
+                  ) : (
+                    <p className="text-[12px] text-neutral-400 dark:text-neutral-500">
+                      {relayCredentials === null ? 'Loading...' : 'Relay not configured. Activate your relay in Settings first.'}
+                    </p>
+                  )}
                 </div>
               )}
 
@@ -391,7 +447,13 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
                               onClick={() => setDetailSlug(integration.slug)}
                               className="flex items-center gap-3 p-3 rounded-xl border border-neutral-100 dark:border-neutral-800 hover:border-neutral-200 dark:hover:border-neutral-700 hover:bg-neutral-50 dark:hover:bg-neutral-800/50 transition-colors text-left w-full"
                             >
-                              {integration.slug === 'coagent:whatsapp' ? (
+                              {integration.slug === 'coagent:mobile' ? (
+                                <svg className="w-5 h-5 flex-shrink-0" viewBox="0 0 32 32" fill="none">
+                                  <rect width="32" height="32" rx="7" fill="#1C1C1E"/>
+                                  <rect x="11" y="6" width="10" height="20" rx="2" stroke="white" strokeWidth="1.5" fill="none"/>
+                                  <circle cx="16" cy="23" r="1" fill="white"/>
+                                </svg>
+                              ) : integration.slug === 'coagent:whatsapp' ? (
                                 <svg className="w-5 h-5 flex-shrink-0" viewBox="0 0 32 32" fill="none">
                                   <rect width="32" height="32" rx="7" fill="#25D366"/>
                                   <path d="M16 7.5c-4.694 0-8.5 3.806-8.5 8.5 0 1.497.39 2.9 1.07 4.115L7.5 24.5l4.55-1.02A8.46 8.46 0 0016 24.5c4.694 0 8.5-3.806 8.5-8.5s-3.806-8.5-8.5-8.5zm4.15 11.47c-.175.49-.875.897-1.225.955-.35.058-.79.082-1.275-.08-.295-.1-.675-.232-1.16-.455-2.04-.935-3.375-2.99-3.475-3.13-.1-.14-.82-1.09-.82-2.08s.52-1.475.705-1.675c.185-.2.405-.25.54-.25h.39c.125 0 .295-.047.46.35.175.42.59 1.44.64 1.545.05.105.085.23.017.37-.068.14-.1.227-.2.35-.1.122-.21.273-.3.367-.1.1-.205.21-.088.41.117.2.52.855 1.115 1.385.765.68 1.41.89 1.61.99.2.1.315.085.43-.05.115-.135.49-.57.62-.765.13-.195.26-.163.44-.098.18.065 1.14.537 1.335.635.195.098.325.147.375.23.05.082.05.478-.125.968z" fill="white"/>

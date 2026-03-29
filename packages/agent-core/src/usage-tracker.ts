@@ -5,12 +5,12 @@ import type { UsageEntry, UsageCategory, UsageSummary } from '@coagent/shared'
 const USAGE_FILE = 'usage.json'
 
 // Pricing per million tokens (USD)
+// Pricing per million tokens (USD) — using 1h ephemeral cache rates (2x base for writes, 0.1x for reads)
 const PRICING: Record<string, { input: number; output: number; cacheRead: number; cacheWrite: number }> = {
-  'claude-opus-4-6':           { input: 15,   output: 75,   cacheRead: 1.50,  cacheWrite: 18.75 },
-  'claude-sonnet-4-6':         { input: 3,    output: 15,   cacheRead: 0.30,  cacheWrite: 3.75 },
-  'claude-haiku-4-5-20251001': { input: 0.80, output: 4,    cacheRead: 0.08,  cacheWrite: 1.00 },
-  'claude-haiku-4-5':          { input: 0.80, output: 4,    cacheRead: 0.08,  cacheWrite: 1.00 },
-  'claude-3-5-haiku-20241022': { input: 0.80, output: 4,    cacheRead: 0.08,  cacheWrite: 1.00 },
+  'claude-opus-4-6':           { input: 15,   output: 75,   cacheRead: 1.50,  cacheWrite: 30 },
+  'claude-sonnet-4-6':         { input: 3,    output: 15,   cacheRead: 0.30,  cacheWrite: 6 },
+  'claude-haiku-4-5-20251001': { input: 1,    output: 5,    cacheRead: 0.10,  cacheWrite: 2 },
+  'claude-haiku-4-5':          { input: 1,    output: 5,    cacheRead: 0.10,  cacheWrite: 2 },
 }
 
 const DEFAULT_PRICING = PRICING['claude-sonnet-4-6']

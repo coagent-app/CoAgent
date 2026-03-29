@@ -10,7 +10,7 @@ import { searchEventStore, markEventsDone, getUnprocessedEvents } from './relay-
 import { readSettings, writeSettings } from './settings.js'
 import type { AgentSettings } from './settings.js'
 import type { AgentTrigger } from '@coagent/shared'
-import { searchFiles, readFileContent, readFileBase64, deleteFileEntry, getStorageStats, listFiles } from './file-store.js'
+import { searchFiles, readFileContent, readFileBase64, deleteFileEntry, getStorageStats, listFiles, ingestFile } from './file-store.js'
 import { embedTools, searchToolsAndSchema, setToolEmbeddingsDir } from './tool-embeddings.js'
 import { logToolCall, extractIntegration, searchToolLogs } from './service-logger.js'
 import { recordUsage } from './usage-tracker.js'
@@ -19,7 +19,7 @@ import { getRelayConfig } from './auth.js'
 const HISTORY_WINDOW = 50        // total pool — recent + TF-IDF ranked
 
 // --- Skills ---
-const DEFAULT_SKILL_NAMES = new Set(['skill-creator', 'integration-builder'])
+const DEFAULT_SKILL_NAMES = new Set(['skill-creator', 'integration-builder', 'spreadsheet-pro'])
 interface Skill { name: string; description: string; instructions: string }
 
 async function skillsDir(dataDir: string): Promise<string> {
@@ -58,9 +58,11 @@ async function deleteSkill(dataDir: string, name: string): Promise<boolean> {
 
 // ── Composio S3 file upload for email attachments ──────────────────────────
 
-const COMPOSIO_FILES_URL = process.env.RELAY_URL
-  ? `${process.env.RELAY_URL.replace(/\/$/, '')}/v1/composio/files/upload/request`
-  : 'https://backend.composio.dev/api/v3/files/upload/request'
+function getComposioFilesUrl(): string {
+  return process.env.RELAY_URL
+    ? `${process.env.RELAY_URL.replace(/\/$/, '')}/v1/composio/files/upload/request`
+    : 'https://backend.composio.dev/api/v3/files/upload/request'
+}
 
 /**
  * Upload a file to Composio's S3 via presigned URL.
@@ -79,7 +81,7 @@ async function uploadToComposioS3(
   const md5 = createHash('md5').update(fileBuffer).digest('hex')
 
   // Step 1: Get presigned upload URL
-  const presignRes = await fetch(COMPOSIO_FILES_URL, {
+  const presignRes = await fetch(getComposioFilesUrl(), {
     method: 'POST',
     headers: { 'X-API-KEY': authKey, 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -99,7 +101,7 @@ async function uploadToComposioS3(
   // Step 2: PUT file bytes to presigned URL
   const uploadRes = await fetch(presignData.new_presigned_url, {
     method: 'PUT',
-    body: fileBuffer,
+    body: new Uint8Array(fileBuffer),
     headers: {
       'Content-Type': mimeType,
       'Content-Length': fileBuffer.length.toString(),
@@ -392,6 +394,31 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
     }
   },
   {
+    name: 'notify_user',
+    description: 'Send a push notification to the user\'s phone. Use for completed tasks, reminders, or follow-ups. Keep it brief — mobile notifications are small.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        title: { type: 'string', description: '2-4 words, e.g. "Invoice Ready"' },
+        body: { type: 'string', description: 'One short sentence, e.g. "Acme invoice ready for review."' }
+      },
+      required: ['title', 'body']
+    }
+  },
+  {
+    name: 'create_document',
+    description: 'Create a PDF document locally. Write content in markdown — headings, bold, italic, lists, tables, and horizontal rules are all supported. Returns a coagent_file_id you can attach to emails.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        filename: { type: 'string', description: 'Output filename, e.g. "Q1 Report.pdf"' },
+        markdown: { type: 'string', description: 'The FULL document content in markdown. Write complete, detailed content — not just headings. Use # for headings, **bold**, *italic*, - for lists, | col1 | col2 | for tables, --- for page breaks. Tables must have a header row and separator (|---|---|).' },
+        style: { type: 'string', enum: ['professional', 'minimal', 'report'], description: 'Visual style. professional = navy headers, clean layout. minimal = simple black text. report = formal with header/footer.' }
+      },
+      required: ['filename', 'markdown']
+    }
+  },
+  {
     name: 'call_external_tool',
     description: 'Call an external integration tool discovered via search_tools. Pass the exact tool name and parameters from the schema returned by search_tools.',
     input_schema: {
@@ -438,6 +465,7 @@ const TOOL_LABELS: Record<string, string> = {
   memory: 'Checking memory',
   call_external_tool: 'Calling tool',
   create_custom_integration: 'Building custom integration',
+  notify_user: 'Sending notification',
 }
 
 // Action-specific labels for consolidated tools
@@ -474,7 +502,7 @@ function humanizeToolName(name: string): string {
 }
 
 const HEARTBEAT_TOOLS = new Set([
-  'get_current_time', 'memory', 'search_tools',
+  'get_current_time', 'memory', 'search_tools', 'notify_user',
 ])
 
 // Tools gated behind a skill — only included when the skill has been activated
@@ -517,58 +545,43 @@ function buildSystemPrompt(connectedServices: string[], agentProfilePath: string
   const memoryFiles = listMemoryFiles(dataDir)
 
   const serviceSection = connectedServices.length > 0
-    ? `Connected external services: ${connectedServices.join(', ')}. search_tools is how you find tools AND gather context for external services. It has 3 required params:
-- query: what you want to do (e.g. "send email", "create calendar event")
-- context: look up relevant context (names, user IDs, emails, channels, e.g. "Nathan slack")
-- schema: describe the full action with ALL fields you need (e.g. "send email to recipient with subject, body, CC, and attachment") — returns only the relevant parameter schemas
-IMPORTANT: After search_tools returns the schema, use call_external_tool(tool_name, parameters) to execute the action. READ the schema in the search_tools result to know exactly what parameters to pass. Use the memory tool separately for contacts and preferences. Act on what you find, don't ask the user to confirm details you already have.`
-    : 'No external services are connected yet. If the user wants to connect tools, tell them to open Settings and connect their integrations.'
+    ? `Services: ${connectedServices.join(', ')}. Use search_tools to find tools and get schemas:
+- query: what to do ("send email", "create event")
+- context: look up names, emails, channels ("Nathan slack")
+- schema: describe the full action with all fields needed
+Then call_external_tool(tool_name, parameters) with the returned schema. Act on what you find — don't ask the user to confirm details you already have.`
+    : 'No services connected. Settings → connect integrations.'
 
   const onboardingSection = isFirstRun
-    ? '\n\nONBOARDING: This is a new user. Read onboarding.md from memory and follow it exactly.'
+    ? '\n\nONBOARDING: Read onboarding.md from memory and follow it.'
     : ''
 
   const formatHour = (h: number) => h === 24 ? 'midnight' : h === 0 ? '12am' : h < 12 ? `${h}am` : h === 12 ? '12pm' : `${h - 12}pm`
 
-  const settingsSection = `
-Current settings:
-- Name: ${settings.name || '(not set)'}
-- Email: ${settings.email || '(not set)'}
-- Role: ${settings.role || '(not set)'}
-- Timezone: ${settings.timezone || '(not set)'}
-- Active hours: ${formatHour(settings.active_hours.start)}–${formatHour(settings.active_hours.end)}
-- Active days: ${settings.active_days.join(', ')}
-- Heartbeat: ${settings.heartbeat_interval > 0 ? `every ${settings.heartbeat_interval} minutes — processes incoming trigger events (emails, messages, etc.), checks memory for context, and escalates anything that needs action` : 'disabled — you only respond when the user messages you'}
-- Autonomy: ${settings.autonomy} — ${AUTONOMY_DESCRIPTIONS[settings.autonomy]}
-`
+  return `You are CoAgent — a private AI agent running on the user's machine. Help with anything asked.
 
-  return `You are CoAgent — a private AI agent running on the user's machine. Help with anything asked. Never refuse by saying something is outside your scope.
-
-CRITICAL — Before responding to ANY request, your FIRST action must be a memory search for relevant info (names, addresses, preferences, contacts, project details). NEVER ask the user for information that might be in memory. When using search_tools, use the context param. Only ask after you've searched and genuinely can't find it.
+FIRST ACTION on any request: search memory for relevant info (names, contacts, preferences). Never ask for info that might be in memory. Act on what you find.
 
 ${serviceSection}
-${settingsSection}
-Skills: reusable automation workflows (instructions you follow). Users invoke with @skill-name, but you can also use them proactively. When asked to do something unfamiliar, check skills first (skills tool, action: list).
-Integrations: connections to external services (Gmail, Slack, etc.). You can build NEW integrations from any API using create_custom_integration — this creates a real tool connection, not a skill. Use @integration-builder skill for the full workflow.
+User: ${settings.name || '?'} | ${settings.email || '?'} | ${settings.role || '?'} | ${settings.timezone || '?'}
+Active: ${formatHour(settings.active_hours.start)}–${formatHour(settings.active_hours.end)}, ${settings.active_days.join(', ')}
+Autonomy: ${settings.autonomy} — ${AUTONOMY_DESCRIPTIONS[settings.autonomy]}
+${settings.heartbeat_interval > 0 ? `Heartbeat: every ${settings.heartbeat_interval}min — process triggers, check memory, escalate.` : ''}
 
-File listings: plain text (e.g. "- report.md — summary"). Only use [filename](coagent-file:FILE_ID) when asked to open a specific file. To attach files to emails, include coagent_file_ids in the tool params — the system handles upload automatically.
+Memory: your long-term brain. Use memory tool directly (NOT search_tools). Prefer search (semantic) or grep (pattern match) over read. Write things down immediately. Always search before asking for ANY info.
+Documents: create_document for PDFs (reports, proposals, invoices) → returns coagent_file_id for email attachments.
+Files: include coagent_file_ids in tool params to auto-attach files to emails. [filename](coagent-file:ID) to open.
+Schedule: create/update/delete/complete/list — routines (cron), tasks (one-time), followups (check-back reminders).
+Skills: @skill-name to invoke. Check skills(action: list) for unfamiliar tasks.
+Integrations: build NEW integrations from any API using create_custom_integration + @integration-builder skill.
+Approvals: queue_approval for high-stakes actions with full draft. add_done_item after routine tasks.
+Followups: after sending emails/messages/proposals, ask "Want me to follow up? When?" — never auto-create.
 
-Memory: your long-term brain — history only shows recent messages. Use the memory tool directly (NOT search_tools). Prefer search (semantic) or grep (pattern match within a file) over read. Write things down immediately. Your memory files contain info you've already learned — ALWAYS search before asking for ANY info. You can create custom .md files for broad categories (e.g. leads, contacts).
-Available files: ${memoryFiles.length > 0 ? memoryFiles.join(', ') : '(none yet)'}
-
-Routine tasks: act, then add_done_item. High-stakes actions: queue_approval with full draft in "detail" and recipient/subject in "metadata".
-
-- **schedule** (create/update/delete/complete/list) — unified schedule for routines (recurring cron), tasks (one-time due), and followups (check-back reminders that fire like tasks then ask user what to do next).
-- **Proactive followups**: after sending emails, messages, proposals, etc., ask "Want me to follow up on this? When?" — never auto-create, always ask first.
-
-When you need multiple independent pieces of information, call all the tools in a single response (e.g. read memory + use schedule (action: list) to check routines and tasks + check time in one turn). This is faster and cheaper.
-
-You can search the web — use search_tools("web search") to find the right tool.
-${connectedServices.includes('coagent:imessage') ? `\niMessage is connected. search_tools("iMessage") to find tools for reading and sending messages. Queue sends for approval unless autonomy is "autonomous".` : ''}
-${connectedServices.includes('coagent:contacts') ? `\nContacts is connected. search_tools("contacts") to find tools for searching and looking up contact details.` : ''}
-[voice] = voice input. Reply in 1-2 short spoken sentences, no markdown. Use tools normally.
-
-Concise responses. No emojis. Markdown only when helpful.${onboardingSection}`
+Call multiple tools in one response when independent — faster and cheaper. Be concise. No emojis. Markdown only when helpful.
+${connectedServices.includes('coagent:imessage') ? `iMessage connected. Queue sends for approval unless autonomous.` : ''}
+${connectedServices.includes('coagent:contacts') ? `Contacts connected via search_tools.` : ''}
+[voice] = voice input. 1-2 short spoken sentences, no markdown.
+Notifications: title 2-4 words, body one sentence.${onboardingSection}`
 }
 
 export class Agent {
@@ -594,6 +607,7 @@ export class Agent {
   public onSkillsChanged?: () => void
   public onSettingsChanged?: () => void
   public onCalendarChanged?: () => void
+  public onNotifyUser?: (title: string, body: string) => void
   public onCustomIntegration?: (action: string, data: any) => Promise<string>
   public activeSkillTools = new Set<string>()
 
@@ -816,8 +830,8 @@ export class Agent {
     const settings = await readSettings(this.dataDir)
 
     // Memoize system prompt — only rebuild when services or settings actually change
-    const memFiles = listMemoryFiles(this.dataDir)
-    const promptKey = connectedServices.join(',') + '|' + JSON.stringify(settings) + '|' + memFiles.join(',')
+    const memFileCount = listMemoryFiles(this.dataDir).length
+    const promptKey = connectedServices.join(',') + '|' + JSON.stringify(settings) + '|' + memFileCount
     let systemPrompt: string
     if (this.cachedSystemPrompt && this.cachedPromptKey === promptKey) {
       systemPrompt = this.cachedSystemPrompt
@@ -844,6 +858,7 @@ export class Agent {
     const isBackground = context === 'heartbeat'
     const contextTools = getInternalTools(context, this.activeSkillTools)
     const stableTools = [...contextTools]
+    console.log(`[Agent] Tools available: ${stableTools.map(t => t.name).join(', ')}`)
 
     let finalText = ''
     let turn = 0
@@ -901,7 +916,10 @@ export class Agent {
             system: isBackground
               ? [{ type: 'text', text: systemPrompt }]
               : [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral', ttl: '1h' } as any }],
-            tools: stableTools as any,
+            tools: (isBackground || stableTools.length === 0) ? stableTools as any : [
+              ...stableTools.slice(0, -1),
+              { ...stableTools[stableTools.length - 1], cache_control: { type: 'ephemeral', ttl: '1h' } },
+            ] as any,
             messages: this.addMessageCacheBreakpoint(
               [...baseMessages, ...loopMessages],
               isBackground,
@@ -1057,6 +1075,15 @@ export class Agent {
                   result += formatSchemaForResult(topTool)
                   console.log(`[Agent] Schema fallback for ${topTool.name}: full schema (no embedding match)`)
                 }
+              }
+            }
+
+            // Auto-inject spreadsheet skill when Sheets/Excel tools are in results
+            const hasSpreadsheetTools = matches.some(t => t.name.startsWith('GOOGLESHEETS_') || t.name.startsWith('EXCEL_'))
+            if (hasSpreadsheetTools) {
+              const skill = await loadSkill(this.dataDir, 'spreadsheet-pro')
+              if (skill) {
+                result += `\n\n[IMPORTANT — Spreadsheet Guide]\n${skill.instructions}\n[/Guide]`
               }
             }
 
@@ -1266,6 +1293,26 @@ export class Agent {
               }
             }
 
+          } else if (block.name === 'notify_user') {
+            const input = block.input as { title: string; body: string }
+            this.onNotifyUser?.(input.title, input.body)
+            result = 'Notification sent.'
+
+          } else if (block.name === 'create_document') {
+            const input = block.input as { filename: string; markdown: string; style?: string }
+            try {
+              const { renderMarkdownToPdf } = await import('./document-renderer.js')
+              const filename = input.filename.endsWith('.pdf') ? input.filename : `${input.filename}.pdf`
+              const style = (input.style || 'professional') as 'professional' | 'minimal' | 'report'
+              const buf = await renderMarkdownToPdf(input.markdown, style, filename.replace('.pdf', ''))
+              const entry = await ingestFile(this.dataDir, filename, buf, 'application/pdf')
+              result = `Document created: "${entry.filename}" (${Math.round(buf.length / 1024)}KB)\ncoagent_file_id: ${entry.id}\n\nUse this ID to attach the document to emails or share it.`
+              console.log(`[Agent] Created document: ${entry.filename} (${buf.length} bytes, style: ${style})`)
+            } catch (err: any) {
+              result = `Document creation failed: ${err.message}`
+              console.error('[Agent] Document creation error:', err)
+            }
+
           } else if (block.name === 'call_external_tool') {
             const { tool_name: extToolName, parameters: extParams } = block.input as { tool_name: string; parameters: Record<string, unknown> }
             const serverName = serverMap.get(extToolName)
@@ -1276,30 +1323,48 @@ export class Agent {
               const toolInput = { ...extParams }
 
               // Extract coagent_file_ids robustly — the model puts them in various places/formats
+              const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
               let fileIds: string[] = []
               const extractIds = (val: unknown): string[] => {
-                if (Array.isArray(val)) return val.filter(v => typeof v === 'string')
+                if (Array.isArray(val)) {
+                  // Flatten: could be array of strings or array of objects
+                  const ids: string[] = []
+                  for (const item of val) ids.push(...extractIds(item))
+                  return ids
+                }
                 if (typeof val === 'string') {
-                  try { const parsed = JSON.parse(val); if (Array.isArray(parsed)) return parsed.filter((v: any) => typeof v === 'string') } catch {}
-                  if (val.match(/^[0-9a-f-]{36}$/i)) return [val]
+                  try { const parsed = JSON.parse(val); if (Array.isArray(parsed)) return extractIds(parsed) } catch {}
+                  if (UUID_RE.test(val)) return [val]
                 }
                 if (val && typeof val === 'object') {
                   const obj = val as Record<string, unknown>
+                  // Check all string values for UUIDs (catches s3key, id, file_id, coagent_file_id, etc.)
+                  for (const v of Object.values(obj)) {
+                    if (typeof v === 'string' && UUID_RE.test(v)) return [v]
+                  }
+                  // Recurse into nested objects
                   if (obj.coagent_file_ids) return extractIds(obj.coagent_file_ids)
                 }
                 return []
               }
-              // Check top-level
+              // Check top-level coagent_file_ids
               if (toolInput.coagent_file_ids) {
                 fileIds = extractIds(toolInput.coagent_file_ids)
                 delete toolInput.coagent_file_ids
               }
-              // Check inside attachment (model sometimes nests it there)
+              // Check inside attachment/attachments — model often constructs these with the UUID
               if (fileIds.length === 0 && toolInput.attachment) {
                 const fromAttach = extractIds(toolInput.attachment)
                 if (fromAttach.length > 0) {
                   fileIds = fromAttach
                   delete toolInput.attachment
+                }
+              }
+              if (fileIds.length === 0 && toolInput.attachments) {
+                const fromAttach = extractIds(toolInput.attachments)
+                if (fromAttach.length > 0) {
+                  fileIds = fromAttach
+                  delete toolInput.attachments
                 }
               }
               if (fileIds.length > 0) {
@@ -1338,6 +1403,41 @@ export class Agent {
                   ? raw.slice(0, MAX_TOOL_RESULT) + `\n\n[Truncated: ${raw.length - MAX_TOOL_RESULT} chars omitted from history to save context]`
                   : raw
                 logToolCall(this.dataDir, serverName, extToolName, toolInput, result)
+
+                // Auto-ingest files returned by Composio tools into CoAgent file store
+                try {
+                  const parsed = JSON.parse(raw)
+                  if (parsed?.successfull && parsed?.data) {
+                    let fileUrl: string | null = null
+                    let fileName: string | null = null
+                    let fileMime: string | null = null
+
+                    // Pattern 1: data.file.s3url (e.g. TEXT_TO_PDF_CONVERT_TEXT_TO_PDF)
+                    if (parsed.data.file?.s3url) {
+                      fileUrl = parsed.data.file.s3url
+                      fileName = parsed.data.file.name || 'document'
+                      fileMime = parsed.data.file.mimetype || 'application/octet-stream'
+                    }
+                    // Pattern 2: data.url + data.file_ext (e.g. TEXT_TO_PDF_UPLOAD_FILE)
+                    else if (parsed.data.url && parsed.data.file_ext) {
+                      fileUrl = parsed.data.url
+                      fileName = parsed.data.file_name || `file.${parsed.data.file_ext}`
+                      fileMime = parsed.data.file_ext === 'pdf' ? 'application/pdf' : 'application/octet-stream'
+                    }
+
+                    if (fileUrl) {
+                      const fileRes = await fetch(fileUrl)
+                      if (fileRes.ok) {
+                        const buf = Buffer.from(await fileRes.arrayBuffer())
+                        const entry = await ingestFile(this.dataDir, fileName!, buf, fileMime!)
+                        result += `\n\n[CoAgent: File saved as "${entry.filename}" — coagent_file_id: ${entry.id}. Use this ID to attach the file to emails or reference it later.]`
+                        console.log(`[Agent] Auto-ingested file from ${extToolName}: ${entry.filename} (${entry.id})`)
+                      }
+                    }
+                  }
+                } catch {
+                  // Result wasn't JSON or download failed — not a file-producing tool, that's fine
+                }
               }
             }
 
@@ -1420,19 +1520,34 @@ export class Agent {
 
 
 
-  /** Select history: recent messages + any pinned task message. Memory tools handle long-term context. */
+  /** Select history: always keep last 5 real conversation turns + recent tool context.
+   *  Dynamic window — expands when tool chains are long so the agent never loses conversation context. */
   private selectHistory(_currentQuery: string): Anthropic.MessageParam[] {
-    const recent = this.conversationHistory.slice(-RECENT_KEEP)
+    const history = this.conversationHistory
 
-    // If a scheduled task is pinned and it fell outside the recent window, prepend it
-    if (this.pinnedTaskIdx !== null) {
-      const windowStart = this.conversationHistory.length - RECENT_KEEP
-      if (this.pinnedTaskIdx < windowStart) {
-        return [this.conversationHistory[this.pinnedTaskIdx], ...recent]
-      }
+    // Find the last 5 real user messages (text, not just tool_results)
+    const realUserIndices: number[] = []
+    for (let i = history.length - 1; i >= 0 && realUserIndices.length < 5; i--) {
+      const msg = history[i]
+      if (msg.role !== 'user') continue
+      const isRealUser = typeof msg.content === 'string' ||
+        (Array.isArray(msg.content) && (msg.content as any[]).some(b => b.type === 'text'))
+      if (isRealUser) realUserIndices.push(i)
     }
 
-    return recent
+    // Window starts from the earliest of: RECENT_KEEP tail OR earliest protected conversation message
+    const recentStart = Math.max(0, history.length - RECENT_KEEP)
+    const conversationStart = realUserIndices.length > 0 ? Math.min(...realUserIndices) : recentStart
+    const windowStart = Math.min(recentStart, conversationStart)
+
+    const selected = history.slice(windowStart)
+
+    // If a scheduled task is pinned and fell outside the window, prepend it
+    if (this.pinnedTaskIdx !== null && this.pinnedTaskIdx < windowStart) {
+      return [history[this.pinnedTaskIdx], ...selected]
+    }
+
+    return selected
   }
 
   /**

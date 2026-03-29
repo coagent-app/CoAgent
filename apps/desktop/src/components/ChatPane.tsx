@@ -474,7 +474,7 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
           )}
           <div
             title={connected ? 'Connected' : 'Disconnected'}
-            className={cn('w-2 h-2 rounded-full', connected ? 'bg-emerald-400' : 'bg-red-400')}
+            className={cn('w-2 h-2 rounded-full', connected ? 'bg-emerald-400 animate-pulse' : 'bg-red-400')}
           />
         </div>
       </div>

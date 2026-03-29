@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { open } from '@tauri-apps/plugin-shell'
-import type { ApprovalItem, DoneItem, AgentMessage, WSServerMessage, WSClientMessage, Integration, AgentSettings, FileEntry, AuthStatus, AuthMethod, RelayUsage, UsageSummary, CalendarEntry } from '@coagent/shared'
+import type { ApprovalItem, DoneItem, AgentMessage, WSServerMessage, WSClientMessage, Integration, AgentSettings, FileEntry, AuthStatus, AuthMethod, RelayUsage, UsageSummary, CalendarEntry, WSServerMessage as WSSMsg } from '@coagent/shared'
+
+type RelayCredentials = Extract<WSSMsg, { type: 'relay_credentials' }>
 
 const WS_URL = 'ws://localhost:7830'
 const RECONNECT_BASE = 250
@@ -39,6 +41,7 @@ export function useAgent() {
   const [calendarEntries, setCalendarEntries] = useState<CalendarEntry[]>([])
   const [capabilityCard, setCapabilityCard] = useState<{ name: string; capabilities: { name: string; description: string; checked: boolean }[] } | null>(null)
   const [whatsappQr, setWhatsappQr] = useState<string | null>(null)
+  const [relayCredentials, setRelayCredentials] = useState<RelayCredentials | null>(null)
 
   useEffect(() => {
     let unmounted = false
@@ -175,6 +178,9 @@ export function useAgent() {
         }
         if ((msg as any).type === 'whatsapp_qr') {
           setWhatsappQr((msg as any).dataUrl)
+        }
+        if (msg.type === 'relay_credentials') {
+          setRelayCredentials(msg)
         }
         if (msg.type === 'error') { setError(msg.message); setTimeout(() => setError(null), 5000) }
         if (msg.type === 'integration_needs_fields') {
@@ -402,5 +408,10 @@ export function useAgent() {
     send({ type: 'toggle_trigger', triggerSlug, appSlug, enabled })
   }, [send])
 
-  return { queue, done, messages, streamingText, thinking, processing, toolLabel, connected, lastHeartbeat, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, pendingFields, setPendingFields, setModel, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger }
+  const getRelayCredentials = useCallback(() => {
+    setRelayCredentials(null)
+    send({ type: 'get_relay_credentials' })
+  }, [send])
+
+  return { queue, done, messages, streamingText, thinking, processing, toolLabel, connected, lastHeartbeat, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, pendingFields, setPendingFields, setModel, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials }
 }

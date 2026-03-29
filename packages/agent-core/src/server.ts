@@ -110,7 +110,7 @@ async function streamTts(text: string, voice: string | undefined, sendFn: (msg: 
     const res = await fetch(`${proxy.baseUrl}/v1/audio/speech`, {
       method: 'POST',
       headers: { 'Authorization': proxy.authHeader, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'tts-1', input: clean, voice: ttsVoice, response_format: 'opus' }),
+      body: JSON.stringify({ model: 'tts-1', input: clean, voice: ttsVoice, response_format: 'mp3' }),
     })
     if (!res.ok || !res.body) return
     const reader = res.body.getReader()
@@ -620,6 +620,10 @@ const scheduler = startScheduler(agent, DATA_DIR, {
   }
 })
 
+agent.onNotifyUser = (title: string, body: string) => {
+  broadcast({ type: 'push_notification', title, body } as any)
+}
+
 agent.onSettingsChanged = async () => {
   const settings = await readSettings(DATA_DIR)
   broadcast({ type: 'settings_update', settings })
@@ -767,7 +771,7 @@ async function transcribeAudio(buffer: Buffer, mimetype: string): Promise<string
   try {
     // WhatsApp sends ogg/opus; Whisper accepts ogg, mp3, wav, webm, etc.
     const ext = mimetype.includes('ogg') ? 'ogg' : mimetype.includes('mp4') ? 'mp4' : 'ogg'
-    const blob = new Blob([buffer], { type: mimetype })
+    const blob = new Blob([new Uint8Array(buffer)], { type: mimetype })
     const form = new FormData()
     form.append('file', blob, `voice.${ext}`)
     form.append('model', 'whisper-1')
@@ -992,6 +996,16 @@ async function sendIntegrations(ws: WebSocket): Promise<void> {
 
   const custom = await getCustomIntegrations()
   const builtins: any[] = []
+  // Mobile app — cross-platform, always shown
+  builtins.push({
+    slug: 'coagent:mobile',
+    name: 'CoAgent Mobile',
+    connected: false,
+    category: 'CoAgent',
+    description: 'Connect the CoAgent iOS app to your agent via relay. Scan the QR code to pair.',
+    capabilities: 'Chat with your agent, Voice interaction, View queue and calendar',
+    builtin: true
+  })
   // WhatsApp — cross-platform, always shown
   builtins.push({
     slug: 'coagent:whatsapp',
@@ -1049,19 +1063,87 @@ async function sendRelayStatus(ws: WebSocket): Promise<void> {
   }
 }
 
-wss.on('connection', (ws) => {
+/** Send full agent state to a single WebSocket connection. */
+async function sendFullState(ws: WebSocket): Promise<void> {
   send(ws, { type: 'queue_update', items: agent.queue.getPending() })
   send(ws, { type: 'done_update', items: agent.queue.getDone() })
   send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
-  send(ws, { type: 'chat_history', messages: agent.getChatHistory() })
+  const chatHistoryMsg = { type: 'chat_history' as const, messages: agent.getChatHistory() }
+  const chatJson = JSON.stringify(chatHistoryMsg)
+  console.log(`[Server] sendFullState chat_history: ${chatHistoryMsg.messages.length} msgs, ${chatJson.length} bytes`)
+  ws.send(chatJson)
   sendIntegrations(ws).catch(console.error)
   sendFilesAndFolders(ws).catch(console.error)
   readSettings(DATA_DIR).then(settings => send(ws, { type: 'settings_update', settings })).catch(console.error)
   sendRelayStatus(ws).catch(console.error)
   agent.getSkills().then(skills => send(ws, { type: 'skills_update', skills })).catch(console.error)
+}
+
+/** Broadcast full agent state to all connected WebSocket clients. */
+function broadcastFullState(): void {
+  if (!wss) return
+  for (const client of wss.clients) {
+    if (client.readyState === WebSocket.OPEN) {
+      sendFullState(client as WebSocket).catch(console.error)
+    }
+  }
+}
+
+wss.on('connection', (ws) => {
+  sendFullState(ws).catch(console.error)
 
   ws.on('message', async (raw) => {
     const msg: WSClientMessage = JSON.parse(raw.toString())
+
+    if (msg.type === 'client_connected') {
+      console.log('[Server] Remote client connected via relay — broadcasting full state')
+      broadcastFullState()
+      return
+    }
+
+    if (msg.type === 'get_chat_history') {
+      const full = agent.getChatHistory()
+      const history = full.slice(-50).map(m => ({
+        ...m,
+        content: m.content.length > 4000 ? m.content.slice(0, 4000) + '…' : m.content,
+      }))
+      const json = JSON.stringify({ type: 'chat_history', messages: history })
+      console.log(`[Server] get_chat_history: ${full.length} total, sending ${history.length}, size=${json.length} bytes`)
+      ws.send(json)
+      return
+    }
+
+    if (msg.type === 'get_file_content') {
+      console.log(`[Server] get_file_content id=${msg.id}`)
+      const file = (await listFiles(DATA_DIR)).find(f => f.id === msg.id)
+      if (!file) {
+        console.log(`[Server] File not found: ${msg.id}`)
+        send(ws, { type: 'file_content_error', id: msg.id, error: 'File not found' } as any)
+        return
+      }
+      try {
+        const { readFile } = await import('fs/promises')
+        const buf = await readFile(file.path)
+        const ext = file.filename.split('.').pop()?.toLowerCase() || ''
+        const mimeMap: Record<string, string> = {
+          pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+          gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml',
+          txt: 'text/plain', csv: 'text/csv', json: 'application/json',
+          mp3: 'audio/mpeg', mp4: 'video/mp4',
+          md: 'text/markdown', doc: 'application/msword',
+          docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          xls: 'application/vnd.ms-excel',
+        }
+        const mimeType = mimeMap[ext] || 'application/octet-stream'
+        console.log(`[Server] Sending file_content: ${file.filename} (${mimeType}, ${Math.round(buf.length / 1024)}KB)`)
+        send(ws, { type: 'file_content', id: msg.id, filename: file.filename, mimeType, data: buf.toString('base64') } as any)
+      } catch (err: any) {
+        console.error(`[Server] File read error: ${err.message}`)
+        send(ws, { type: 'file_content_error', id: msg.id, error: err.message } as any)
+      }
+      return
+    }
 
     if (msg.type === 'stop_agent') {
       console.log('[Server] Stop agent requested')
@@ -1083,33 +1165,33 @@ wss.on('connection', (ws) => {
         })
         return
       }
-      send(ws, { type: 'agent_thinking' })
+      broadcast({ type: 'agent_thinking' } as any)
       try {
         let streamed = ''
         const response = await agent.chat(
           msg.message,
           (chunk) => {
             streamed += chunk
-            send(ws, { type: 'chat_chunk', text: chunk })
+            broadcast({ type: 'chat_chunk', text: chunk } as any)
           },
           (tool, label) => {
-            send(ws, { type: 'chat_segment_end' })
-            send(ws, { type: 'tool_start', tool, label })
+            broadcast({ type: 'chat_segment_end' } as any)
+            broadcast({ type: 'tool_start', tool, label } as any)
           },
           msg.fileIds
         )
-        send(ws, {
+        broadcast({
           type: 'chat_response',
           message: { role: 'assistant', content: streamed || response, timestamp: new Date().toISOString() }
-        })
+        } as any)
         send(ws, { type: 'queue_update', items: agent.queue.getPending() })
         send(ws, { type: 'done_update', items: agent.queue.getDone() })
         send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
         sendFilesAndFolders(ws).catch(console.error)
       } catch (err: any) {
         console.error('[Server] chat error:', err.message)
-        send(ws, { type: 'error', message: err.message ?? 'Something went wrong.' })
-        send(ws, { type: 'agent_stopped' })
+        broadcast({ type: 'error', message: err.message ?? 'Something went wrong.' } as any)
+        broadcast({ type: 'agent_stopped' } as any)
       }
     }
 
@@ -1122,9 +1204,11 @@ wss.on('connection', (ws) => {
       }
       try {
         const audioBuffer = Buffer.from(msg.data, 'base64')
-        const blob = new Blob([audioBuffer], { type: 'audio/webm' })
+        // Mobile sends m4a (AAC), desktop sends webm — use format hint for correct MIME type
+        const fmt = msg.format === 'm4a' ? { mime: 'audio/mp4', ext: 'm4a' } : { mime: 'audio/webm', ext: 'webm' }
+        const blob = new Blob([audioBuffer], { type: fmt.mime })
         const form = new FormData()
-        form.append('file', blob, 'voice.webm')
+        form.append('file', blob, `voice.${fmt.ext}`)
         form.append('model', 'whisper-1')
         form.append('language', 'en')
         form.append('prompt', 'This is a voice command to a personal AI assistant called Co-Agent. The user is speaking naturally in English.')
@@ -1152,37 +1236,31 @@ wss.on('connection', (ws) => {
           return
         }
         // Show transcribed text immediately, then process
-        send(ws, { type: 'voice_transcribed', text })
-        send(ws, { type: 'agent_thinking' })
+        broadcast({ type: 'voice_transcribed', text } as any)
+        broadcast({ type: 'agent_thinking' } as any)
         let streamed = ''
-        let ttsFired = false
         const settingsForTts = await readSettings(DATA_DIR)
         const voicePrompt = text + ' [voice]'
         const response = await agent.chat(
           voicePrompt,
           (chunk) => {
             streamed += chunk
-            send(ws, { type: 'chat_chunk', text: chunk })
-            // Fire TTS on first sentence boundary — don't wait for full response
-            if (!ttsFired && settingsForTts.voice_response && getOpenAIProxy() && /[.!?]\s/.test(streamed)) {
-              ttsFired = true
-              streamTts(streamed, settingsForTts.voice_voice, (msg) => send(ws, msg as any))
-            }
+            broadcast({ type: 'chat_chunk', text: chunk } as any)
           },
           (tool, label) => {
-            send(ws, { type: 'chat_segment_end' })
-            send(ws, { type: 'tool_start', tool, label })
+            broadcast({ type: 'chat_segment_end' } as any)
+            broadcast({ type: 'tool_start', tool, label } as any)
           }
         )
         const fullResponse = streamed || response
-        send(ws, { type: 'chat_response', message: { role: 'assistant', content: fullResponse, timestamp: new Date().toISOString() } })
+        broadcast({ type: 'chat_response', message: { role: 'assistant', content: fullResponse, timestamp: new Date().toISOString() } } as any)
         send(ws, { type: 'queue_update', items: agent.queue.getPending() })
         send(ws, { type: 'done_update', items: agent.queue.getDone() })
         send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
         sendFilesAndFolders(ws).catch(console.error)
         send(ws, { type: 'voice_summary', summary: fullResponse })
-        // If TTS didn't fire during streaming (no sentence boundary), fire on full response
-        if (!ttsFired && settingsForTts.voice_response && getOpenAIProxy()) {
+        // TTS the full response — no early fire that cuts off
+        if (settingsForTts.voice_response && getOpenAIProxy()) {
           streamTts(fullResponse, settingsForTts.voice_voice, (msg) => send(ws, msg as any))
         }
       } catch (err: any) {
@@ -1200,46 +1278,39 @@ wss.on('connection', (ws) => {
         })
         return
       }
-      send(ws, { type: 'agent_thinking' })
+      broadcast({ type: 'agent_thinking' } as any)
       try {
         let streamed = ''
-        let ttsFired = false
         const settingsForTts = await readSettings(DATA_DIR)
         const voicePrompt = msg.message + ' [voice]'
         const response = await agent.chat(
           voicePrompt,
           (chunk) => {
             streamed += chunk
-            send(ws, { type: 'chat_chunk', text: chunk })
-            // Fire TTS on first sentence boundary — don't wait for full response
-            if (!ttsFired && settingsForTts.voice_response && getOpenAIProxy() && /[.!?]\s/.test(streamed)) {
-              ttsFired = true
-              streamTts(streamed, settingsForTts.voice_voice, (m) => send(ws, m as any))
-            }
+            broadcast({ type: 'chat_chunk', text: chunk } as any)
           },
           (tool, label) => {
-            send(ws, { type: 'chat_segment_end' })
-            send(ws, { type: 'tool_start', tool, label })
+            broadcast({ type: 'chat_segment_end' } as any)
+            broadcast({ type: 'tool_start', tool, label } as any)
           }
         )
         const fullResp = streamed || response
-        send(ws, {
+        broadcast({
           type: 'chat_response',
           message: { role: 'assistant', content: fullResp, timestamp: new Date().toISOString() }
-        })
+        } as any)
         send(ws, { type: 'queue_update', items: agent.queue.getPending() })
         send(ws, { type: 'done_update', items: agent.queue.getDone() })
         send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
         sendFilesAndFolders(ws).catch(console.error)
         send(ws, { type: 'voice_summary', summary: fullResp })
-        // If TTS didn't fire during streaming (no sentence boundary), fire on full response
-        if (!ttsFired && settingsForTts.voice_response && getOpenAIProxy()) {
+        if (settingsForTts.voice_response && getOpenAIProxy()) {
           streamTts(fullResp, settingsForTts.voice_voice, (m) => send(ws, m as any))
         }
       } catch (err: any) {
         console.error('[Server] voice_chat error:', err.message)
-        send(ws, { type: 'error', message: err.message ?? 'Something went wrong.' })
-        send(ws, { type: 'agent_stopped' })
+        broadcast({ type: 'error', message: err.message ?? 'Something went wrong.' } as any)
+        broadcast({ type: 'agent_stopped' } as any)
       }
     }
 
@@ -1336,6 +1407,13 @@ wss.on('connection', (ws) => {
     }
 
     if (msg.type === 'integration_connect') {
+      if (msg.slug === 'coagent:mobile') {
+        const relayUrl = process.env.RELAY_URL ?? ''
+        const token = process.env.RELAY_TOKEN ?? ''
+        const userId = process.env.RELAY_USER_ID ?? 'default'
+        send(ws, { type: 'relay_credentials', relayUrl, token, userId })
+        return
+      }
       if (msg.slug === 'coagent:whatsapp') {
         console.log('[WhatsApp] Connect requested...')
         try {
@@ -1809,6 +1887,13 @@ wss.on('connection', (ws) => {
     if (msg.type === 'get_relay_status') {
       agent.reinitClient()
       sendRelayStatus(ws).catch(console.error)
+    }
+
+    if (msg.type === 'get_relay_credentials') {
+      const relayUrl = process.env.RELAY_URL ?? ''
+      const token = process.env.RELAY_TOKEN ?? ''
+      const userId = process.env.RELAY_USER_ID ?? 'default'
+      send(ws, { type: 'relay_credentials', relayUrl, token, userId })
     }
 
     if (msg.type === 'get_usage') {
