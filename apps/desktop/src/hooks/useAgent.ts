@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { open } from '@tauri-apps/plugin-shell'
-import type { ApprovalItem, DoneItem, AgentMessage, WSServerMessage, WSClientMessage, Integration, AgentSettings, FileEntry, AuthStatus, AuthMethod, RelayUsage, UsageSummary, CalendarEntry, WSServerMessage as WSSMsg } from '@coagent/shared'
+import type { ApprovalItem, DoneItem, AgentMessage, WSServerMessage, WSClientMessage, Integration, AgentSettings, FileEntry, AuthStatus, AuthMethod, RelayUsage, UsageSummary, CalendarEntry, AdminUser, WSServerMessage as WSSMsg } from '@coagent/shared'
 
 type RelayCredentials = Extract<WSSMsg, { type: 'relay_credentials' }>
 
@@ -42,6 +42,9 @@ export function useAgent() {
   const [capabilityCard, setCapabilityCard] = useState<{ name: string; capabilities: { name: string; description: string; checked: boolean }[] } | null>(null)
   const [whatsappQr, setWhatsappQr] = useState<string | null>(null)
   const [relayCredentials, setRelayCredentials] = useState<RelayCredentials | null>(null)
+  const [isAdmin, setIsAdmin] = useState(false)
+  const [adminUsers, setAdminUsers] = useState<AdminUser[]>([])
+  const [adminNewToken, setAdminNewToken] = useState<{ token: string; userId: string } | null>(null)
 
   useEffect(() => {
     let unmounted = false
@@ -143,6 +146,7 @@ export function useAgent() {
           setRelayActive(msg.active)
           setRelayModel(msg.model)
           setRelayUsage(msg.usage)
+          setIsAdmin(msg.admin ?? false)
         }
         if (msg.type === 'file_ingested') recentIngestedFiles.current.push({ id: msg.id, filename: msg.filename })
         if (msg.type === 'heartbeat') setLastHeartbeat({ time: new Date(), status: msg.status })
@@ -181,6 +185,15 @@ export function useAgent() {
         }
         if (msg.type === 'relay_credentials') {
           setRelayCredentials(msg)
+        }
+        if (msg.type === 'admin_token_created') {
+          setAdminNewToken({ token: msg.token, userId: msg.userId })
+        }
+        if (msg.type === 'admin_tokens_list') {
+          setAdminUsers(msg.users)
+        }
+        if (msg.type === 'admin_token_toggled') {
+          setAdminUsers(prev => prev.map(u => u.token === msg.token ? { ...u, active: msg.active } : u))
         }
         if (msg.type === 'error') { setError(msg.message); setTimeout(() => setError(null), 5000) }
         if (msg.type === 'integration_needs_fields') {
@@ -413,5 +426,21 @@ export function useAgent() {
     send({ type: 'get_relay_credentials' })
   }, [send])
 
-  return { queue, done, messages, streamingText, thinking, processing, toolLabel, connected, lastHeartbeat, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, pendingFields, setPendingFields, setModel, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials }
+  const adminCreateToken = useCallback((label: string) => {
+    send({ type: 'admin_create_token', label })
+  }, [send])
+
+  const adminListTokens = useCallback(() => {
+    send({ type: 'admin_list_tokens' })
+  }, [send])
+
+  const adminRevokeToken = useCallback((token: string) => {
+    send({ type: 'admin_revoke_token', token })
+  }, [send])
+
+  const clearAdminNewToken = useCallback(() => {
+    setAdminNewToken(null)
+  }, [])
+
+  return { queue, done, messages, streamingText, thinking, processing, toolLabel, connected, lastHeartbeat, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, pendingFields, setPendingFields, setModel, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken }
 }

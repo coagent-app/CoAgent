@@ -36,6 +36,7 @@ interface TokenData {
   usage: UsageData
   createdAt: string
   active: boolean
+  admin?: boolean
 }
 
 // --- Model configs ---
@@ -908,6 +909,7 @@ export default {
         supportAmount: data.supportAmount,
         usage: data.usage,
         createdAt: data.createdAt,
+        admin: data.admin || false,
       })
     }
 
@@ -935,6 +937,73 @@ export default {
       const result = await validateRequest(request, env)
       if (result instanceof Response) return result
       return proxyOpenAITranscription(request, env, result.token, result.data)
+    }
+
+    // --- Admin endpoints (admin token required) ---
+    if (url.pathname === '/admin/create-token' && request.method === 'POST') {
+      const result = await validateRequest(request, env)
+      if (result instanceof Response) return result
+      const adminData = result.data
+      if (!adminData.admin) return jsonResponse({ error: 'Admin access required' }, 403)
+
+      const body = await request.json() as { label?: string }
+      const token = generateToken()
+      const prevId = parseInt(await env.TOKENS.get('_next_user_id') || '0')
+      const userId = prevId + 1
+      await env.TOKENS.put('_next_user_id', String(userId))
+
+      const tokenData: TokenData = {
+        userId,
+        stripeCustomerId: body.label || `admin-created-${userId}`,
+        model: 'claude-sonnet-4-6',
+        supportAmount: 0,
+        usage: freshUsage(),
+        createdAt: new Date().toISOString(),
+        active: true,
+      }
+      await saveToken(env, token, tokenData)
+      return jsonResponse({ ok: true, token, userId })
+    }
+
+    if (url.pathname === '/admin/list-tokens' && request.method === 'GET') {
+      const result = await validateRequest(request, env)
+      if (result instanceof Response) return result
+      if (!result.data.admin) return jsonResponse({ error: 'Admin access required' }, 403)
+
+      // List all tokens from KV (scan with prefix)
+      const list = await env.TOKENS.list()
+      const users: any[] = []
+      for (const key of list.keys) {
+        if (key.name.startsWith('_') || key.name.startsWith('stripe:')) continue
+        const data = await getToken(env, key.name)
+        if (data) {
+          users.push({
+            token: key.name.slice(0, 8) + '...',
+            fullToken: key.name,
+            userId: data.userId,
+            model: data.model,
+            active: data.active,
+            admin: data.admin || false,
+            createdAt: data.createdAt,
+            label: data.stripeCustomerId,
+            totalCostUsd: data.usage.totalCostUsd,
+          })
+        }
+      }
+      return jsonResponse({ users })
+    }
+
+    if (url.pathname === '/admin/revoke-token' && request.method === 'POST') {
+      const result = await validateRequest(request, env)
+      if (result instanceof Response) return result
+      if (!result.data.admin) return jsonResponse({ error: 'Admin access required' }, 403)
+
+      const body = await request.json() as { token: string }
+      const data = await getToken(env, body.token)
+      if (!data) return jsonResponse({ error: 'Token not found' }, 404)
+      data.active = !data.active
+      await saveToken(env, body.token, data)
+      return jsonResponse({ ok: true, active: data.active })
     }
 
     // --- Composio proxy (all methods) ---

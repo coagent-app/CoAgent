@@ -4,9 +4,9 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Input } from '@/components/ui/input'
 import { Separator } from '@/components/ui/separator'
 import { cn } from '@/lib/utils'
-import type { AgentSettings, DayName, Autonomy, RelayUsage, UsageSummary } from '@coagent/shared'
+import type { AgentSettings, DayName, Autonomy, RelayUsage, UsageSummary, AdminUser } from '@coagent/shared'
 
-type SettingsTab = 'general' | 'model' | 'usage'
+type SettingsTab = 'general' | 'model' | 'usage' | 'admin'
 
 interface SettingsPaneProps {
   settings: AgentSettings | null
@@ -20,6 +20,13 @@ interface SettingsPaneProps {
   onSetModel: (model: string) => void
   usage?: UsageSummary | null
   onRefreshUsage?: () => void
+  isAdmin?: boolean
+  adminUsers?: AdminUser[]
+  adminNewToken?: { token: string; userId: string } | null
+  onAdminCreateToken?: (label: string) => void
+  onAdminListTokens?: () => void
+  onAdminRevokeToken?: (token: string) => void
+  onClearAdminNewToken?: () => void
 }
 
 // --- Shared UI ---
@@ -117,7 +124,9 @@ function ProviderLogo({ provider, className = '' }: { provider: string; classNam
 
 // --- Tab: General ---
 
-function GeneralTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate: (patch: Partial<AgentSettings>) => void }) {
+const DEFAULT_RELAY_URL = 'https://coagent-relay.brettponters.workers.dev'
+
+function GeneralTab({ settings, onUpdate, relayActive, onActivateRelay }: { settings: AgentSettings; onUpdate: (patch: Partial<AgentSettings>) => void; relayActive?: boolean; onActivateRelay?: (token: string, relayUrl: string) => void }) {
   const s = settings
   const tzValue = TIMEZONES.find(t => t.value === s.timezone) ? s.timezone : '__detect__'
 
@@ -299,7 +308,60 @@ function GeneralTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate:
         )}
         </>
       )}
+
+      <Separator className="my-6 dark:bg-neutral-800" />
+
+      <SectionHeader eyebrow="Connection" title="Relay" />
+      {relayActive ? (
+        <div className="flex items-center gap-2">
+          <div className="w-2 h-2 rounded-full bg-emerald-500" />
+          <span className="text-[13px] text-neutral-600 dark:text-neutral-400">Connected to relay</span>
+        </div>
+      ) : (
+        <RelayActivation onActivate={onActivateRelay} />
+      )}
     </>
+  )
+}
+
+function RelayActivation({ onActivate }: { onActivate?: (token: string, relayUrl: string) => void }) {
+  const [token, setToken] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+
+  function handleActivate() {
+    const t = token.trim()
+    if (!t || !onActivate) return
+    setSubmitting(true)
+    onActivate(t, DEFAULT_RELAY_URL)
+    setTimeout(() => setSubmitting(false), 3000)
+  }
+
+  return (
+    <div className="space-y-3">
+      <p className="text-[12.5px] text-neutral-500 dark:text-neutral-400">
+        Paste the token you received to connect your agent.
+      </p>
+      <Input
+        className="text-[13.5px] font-mono dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500"
+        placeholder="Paste your relay token"
+        value={token}
+        onChange={e => setToken(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') handleActivate() }}
+      />
+      <button
+        type="button"
+        disabled={!token.trim() || submitting}
+        onClick={handleActivate}
+        className={cn(
+          'px-4 py-2 rounded-lg text-[13px] font-medium transition-colors',
+          token.trim() && !submitting
+            ? 'bg-neutral-900 text-white hover:bg-neutral-800 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-200'
+            : 'bg-neutral-200 text-neutral-400 dark:bg-neutral-800 dark:text-neutral-600 cursor-not-allowed'
+        )}
+      >
+        {submitting ? 'Connecting...' : 'Connect'}
+      </button>
+    </div>
   )
 }
 
@@ -427,16 +489,157 @@ function UsageTab({ usage, onRefresh }: { usage: UsageSummary | null; onRefresh?
   )
 }
 
+// --- Tab: Admin ---
+
+function AdminTab({
+  users,
+  newToken,
+  onCreateToken,
+  onListTokens,
+  onRevokeToken,
+  onClearNewToken,
+}: {
+  users: AdminUser[]
+  newToken: { token: string; userId: string } | null
+  onCreateToken: (label: string) => void
+  onListTokens: () => void
+  onRevokeToken: (token: string) => void
+  onClearNewToken: () => void
+}) {
+  const [label, setLabel] = useState('')
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => { onListTokens() }, [onListTokens])
+
+  function handleGenerate() {
+    if (!label.trim()) return
+    onCreateToken(label.trim())
+    setLabel('')
+  }
+
+  function handleCopy(text: string) {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
+
+  return (
+    <>
+      <SectionHeader eyebrow="Admin" title="Relay tokens" />
+      <p className="text-[13px] text-neutral-500 dark:text-neutral-400 mb-5">
+        Create tokens for other users to connect their agent to your relay.
+      </p>
+
+      {/* Create token */}
+      <div className="px-4 py-4 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 mb-5">
+        <p className="text-[12px] font-semibold text-neutral-500 dark:text-neutral-400 uppercase tracking-widest mb-3">Create token</p>
+        <div className="flex gap-2">
+          <Input
+            className="text-[13.5px] dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500"
+            placeholder="Label (e.g. Alice's agent)"
+            value={label}
+            onChange={e => setLabel(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') handleGenerate() }}
+          />
+          <button
+            type="button"
+            onClick={handleGenerate}
+            disabled={!label.trim()}
+            className="px-4 py-2 rounded-lg text-[13px] font-semibold bg-neutral-900 text-white dark:bg-neutral-100 dark:text-neutral-900 disabled:opacity-40 hover:opacity-90 transition-opacity flex-shrink-0"
+          >
+            Generate
+          </button>
+        </div>
+
+        {newToken && (
+          <div className="mt-3 flex items-center gap-2">
+            <div className="flex-1 font-mono text-[12px] px-3 py-2 rounded-lg bg-neutral-100 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 truncate select-all">
+              {newToken.token}
+            </div>
+            <button
+              type="button"
+              onClick={() => handleCopy(newToken.token)}
+              className="px-3 py-2 rounded-lg text-[12px] font-semibold border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-neutral-700 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-neutral-700 transition-colors flex-shrink-0"
+            >
+              {copied ? 'Copied!' : 'Copy'}
+            </button>
+            <button
+              type="button"
+              onClick={onClearNewToken}
+              className="px-2 py-2 rounded-lg text-[12px] text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 transition-colors"
+              aria-label="Dismiss"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Users table */}
+      <SectionHeader eyebrow="Users" title="Active tokens" />
+      {users.length === 0 ? (
+        <p className="text-[13px] text-neutral-400 dark:text-neutral-500">No tokens yet.</p>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {users.map(user => (
+            <div
+              key={user.token}
+              className="px-4 py-3 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900"
+            >
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-0.5">
+                    <span className="text-[13px] font-semibold text-neutral-900 dark:text-neutral-100 truncate">
+                      {user.label || user.userId}
+                    </span>
+                    <span className={cn(
+                      'text-[10px] font-semibold px-1.5 py-0.5 rounded-full flex-shrink-0',
+                      user.active
+                        ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400'
+                        : 'bg-neutral-100 text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400'
+                    )}>
+                      {user.active ? 'Active' : 'Revoked'}
+                    </span>
+                  </div>
+                  <div className="flex gap-3 text-[11.5px] text-neutral-400 dark:text-neutral-500">
+                    <span>{user.userId}</span>
+                    {user.costUsd > 0 && <span>${user.costUsd.toFixed(2)}</span>}
+                    <span>{new Date(user.createdAt).toLocaleDateString()}</span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onRevokeToken(user.token)}
+                  className={cn(
+                    'px-3 py-1.5 rounded-lg text-[12px] font-medium border transition-colors flex-shrink-0',
+                    user.active
+                      ? 'border-neutral-200 dark:border-neutral-700 text-neutral-600 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800'
+                      : 'border-neutral-200 dark:border-neutral-700 text-emerald-600 dark:text-emerald-400 hover:bg-neutral-50 dark:hover:bg-neutral-800'
+                  )}
+                >
+                  {user.active ? 'Revoke' : 'Activate'}
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  )
+}
+
 // --- Main ---
 
-const TABS: { id: SettingsTab; label: string }[] = [
+const BASE_TABS: { id: SettingsTab; label: string }[] = [
   { id: 'general', label: 'General' },
   { id: 'model', label: 'Model' },
   { id: 'usage', label: 'Usage' },
 ]
 
-export function SettingsPane({ settings, onUpdate, onSetModel, usage, onRefreshUsage }: SettingsPaneProps) {
+export function SettingsPane({ settings, onUpdate, onSetModel, usage, onRefreshUsage, isAdmin, adminUsers, adminNewToken, onAdminCreateToken, onAdminListTokens, onAdminRevokeToken, onClearAdminNewToken, relayActive, onActivateRelay }: SettingsPaneProps) {
   const [tab, setTab] = useState<SettingsTab>('general')
+  const TABS = isAdmin ? [...BASE_TABS, { id: 'admin' as SettingsTab, label: 'Admin' }] : BASE_TABS
 
   if (!settings) {
     return (
@@ -472,9 +675,19 @@ export function SettingsPane({ settings, onUpdate, onSetModel, usage, onRefreshU
       {/* Tab content */}
       <ScrollArea className="flex-1">
         <div className="px-8 py-6 max-w-xl">
-          {tab === 'general' && <GeneralTab settings={settings} onUpdate={onUpdate} />}
+          {tab === 'general' && <GeneralTab settings={settings} onUpdate={onUpdate} relayActive={relayActive} onActivateRelay={onActivateRelay} />}
           {tab === 'model' && <ModelTab settings={settings} onSetModel={onSetModel} />}
           {tab === 'usage' && <UsageTab usage={usage ?? null} onRefresh={onRefreshUsage} />}
+          {tab === 'admin' && isAdmin && (
+            <AdminTab
+              users={adminUsers ?? []}
+              newToken={adminNewToken ?? null}
+              onCreateToken={onAdminCreateToken ?? (() => {})}
+              onListTokens={onAdminListTokens ?? (() => {})}
+              onRevokeToken={onAdminRevokeToken ?? (() => {})}
+              onClearNewToken={onClearAdminNewToken ?? (() => {})}
+            />
+          )}
           <div className="h-8" />
         </div>
       </ScrollArea>

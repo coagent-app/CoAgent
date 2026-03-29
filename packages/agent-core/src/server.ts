@@ -945,14 +945,24 @@ getCustomMcpConfigs().then(async (configs) => {
 // Kill any stale process on the port before starting
 try {
   const { execSync } = require('child_process')
-  const pids = execSync(`lsof -ti:${PORT}`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }).trim()
-  if (pids) {
-    // Don't kill ourselves
+  if (process.platform === 'win32') {
+    const out = execSync(`netstat -ano | findstr ":${PORT}" | findstr LISTENING`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }).trim()
+    const pids = [...new Set(out.split('\n').map((l: string) => l.trim().split(/\s+/).pop()).filter(Boolean))]
     const myPid = String(process.pid)
-    const stale = pids.split('\n').filter((p: string) => p !== myPid)
+    const stale = pids.filter((p: string) => p !== myPid)
     if (stale.length > 0) {
-      execSync(`kill -9 ${stale.join(' ')}`, { stdio: 'ignore' })
+      for (const pid of stale) { try { execSync(`taskkill /PID ${pid} /F`, { stdio: 'ignore' }) } catch {} }
       console.log(`[Server] Killed stale process(es) on port ${PORT}: ${stale.join(', ')}`)
+    }
+  } else {
+    const pids = execSync(`lsof -ti:${PORT}`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }).trim()
+    if (pids) {
+      const myPid = String(process.pid)
+      const stale = pids.split('\n').filter((p: string) => p !== myPid)
+      if (stale.length > 0) {
+        execSync(`kill -9 ${stale.join(' ')}`, { stdio: 'ignore' })
+        console.log(`[Server] Killed stale process(es) on port ${PORT}: ${stale.join(', ')}`)
+      }
     }
   }
 } catch {}
@@ -1056,8 +1066,8 @@ async function sendRelayStatus(ws: WebSocket): Promise<void> {
     headers: { 'Authorization': `Bearer ${relay.token}` },
   })
   if (res.ok) {
-    const data = await res.json() as { model: string; usage: any }
-    send(ws, { type: 'relay_status', active: true, model: data.model, usage: data.usage })
+    const data = await res.json() as { model: string; usage: any; admin?: boolean }
+    send(ws, { type: 'relay_status', active: true, model: data.model, usage: data.usage, admin: data.admin ?? false })
   } else {
     send(ws, { type: 'relay_status', active: false, model: null, usage: null })
   }
@@ -1861,8 +1871,8 @@ wss.on('connection', (ws) => {
           headers: { 'Authorization': `Bearer ${msg.token}` },
         })
         if (res.ok) {
-          const data = await res.json() as { model: string; usage: any }
-          send(ws, { type: 'relay_status', active: true, model: data.model, usage: data.usage })
+          const data = await res.json() as { model: string; usage: any; admin?: boolean }
+          send(ws, { type: 'relay_status', active: true, model: data.model, usage: data.usage, admin: data.admin ?? false })
         } else {
           send(ws, { type: 'relay_status', active: false, model: null, usage: null })
         }
@@ -1894,6 +1904,79 @@ wss.on('connection', (ws) => {
       const token = process.env.RELAY_TOKEN ?? ''
       const userId = process.env.RELAY_USER_ID ?? 'default'
       send(ws, { type: 'relay_credentials', relayUrl, token, userId })
+    }
+
+    if (msg.type === 'admin_create_token') {
+      const relayUrl = process.env.RELAY_URL
+      const relayToken = process.env.RELAY_TOKEN
+      if (!relayUrl || !relayToken) {
+        send(ws, { type: 'error', message: 'Relay not configured' })
+      } else {
+        try {
+          const res = await fetch(`${relayUrl}/admin/create-token`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${relayToken}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ label: msg.label }),
+          })
+          if (res.ok) {
+            const data = await res.json() as { token: string; userId: string }
+            send(ws, { type: 'admin_token_created', token: data.token, userId: data.userId })
+          } else {
+            const err = await res.text()
+            send(ws, { type: 'error', message: `Failed to create token: ${err}` })
+          }
+        } catch (err: any) {
+          send(ws, { type: 'error', message: `Admin error: ${err.message}` })
+        }
+      }
+    }
+
+    if (msg.type === 'admin_list_tokens') {
+      const relayUrl = process.env.RELAY_URL
+      const relayToken = process.env.RELAY_TOKEN
+      if (!relayUrl || !relayToken) {
+        send(ws, { type: 'error', message: 'Relay not configured' })
+      } else {
+        try {
+          const res = await fetch(`${relayUrl}/admin/list-tokens`, {
+            headers: { 'Authorization': `Bearer ${relayToken}` },
+          })
+          if (res.ok) {
+            const data = await res.json() as { users: any[] }
+            send(ws, { type: 'admin_tokens_list', users: data.users })
+          } else {
+            const err = await res.text()
+            send(ws, { type: 'error', message: `Failed to list tokens: ${err}` })
+          }
+        } catch (err: any) {
+          send(ws, { type: 'error', message: `Admin error: ${err.message}` })
+        }
+      }
+    }
+
+    if (msg.type === 'admin_revoke_token') {
+      const relayUrl = process.env.RELAY_URL
+      const relayToken = process.env.RELAY_TOKEN
+      if (!relayUrl || !relayToken) {
+        send(ws, { type: 'error', message: 'Relay not configured' })
+      } else {
+        try {
+          const res = await fetch(`${relayUrl}/admin/revoke-token`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${relayToken}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: msg.token }),
+          })
+          if (res.ok) {
+            const data = await res.json() as { token: string; active: boolean }
+            send(ws, { type: 'admin_token_toggled', token: data.token, active: data.active })
+          } else {
+            const err = await res.text()
+            send(ws, { type: 'error', message: `Failed to toggle token: ${err}` })
+          }
+        } catch (err: any) {
+          send(ws, { type: 'error', message: `Admin error: ${err.message}` })
+        }
+      }
     }
 
     if (msg.type === 'get_usage') {

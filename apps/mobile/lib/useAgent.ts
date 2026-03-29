@@ -118,8 +118,17 @@ export function useAgent() {
             })
             break
           case 'chat_response':
-            setMessages(msgs => [...msgs, msg.message])
-            setStreamingText(null)
+            // Server-injected user messages (e.g. scheduled task fired) — add directly
+            if (msg.message.role === 'user') {
+              setMessages(msgs => [...msgs, msg.message])
+            }
+            // Flush any remaining streaming text as a final bubble
+            setStreamingText(prev => {
+              if (prev?.trim()) {
+                setMessages(msgs => [...msgs, { role: 'assistant', content: prev, timestamp: new Date().toISOString() }])
+              }
+              return null
+            })
             setProcessing(false)
             setToolLabel(null)
             break

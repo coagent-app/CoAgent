@@ -1,10 +1,13 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::ffi::c_void;
-use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::process::{Child, Command};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+#[cfg(target_os = "macos")]
+use std::ffi::c_void;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::AtomicPtr;
 use tauri::{Emitter, Listener, Manager};
 
 // ── File logging (visible when launched from Finder where stderr is lost) ────
@@ -15,10 +18,11 @@ fn log(msg: &str) {
         .unwrap_or_default();
     let secs = now.as_secs();
     let line = format!("[{}] {}\n", secs, msg);
+    let log_path = std::env::temp_dir().join("coagent.log");
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open("/tmp/coagent.log")
+        .open(&log_path)
     {
         let _ = f.write_all(line.as_bytes());
     }
@@ -68,20 +72,28 @@ unsafe fn create_nsstring(s: &str) -> *mut c_void {
 
 // Whether voice mode is enabled (controlled by frontend settings)
 static VOICE_ENABLED: AtomicBool = AtomicBool::new(false);
-// Whether fn key is currently held (for press/release edge detection in callback)
+
+#[cfg(target_os = "macos")]
 static FN_DOWN: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
 static CTRL_DOWN: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
 static SYSTEM_SLEEPING: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
 static ROOT_PORT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+#[cfg(target_os = "macos")]
 const FN_FLAG: u64 = 0x800000;
+#[cfg(target_os = "macos")]
 const CTRL_FLAG: u64 = 0x40000; // kCGEventFlagMaskControl
 
+#[cfg(target_os = "macos")]
 #[derive(Clone, Copy)]
 enum FnKeyEvent { Pressed, Released, Cancel }
 
-// Channel sender — callback sends events here (non-blocking, nanoseconds)
+#[cfg(target_os = "macos")]
 static FN_SENDER: std::sync::OnceLock<std::sync::mpsc::Sender<FnKeyEvent>> = std::sync::OnceLock::new();
 
+#[cfg(target_os = "macos")]
 mod cg {
     use std::ffi::c_void;
     pub const K_CG_HID_EVENT_TAP: u32 = 0;
@@ -107,6 +119,7 @@ mod cg {
 }
 
 // Accessibility permission check — prompts the user if not granted
+#[cfg(target_os = "macos")]
 mod ax {
     use std::ffi::c_void;
     extern "C" {
@@ -203,10 +216,12 @@ extern "C" fn power_callback(
     }
 }
 
+#[cfg(target_os = "macos")]
 static EVENT_TAP: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static APP_HANDLE: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
 
 // Callback: nanoseconds of work — detect edge, send to channel, suppress event.
+#[cfg(target_os = "macos")]
 extern "C" fn fn_key_callback(
     _proxy: *mut c_void, etype: u32, event: *mut c_void, _info: *mut c_void,
 ) -> *mut c_void {
@@ -312,11 +327,12 @@ fn reveal_in_file_manager(path: String) -> Result<(), String> {
 }
 
 fn find_server_binary() -> Option<std::path::PathBuf> {
-    // The binary is in the same directory as the main executable (Contents/MacOS/)
-    // Tauri's externalBin places it there automatically during bundling
+    // The binary is in the same directory as the main executable.
+    // Tauri's externalBin places it there automatically during bundling.
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let candidate = dir.join("coagent-server");
+            let name = if cfg!(target_os = "windows") { "coagent-server.exe" } else { "coagent-server" };
+            let candidate = dir.join(name);
             if candidate.exists() {
                 return Some(candidate);
             }
@@ -410,126 +426,121 @@ fn main() {
                 }
             });
 
-            // Check Accessibility permission — prompt user if missing
-            let trusted = ax::is_trusted(true); // true = show macOS prompt dialog
-            if trusted {
-                log("[Tauri] Accessibility permission: granted");
-            } else {
-                log("[Tauri] Accessibility permission: NOT granted — prompted user");
-            }
+            // macOS: Accessibility permission + CGEventTap for fn key voice input
+            #[cfg(target_os = "macos")]
+            {
+                let trusted = ax::is_trusted(true);
+                if trusted {
+                    log("[Tauri] Accessibility permission: granted");
+                } else {
+                    log("[Tauri] Accessibility permission: NOT granted — prompted user");
+                }
 
-            // Channel: callback sends events (nanoseconds), worker receives (blocks, zero CPU)
-            let (tx, rx) = std::sync::mpsc::channel::<FnKeyEvent>();
-            let _ = FN_SENDER.set(tx);
+                let (tx, rx) = std::sync::mpsc::channel::<FnKeyEvent>();
+                let _ = FN_SENDER.set(tx);
 
-            // Thread 1: CGEventTap setup — waits for permission if needed, then runs RunLoop
-            std::thread::spawn(move || {
-                // If not trusted yet, poll every 2s until user grants permission
-                if !trusted {
-                    log("[Tauri] Waiting for Accessibility permission...");
-                    loop {
-                        std::thread::sleep(std::time::Duration::from_secs(2));
-                        if ax::is_trusted(false) {
-                            log("[Tauri] Accessibility permission granted!");
-                            break;
+                // Thread 1: CGEventTap setup — waits for permission if needed, then runs RunLoop
+                std::thread::spawn(move || {
+                    if !trusted {
+                        log("[Tauri] Waiting for Accessibility permission...");
+                        loop {
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                            if ax::is_trusted(false) {
+                                log("[Tauri] Accessibility permission granted!");
+                                break;
+                            }
                         }
                     }
-                }
 
-                unsafe {
-                    let mask = cg::event_mask_bit(cg::K_CG_FLAGS_CHANGED);
-                    let tap = cg::CGEventTapCreate(
-                        cg::K_CG_HID_EVENT_TAP,
-                        cg::K_CG_HEAD_INSERT,
-                        cg::K_CG_EVENT_TAP_OPTION_DEFAULT,
-                        mask,
-                        fn_key_callback,
-                        std::ptr::null_mut(),
-                    );
-                    if tap.is_null() {
-                        log("[Tauri] CGEventTap failed even after permission check");
-                        return;
+                    unsafe {
+                        let mask = cg::event_mask_bit(cg::K_CG_FLAGS_CHANGED);
+                        let tap = cg::CGEventTapCreate(
+                            cg::K_CG_HID_EVENT_TAP,
+                            cg::K_CG_HEAD_INSERT,
+                            cg::K_CG_EVENT_TAP_OPTION_DEFAULT,
+                            mask,
+                            fn_key_callback,
+                            std::ptr::null_mut(),
+                        );
+                        if tap.is_null() {
+                            log("[Tauri] CGEventTap failed even after permission check");
+                            return;
+                        }
+                        EVENT_TAP.store(tap, Ordering::Release);
+                        log("[Tauri] CGEventTap active — fn key will trigger voice");
+                        let src = cg::CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0);
+                        let rl = cg::CFRunLoopGetCurrent();
+                        cg::CFRunLoopAddSource(rl, src, cg::kCFRunLoopCommonModes);
+                        cg::CGEventTapEnable(tap, true);
+
+                        let mut notify_port: *mut c_void = std::ptr::null_mut();
+                        let mut notifier: u32 = 0;
+                        let root_port = iokit::IORegisterForSystemPower(
+                            std::ptr::null_mut(),
+                            &mut notify_port,
+                            power_callback,
+                            &mut notifier,
+                        );
+                        if root_port != 0 {
+                            ROOT_PORT.store(root_port, Ordering::Release);
+                            let power_src = iokit::IONotificationPortGetRunLoopSource(notify_port);
+                            cg::CFRunLoopAddSource(rl, power_src, cg::kCFRunLoopCommonModes);
+                            log("[Power] Registered for sleep/wake notifications");
+                        } else {
+                            log("[Power] Failed to register for sleep/wake notifications");
+                        }
+
+                        cg::CFRunLoopRun();
                     }
-                    EVENT_TAP.store(tap, Ordering::Release);
-                    log("[Tauri] CGEventTap active — fn key will trigger voice");
-                    let src = cg::CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0);
-                    let rl = cg::CFRunLoopGetCurrent();
-                    cg::CFRunLoopAddSource(rl, src, cg::kCFRunLoopCommonModes);
-                    cg::CGEventTapEnable(tap, true);
+                });
 
-                    // Register for system sleep/wake so we disable the tap before sleep
-                    let mut notify_port: *mut c_void = std::ptr::null_mut();
-                    let mut notifier: u32 = 0;
-                    let root_port = iokit::IORegisterForSystemPower(
-                        std::ptr::null_mut(),
-                        &mut notify_port,
-                        power_callback,
-                        &mut notifier,
-                    );
-                    if root_port != 0 {
-                        ROOT_PORT.store(root_port, Ordering::Release);
-                        let power_src = iokit::IONotificationPortGetRunLoopSource(notify_port);
-                        cg::CFRunLoopAddSource(rl, power_src, cg::kCFRunLoopCommonModes);
-                        log("[Power] Registered for sleep/wake notifications");
-                    } else {
-                        log("[Power] Failed to register for sleep/wake notifications");
-                    }
-
-                    cg::CFRunLoopRun();
-                }
-            });
-
-            // Thread 2: Blocks on channel — zero CPU when idle, instant wake on fn key.
-            // recv_timeout(10s) periodically re-enables the tap if macOS killed it.
-            std::thread::spawn(move || {
-                loop {
-                    match rx.recv_timeout(std::time::Duration::from_secs(10)) {
-                        Ok(evt) => {
-                            let Some(handle) = APP_HANDLE.get() else { continue; };
-                            match evt {
-                                FnKeyEvent::Pressed => {
-                                    log("[Voice] fn pressed");
-                                    let _ = handle.emit("voice-fn-press", ());
-                                    if let Some(pill) = handle.get_webview_window("voice-pill") {
-                                        // Position pill at bottom center of primary monitor
-                                        if let Ok(Some(monitor)) = pill.primary_monitor() {
-                                            let screen = monitor.size();
-                                            let scale = monitor.scale_factor();
-                                            let logical_w = screen.width as f64 / scale;
-                                            let logical_h = screen.height as f64 / scale;
-                                            let pill_w = 440.0;
-                                            let x = (logical_w - pill_w) / 2.0;
-                                            let y = logical_h - 170.0; // above the dock
-                                            let _ = pill.set_position(tauri::LogicalPosition::new(x, y));
+                // Thread 2: Blocks on channel — zero CPU when idle, instant wake on fn key.
+                std::thread::spawn(move || {
+                    loop {
+                        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+                            Ok(evt) => {
+                                let Some(handle) = APP_HANDLE.get() else { continue; };
+                                match evt {
+                                    FnKeyEvent::Pressed => {
+                                        log("[Voice] fn pressed");
+                                        let _ = handle.emit("voice-fn-press", ());
+                                        if let Some(pill) = handle.get_webview_window("voice-pill") {
+                                            if let Ok(Some(monitor)) = pill.primary_monitor() {
+                                                let screen = monitor.size();
+                                                let scale = monitor.scale_factor();
+                                                let logical_w = screen.width as f64 / scale;
+                                                let logical_h = screen.height as f64 / scale;
+                                                let pill_w = 440.0;
+                                                let x = (logical_w - pill_w) / 2.0;
+                                                let y = logical_h - 170.0;
+                                                let _ = pill.set_position(tauri::LogicalPosition::new(x, y));
+                                            }
+                                            let _ = pill.show();
                                         }
-                                        let _ = pill.show();
+                                    }
+                                    FnKeyEvent::Released => {
+                                        log("[Voice] fn released");
+                                        let _ = handle.emit("voice-fn-release", ());
+                                    }
+                                    FnKeyEvent::Cancel => {
+                                        log("[Voice] fn+Control — cancel");
+                                        let _ = handle.emit("voice-cancel", ());
                                     }
                                 }
-                                FnKeyEvent::Released => {
-                                    log("[Voice] fn released");
-                                    let _ = handle.emit("voice-fn-release", ());
-                                    // Don't hide pill here — voice.ts hides it after showing response
-                                }
-                                FnKeyEvent::Cancel => {
-                                    log("[Voice] fn+Control — cancel");
-                                    let _ = handle.emit("voice-cancel", ());
+                            }
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                                if SYSTEM_SLEEPING.load(Ordering::Relaxed) { continue; }
+                                let tap = EVENT_TAP.load(Ordering::Relaxed);
+                                if !tap.is_null() && !unsafe { cg::CGEventTapIsEnabled(tap) } {
+                                    log("[Voice] Re-enabling disabled event tap");
+                                    unsafe { cg::CGEventTapEnable(tap, true); }
                                 }
                             }
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                         }
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                            // Skip health check while system is sleeping
-                            if SYSTEM_SLEEPING.load(Ordering::Relaxed) { continue; }
-                            // Periodic health check: re-enable tap if macOS disabled it
-                            let tap = EVENT_TAP.load(Ordering::Relaxed);
-                            if !tap.is_null() && !unsafe { cg::CGEventTapIsEnabled(tap) } {
-                                log("[Voice] Re-enabling disabled event tap");
-                                unsafe { cg::CGEventTapEnable(tap, true); }
-                            }
-                        }
-                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     }
-                }
-            });
+                });
+            }
 
             Ok(())
         })

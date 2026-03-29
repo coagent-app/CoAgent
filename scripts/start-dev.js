@@ -11,12 +11,23 @@ const children = []
 
 function killPort(port) {
   try {
-    const pids = execSync(`lsof -ti :${port} 2>/dev/null`, { encoding: 'utf-8' }).trim()
-    if (pids) {
-      for (const pid of pids.split('\n')) {
-        try { process.kill(parseInt(pid), 'SIGTERM') } catch {}
+    if (process.platform === 'win32') {
+      const out = execSync(`netstat -ano | findstr ":${port}" | findstr LISTENING`, { encoding: 'utf-8' }).trim()
+      if (out) {
+        const pids = [...new Set(out.split('\n').map(l => l.trim().split(/\s+/).pop()).filter(Boolean))]
+        for (const pid of pids) {
+          try { execSync(`taskkill /PID ${pid} /F`, { stdio: 'ignore' }) } catch {}
+        }
+        return true
       }
-      return true
+    } else {
+      const pids = execSync(`lsof -ti :${port} 2>/dev/null`, { encoding: 'utf-8' }).trim()
+      if (pids) {
+        for (const pid of pids.split('\n')) {
+          try { process.kill(parseInt(pid), 'SIGTERM') } catch {}
+        }
+        return true
+      }
     }
   } catch {}
   return false

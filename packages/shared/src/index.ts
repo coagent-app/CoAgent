@@ -167,6 +167,9 @@ export type WSClientMessage =
   | { type: 'get_file_content'; id: string }
   | { type: 'register_push_token'; token: string }
   | { type: 'update_notification_prefs'; mode: NotificationMode }
+  | { type: 'admin_create_token'; label: string }
+  | { type: 'admin_list_tokens' }
+  | { type: 'admin_revoke_token'; token: string }
 
 export type WSServerMessage =
   | { type: 'queue_update'; items: ApprovalItem[] }
@@ -190,7 +193,10 @@ export type WSServerMessage =
   | { type: 'folders_update'; folders: string[] }
   | { type: 'files_search_result'; files: FileEntry[] }
   | { type: 'auth_status'; status: AuthStatus }
-  | { type: 'relay_status'; active: boolean; model: string | null; usage: RelayUsage | null }
+  | { type: 'relay_status'; active: boolean; model: string | null; usage: RelayUsage | null; admin?: boolean }
+  | { type: 'admin_token_created'; token: string; userId: string }
+  | { type: 'admin_tokens_list'; users: AdminUser[] }
+  | { type: 'admin_token_toggled'; token: string; active: boolean }
   | { type: 'heartbeat'; status: 'started' | 'done' | 'skipped' | 'escalated'; summary?: string }
   | { type: 'skills_update'; skills: { name: string; description: string; instructions: string; builtin?: boolean }[] }
   | { type: 'file_ingested'; id: string; filename: string }
@@ -209,6 +215,15 @@ export type WSServerMessage =
   | { type: 'relay_credentials'; relayUrl: string; token: string; userId: string }
   | { type: 'push_notification'; title: string; body: string }
   | { type: 'notification_prefs'; mode: NotificationMode }
+
+export interface AdminUser {
+  userId: string
+  label: string
+  token: string
+  active: boolean
+  costUsd: number
+  createdAt: string
+}
 
 export interface RelayUsage {
   inputTokens: number

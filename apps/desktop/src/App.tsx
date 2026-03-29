@@ -18,7 +18,7 @@ import { emit } from '@tauri-apps/api/event'
 import type { ApprovalItem } from '@coagent/shared'
 
 export default function App() {
-  const { queue, done, messages, streamingText, thinking, processing, toolLabel, connected, lastHeartbeat, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, error, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, settings, updateSettings, authStatus, updateAuth, verifyAuth, files, folders, searchResults, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, relayActive, relayModel, setRelayModel, relayUsage, activateRelay, refreshRelayStatus, pendingFields, setPendingFields, setModel, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials } = useAgent()
+  const { queue, done, messages, streamingText, thinking, processing, toolLabel, connected, lastHeartbeat, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, error, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, settings, updateSettings, authStatus, updateAuth, verifyAuth, files, folders, searchResults, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, relayActive, relayModel, setRelayModel, relayUsage, activateRelay, refreshRelayStatus, pendingFields, setPendingFields, setModel, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken } = useAgent()
   const { dark, toggle: toggleTheme } = useTheme()
   const [view, setView] = useState<View>('chat')
   const [selectedItem, setSelectedItem] = useState<ApprovalItem | null>(null)
@@ -112,6 +112,13 @@ export default function App() {
             onSetModel={setModel}
             usage={usage}
             onRefreshUsage={refreshUsage}
+            isAdmin={isAdmin}
+            adminUsers={adminUsers}
+            adminNewToken={adminNewToken}
+            onAdminCreateToken={adminCreateToken}
+            onAdminListTokens={adminListTokens}
+            onAdminRevokeToken={adminRevokeToken}
+            onClearAdminNewToken={clearAdminNewToken}
           />
         )}
 
