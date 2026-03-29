@@ -170,6 +170,13 @@ export type WSClientMessage =
   | { type: 'admin_create_token'; label: string }
   | { type: 'admin_list_tokens' }
   | { type: 'admin_revoke_token'; token: string }
+  | { type: 'team_send'; message: string; agentContext?: string; to?: string | string[] | null }
+  | { type: 'team_history'; limit?: number }
+  | { type: 'get_team_info' }
+  | { type: 'team_create'; name: string; memberName: string; memberRole: string; memberHandles: string }
+  | { type: 'team_join'; inviteCode: string; memberName: string; memberRole: string; memberHandles: string }
+  | { type: 'team_leave' }
+  | { type: 'team_invite' }
 
 export type WSServerMessage =
   | { type: 'queue_update'; items: ApprovalItem[] }
@@ -215,6 +222,13 @@ export type WSServerMessage =
   | { type: 'relay_credentials'; relayUrl: string; token: string; userId: string }
   | { type: 'push_notification'; title: string; body: string }
   | { type: 'notification_prefs'; mode: NotificationMode }
+  | { type: 'team_message'; message: TeamMessage }
+  | { type: 'team_history'; messages: TeamMessage[] }
+  | { type: 'team_info'; team: TeamInfo | null }
+  | { type: 'team_created'; teamId: string; inviteCode: string }
+  | { type: 'team_joined'; team: TeamInfo }
+  | { type: 'team_invite_code'; code: string }
+  | { type: 'team_error'; error: string }
 
 export interface AdminUser {
   userId: string
@@ -269,4 +283,39 @@ export interface UsageSummary {
     cacheCreationTokens: number
     costUsd: number
   }>
+}
+
+// ---------------------------------------------------------------------------
+// Team types
+// ---------------------------------------------------------------------------
+
+export interface TeamMember {
+  userId: string
+  name: string
+  role: string
+  handles: string
+}
+
+export interface TeamInfo {
+  teamId: string
+  name: string
+  ownerId: string
+  created: string
+  members: TeamMember[]
+}
+
+export interface TeamMessage {
+  id: string
+  teamId: string
+  timestamp: string
+  from: {
+    userId: string
+    name: string
+    role: string
+    isAgent: boolean
+  }
+  visible: string
+  agentContext: string
+  to: string | string[] | null
+  attachments: string[]
 }
