@@ -1,0 +1,17 @@
+{
+  "name": "@coagent/team-core",
+  "version": "0.0.1",
+  "main": "./src/index.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@coagent/shared": "workspace:*",
+    "ws": "^8.0.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.0.0",
+    "typescript": "^5.4.0"
+  }
+}
