@@ -1,13 +1,15 @@
 {
   "name": "@coagent/team-core",
   "version": "0.0.1",
-  "main": "./src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch"
   },
   "dependencies": {
     "@coagent/shared": "workspace:*",
+    "@lancedb/lancedb": "^0.13.0",
     "ws": "^8.0.0"
   },
   "devDependencies": {

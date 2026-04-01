@@ -337,7 +337,7 @@ export class RelayDO implements DurableObject {
     if (!webhookId || !timestamp || !sigHeader) return false
 
     // Replay protection: reject if timestamp is more than 5 minutes old
-    const ts = parseInt(timestamp, 10)
+    const ts = parseInt(timestamp as string, 10)
     if (isNaN(ts) || Math.abs(Date.now() / 1000 - ts) > 300) return false
 
     const signedContent = `${webhookId}.${timestamp}.${body}`
@@ -354,6 +354,6 @@ export class RelayDO implements DurableObject {
     const computed = 'v1,' + btoa(String.fromCharCode(...new Uint8Array(sig)))
 
     // Header may contain multiple space-separated signatures
-    return sigHeader.split(' ').some(s => s === computed)
+    return (sigHeader as string).split(' ').some(s => s === computed)
   }
 }

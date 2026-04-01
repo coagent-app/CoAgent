@@ -1,14 +1,19 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { mkdir } from 'fs/promises'
 import { join } from 'path'
+import { createHash } from 'crypto'
 import { connect, Table } from '@lancedb/lancedb'
 import { getOpenAIProxy } from './auth.js'
 
 const EMBED_DIM = 512
+const EMBED_CACHE_MAX = 500
+
+/** In-memory LRU cache: SHA-256(text) → embedding vector */
+const embedCache = new Map<string, number[]>()
 
 let table: Table | null = null
 let paramTable: Table | null = null
-let cachedToolKey: string | null = null
+let cachedToolHash: string | null = null
 let dataDir: string | null = null
 
 /** Set the data directory for disk persistence */
@@ -19,14 +24,35 @@ export function setToolEmbeddingsDir(dir: string): void {
 export async function embed(texts: string[]): Promise<number[][]> {
   const proxy = getOpenAIProxy()
   if (!proxy) return texts.map(() => [])
-  const res = await fetch(`${proxy.baseUrl}/v1/embeddings`, {
-    method: 'POST',
-    headers: { Authorization: proxy.authHeader, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ input: texts, model: 'text-embedding-3-small', dimensions: EMBED_DIM })
-  })
-  if (!res.ok) throw new Error(`Embedding error: ${res.status}`)
-  const data = await res.json() as { data: { embedding: number[] }[] }
-  return data.data.map(d => d.embedding)
+
+  // Check cache for each text
+  const keys = texts.map(t => createHash('sha256').update(t).digest('hex'))
+  const results: (number[] | null)[] = keys.map(k => embedCache.get(k) ?? null)
+  const missIndices = results.map((r, i) => r === null ? i : -1).filter(i => i >= 0)
+
+  if (missIndices.length > 0) {
+    const missTexts = missIndices.map(i => texts[i])
+    const res = await fetch(`${proxy.baseUrl}/v1/embeddings`, {
+      method: 'POST',
+      headers: { Authorization: proxy.authHeader, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ input: missTexts, model: 'text-embedding-3-small', dimensions: EMBED_DIM })
+    })
+    if (!res.ok) throw new Error(`Embedding error: ${res.status}`)
+    const data = await res.json() as { data: { embedding: number[] }[] }
+
+    for (let j = 0; j < missIndices.length; j++) {
+      const i = missIndices[j]
+      const vec = data.data[j].embedding
+      // Evict oldest entry if at capacity
+      if (embedCache.size >= EMBED_CACHE_MAX) {
+        embedCache.delete(embedCache.keys().next().value!)
+      }
+      embedCache.set(keys[i], vec)
+      results[i] = vec
+    }
+  }
+
+  return results as number[][]
 }
 
 function humanize(name: string): string {
@@ -134,10 +160,17 @@ function paramEmbedEntries(t: Anthropic.Tool): { tool: string; param: string; re
  */
 export async function embedTools(tools: Anthropic.Tool[]): Promise<void> {
   if (!getOpenAIProxy()) return
-  const toolKey = 'v3:' + tools.map(t => t.name).sort().join(',')
 
-  // Already indexed with same tools
-  if (toolKey === cachedToolKey && table && paramTable) return
+  // Content hash includes names + descriptions so changes to either trigger a re-embed
+  const toolHash = createHash('sha256')
+    .update(tools.map(t => `${t.name}:${t.description ?? ''}`).sort().join('\n'))
+    .digest('hex')
+
+  // Already indexed with same tool content
+  if (toolHash === cachedToolHash && table && paramTable) {
+    console.log('[tool-embeddings] Tools unchanged, skipping re-embed')
+    return
+  }
 
   const currentNames = new Set(tools.map(t => t.name))
   const toolsByName = new Map(tools.map(t => [t.name, t]))
@@ -152,7 +185,7 @@ export async function embedTools(tools: Anthropic.Tool[]): Promise<void> {
       const existingCount = await existingToolTable.countRows()
       if (existingCount === tools.length) {
         const paramCount = await existingParamTable.countRows()
-        cachedToolKey = toolKey
+        cachedToolHash = toolHash
         console.log(`[ToolEmbed] Loaded ${existingCount} tools + ${paramCount} params from LanceDB`)
         return
       }
@@ -193,7 +226,20 @@ export async function embedTools(tools: Anthropic.Tool[]): Promise<void> {
         console.log(`[ToolEmbed] Incremental: removed ${toRemove.length} stale tools`)
       }
 
-      cachedToolKey = toolKey
+      // Compact fragments to reclaim disk space (LanceDB accumulates .lance files on every delete+add)
+      if (toRemove.length > 0 || toAdd.length > 0) {
+        try {
+          await Promise.all([
+            existingToolTable.optimize(),
+            existingParamTable.optimize(),
+          ])
+          console.log('[ToolEmbed] Compacted tables')
+        } catch (err) {
+          console.warn('[ToolEmbed] Compaction failed (non-critical):', (err as Error).message)
+        }
+      }
+
+      cachedToolHash = toolHash
       return
     } catch (err) {
       console.warn('[ToolEmbed] Incremental update failed, rebuilding:', (err as Error).message)
@@ -220,7 +266,7 @@ export async function embedTools(tools: Anthropic.Tool[]): Promise<void> {
       createParamTable(paramRows)
     ])
 
-    cachedToolKey = toolKey
+    cachedToolHash = toolHash
     console.log(`[ToolEmbed] Full rebuild: ${toolRows.length} tools + ${paramRows.length} params (LanceDB)`)
   } catch (err) {
     console.warn('[ToolEmbed] Failed to embed tools:', (err as Error).message)
@@ -389,5 +435,5 @@ export async function searchToolsAndSchema(
 export function clearToolEmbeddings(): void {
   table = null
   paramTable = null
-  cachedToolKey = null
+  cachedToolHash = null
 }

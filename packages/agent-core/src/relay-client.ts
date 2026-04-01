@@ -238,6 +238,7 @@ export async function purgeEventStore(dataDir: string): Promise<void> {
 
 const MIN_BACKOFF_MS = 2_000
 const MAX_BACKOFF_MS = 30_000
+const STABLE_CONNECTION_MS = 60_000 // reset backoff after 60s of stable connection
 const LOCAL_PORT = parseInt(process.env.COAGENT_PORT ?? '7830')
 
 export class RelayClient {
@@ -247,6 +248,7 @@ export class RelayClient {
   private localWs: WebSocket | null = null
   private pingInterval: ReturnType<typeof setInterval> | null = null
   private backoffMs = MIN_BACKOFF_MS
+  private connectedAt: number | null = null
   private stopped = false
 
   constructor(dataDir: string) {
@@ -294,6 +296,7 @@ export class RelayClient {
     ws.on('open', () => {
       console.log('[Relay] Connected')
       this.backoffMs = MIN_BACKOFF_MS
+      this.connectedAt = Date.now()
       // Ping keepalive every 30s — triggers queue flush on first ping
       this.pingInterval = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) ws.send('ping')
@@ -311,6 +314,15 @@ export class RelayClient {
         const msg = JSON.parse(str)
         if (msg?.type === 'webhook') {
           const payload = msg.payload as Record<string, unknown>
+
+          // Exa monitor results — forward to local WS for auto-save
+          if (payload?.type === 'exa_monitor') {
+            if (this.localWs?.readyState === WebSocket.OPEN) {
+              this.localWs.send(JSON.stringify({ type: 'exa_monitor', data: payload.data }))
+            }
+            return
+          }
+
           // Composio v3 structure: { metadata: { trigger_slug }, data: { sender, subject, message_text, ... } }
           const meta = payload?.metadata as Record<string, unknown> | undefined
           const data = payload?.data as Record<string, unknown> | undefined
@@ -370,6 +382,11 @@ export class RelayClient {
 
   private scheduleReconnect(): void {
     if (this.stopped) return
+    // If the last connection was stable for long enough, treat this as a fresh start
+    if (this.connectedAt !== null && Date.now() - this.connectedAt >= STABLE_CONNECTION_MS) {
+      this.backoffMs = MIN_BACKOFF_MS
+    }
+    this.connectedAt = null
     const delay = this.backoffMs
     console.log(`[Relay] Reconnecting in ${Math.round(delay / 1000)}s`)
     setTimeout(() => {

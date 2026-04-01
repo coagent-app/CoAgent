@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { open } from '@tauri-apps/plugin-shell'
-import type { ApprovalItem, DoneItem, AgentMessage, WSServerMessage, WSClientMessage, Integration, AgentSettings, FileEntry, AuthStatus, AuthMethod, RelayUsage, UsageSummary, CalendarEntry, AdminUser, WSServerMessage as WSSMsg } from '@coagent/shared'
+import type { ApprovalItem, DoneItem, AgentMessage, WSServerMessage, WSClientMessage, Integration, AgentSettings, FileEntry, AuthStatus, AuthMethod, RelayUsage, UsageSummary, CalendarEntry, AdminUser, GoogleCalendarInfo, WSServerMessage as WSSMsg } from '@coagent/shared'
 
 type RelayCredentials = Extract<WSSMsg, { type: 'relay_credentials' }>
 
@@ -39,7 +39,7 @@ export function useAgent() {
   const [usage, setUsage] = useState<UsageSummary | null>(null)
   const [organizing, setOrganizing] = useState(false)
   const [calendarEntries, setCalendarEntries] = useState<CalendarEntry[]>([])
-  const [capabilityCard, setCapabilityCard] = useState<{ name: string; capabilities: { name: string; description: string; checked: boolean }[] } | null>(null)
+  const [capabilityCard, setCapabilityCard] = useState<{ name: string; capabilities: { name: string; description: string; checked: boolean }[]; authFields?: { name: string; displayName: string; description: string; helpUrl?: string; helpText?: string }[] } | null>(null)
   const [whatsappQr, setWhatsappQr] = useState<string | null>(null)
   const [relayCredentials, setRelayCredentials] = useState<RelayCredentials | null>(null)
   const [isAdmin, setIsAdmin] = useState(false)
@@ -47,9 +47,19 @@ export function useAgent() {
   const [adminNewToken, setAdminNewToken] = useState<{ token: string; userId: string } | null>(null)
   const [teamInfo, setTeamInfo] = useState<any>(null)
   const [teamMessages, setTeamMessages] = useState<any[]>([])
+  const [teamStatus, setTeamStatus] = useState<{ status: 'processing' | 'idle'; from?: string } | null>(null)
+  const [triggerPrompt, setTriggerPrompt] = useState<Integration | null>(null)
+  const [googleCalendarStatus, setGoogleCalendarStatus] = useState<{ connected: boolean; calendars: GoogleCalendarInfo[]; lastSync: string | null }>({ connected: false, calendars: [], lastSync: null })
+  const prevConnectedSlugs = useRef<Set<string> | null>(null)
 
   useEffect(() => {
     let unmounted = false
+
+    // Close any lingering socket from StrictMode remount
+    if (wsRef.current) {
+      wsRef.current.close()
+      wsRef.current = null
+    }
 
     function connect() {
       if (unmounted) return
@@ -60,6 +70,7 @@ export function useAgent() {
         reconnectDelay.current = RECONNECT_BASE
         socket.send(JSON.stringify({ type: 'get_team_info' }))
         socket.send(JSON.stringify({ type: 'team_history', limit: 50 }))
+        socket.send(JSON.stringify({ type: 'get_google_calendar_status' }))
       }
 
       socket.onclose = () => {
@@ -137,6 +148,19 @@ export function useAgent() {
         }
         if (msg.type === 'chat_history') setMessages(msg.messages)
         if (msg.type === 'integrations_update') {
+          // Detect newly connected integration with triggers → show prompt
+          // Skip first update (initial load) — only detect transitions during this session
+          const prev = prevConnectedSlugs.current
+          const connectedNow = new Set(msg.integrations.filter(i => i.connected).map(i => i.slug))
+          if (prev !== null) {
+            for (const i of msg.integrations) {
+              if (i.connected && !prev.has(i.slug) && i.triggers && i.triggers.length > 0) {
+                setTriggerPrompt(i)
+                break
+              }
+            }
+          }
+          prevConnectedSlugs.current = connectedNow
           setIntegrations(msg.integrations)
           const wa = msg.integrations.find((i: any) => i.slug === 'coagent:whatsapp')
           if (wa?.connected) setWhatsappQr(null)
@@ -178,11 +202,18 @@ export function useAgent() {
         if (msg.type === 'voice_tts_done') {
           import('@/lib/voice').then(v => v.handleTtsDone())
         }
+        if (msg.type === 'voice_tts_cancel') {
+          import('@/lib/voice').then(v => v.cancelTts())
+        }
+        if (msg.type === 'voice_dictation_result') {
+          window.dispatchEvent(new CustomEvent('coagent-dictation', { detail: msg.text }))
+        }
         if (msg.type === 'usage_update') setUsage(msg.usage)
         if (msg.type === 'auto_organize_done') setOrganizing(false)
         if (msg.type === 'calendar_update') setCalendarEntries(msg.entries)
+        if (msg.type === 'google_calendar_status') setGoogleCalendarStatus({ connected: msg.connected, calendars: msg.calendars, lastSync: msg.lastSync })
         if (msg.type === 'capability_card') {
-          setCapabilityCard({ name: msg.name, capabilities: msg.capabilities })
+          setCapabilityCard({ name: msg.name, capabilities: msg.capabilities, authFields: (msg as any).authFields })
         }
         if ((msg as any).type === 'whatsapp_qr') {
           setWhatsappQr((msg as any).dataUrl)
@@ -200,8 +231,15 @@ export function useAgent() {
           setAdminUsers(prev => prev.map(u => u.token === msg.token ? { ...u, active: msg.active } : u))
         }
         if ((msg as any).type === 'team_info') setTeamInfo((msg as any).team)
-        if ((msg as any).type === 'team_message') setTeamMessages(prev => [...prev, (msg as any).message])
+        if ((msg as any).type === 'team_message') {
+          const incoming = (msg as any).message
+          setTeamMessages(prev => prev.some(m => m.id === incoming.id) ? prev : [...prev, incoming])
+        }
         if ((msg as any).type === 'team_history') setTeamMessages((msg as any).messages)
+        if ((msg as any).type === 'team_status') {
+          const s = msg as any
+          setTeamStatus(s.status === 'idle' ? null : { status: s.status, from: s.from })
+        }
         if (msg.type === 'error') { setError(msg.message); setTimeout(() => setError(null), 5000) }
         if (msg.type === 'integration_needs_fields') {
           setPendingFields({ slug: msg.slug, fields: msg.fields })
@@ -417,8 +455,28 @@ export function useAgent() {
     send({ type: 'delete_calendar_entry', id })
   }, [send])
 
-  const confirmCapabilities = useCallback((selected: string[]) => {
-    send({ type: 'capability_confirm', capabilities: selected })
+  const googleCalendarConnect = useCallback(() => {
+    send({ type: 'google_calendar_connect' })
+  }, [send])
+
+  const googleCalendarDisconnect = useCallback(() => {
+    send({ type: 'google_calendar_disconnect' })
+  }, [send])
+
+  const googleCalendarToggle = useCallback((calendarId: string, enabled: boolean) => {
+    send({ type: 'google_calendar_toggle', calendarId, enabled })
+  }, [send])
+
+  const googleCalendarColor = useCallback((calendarId: string, color: string) => {
+    send({ type: 'google_calendar_color', calendarId, color })
+  }, [send])
+
+  const googleCalendarSync = useCallback(() => {
+    send({ type: 'google_calendar_sync' })
+  }, [send])
+
+  const confirmCapabilities = useCallback((selected: string[], authValues?: Record<string, string>) => {
+    send({ type: 'capability_confirm', capabilities: selected, authValues } as any)
     setTimeout(() => setCapabilityCard(null), 1500)
   }, [send])
 
@@ -449,9 +507,23 @@ export function useAgent() {
     setAdminNewToken(null)
   }, [])
 
+  const lastSentRef = useRef<{ text: string; time: number }>({ text: '', time: 0 })
   const sendTeamMessage = useCallback((message: string, to?: string) => {
+    // Guard against double-sends (StrictMode / rapid clicks)
+    const now = Date.now()
+    if (message === lastSentRef.current.text && now - lastSentRef.current.time < 1000) return
+    lastSentRef.current = { text: message, time: now }
+
     send({ type: 'team_send', message, to } as any)
-  }, [send])
+    // Optimistic echo — relay doesn't send back to sender
+    setTeamMessages(prev => [...prev, {
+      id: `msg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      teamId: '',
+      timestamp: new Date().toISOString(),
+      from: { userId: 'default', name: settings?.name || 'Me', role: '', isAgent: false },
+      visible: message, agentContext: '', to: to || null, attachments: []
+    }])
+  }, [send, settings?.name])
 
   const getTeamInfo = useCallback(() => {
     send({ type: 'get_team_info' } as any)
@@ -461,5 +533,5 @@ export function useAgent() {
     send({ type: 'team_history', limit } as any)
   }, [send])
 
-  return { queue, done, messages, streamingText, thinking, processing, toolLabel, connected, lastHeartbeat, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, pendingFields, setPendingFields, setModel, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, sendTeamMessage, getTeamInfo, getTeamHistory }
+  return { queue, done, messages, streamingText, thinking, processing, toolLabel, connected, lastHeartbeat, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, pendingFields, setPendingFields, setModel, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, getTeamInfo, getTeamHistory, triggerPrompt, setTriggerPrompt }
 }

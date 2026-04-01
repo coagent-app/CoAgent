@@ -43,9 +43,9 @@ export default {
 
     const [role, userId] = segments
 
-    if (role !== 'agent' && role !== 'client' && role !== 'webhook') {
+    if (role !== 'agent' && role !== 'client' && role !== 'webhook' && role !== 'ws') {
       return new Response(
-        JSON.stringify({ error: 'Unknown role. Use agent, client, or webhook.' }),
+        JSON.stringify({ error: 'Unknown role. Use agent, client, webhook, or ws.' }),
         { status: 400, headers: { 'Content-Type': 'application/json' } }
       )
     }

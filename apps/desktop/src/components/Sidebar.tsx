@@ -22,6 +22,7 @@ interface SidebarProps {
   userName?: string
   dark: boolean
   toggleTheme: () => void
+  hasTeam?: boolean
 }
 
 const MAX_SIDEBAR_INTEGRATIONS = 8
@@ -94,6 +95,13 @@ function IntegrationItem({
           <circle cx="16" cy="13" r="4.5" fill="white"/>
           <path d="M8.5 24.5c0-4.142 3.358-7.5 7.5-7.5s7.5 3.358 7.5 7.5" stroke="white" strokeWidth="2.5" fill="none" strokeLinecap="round"/>
         </svg>
+      ) : (integration as any).domain ? (
+        <img
+          src={`https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=http://${(integration as any).domain}&size=128`}
+          alt={integration.name}
+          className="w-4 h-4 object-contain flex-shrink-0 rounded-sm"
+          onError={e => { (e.target as HTMLImageElement).style.opacity = '0' }}
+        />
       ) : (integration as any).icon ? (
         <div className="w-4 h-4 flex-shrink-0" dangerouslySetInnerHTML={{ __html: (integration as any).icon.replace(/viewBox/, 'class="w-4 h-4" viewBox') }} />
       ) : (integration as any).builtin ? (
@@ -120,7 +128,7 @@ function IntegrationItem({
   )
 }
 
-export function Sidebar({ view, onViewChange, queueCount, integrations, onConnect, onDisconnect, onOpenModal, userName, dark, toggleTheme }: SidebarProps) {
+export function Sidebar({ view, onViewChange, queueCount, integrations, onConnect, onDisconnect, onOpenModal, userName, dark, toggleTheme, hasTeam }: SidebarProps) {
 
   return (
     <div className="w-52 bg-[#FAFAFA] dark:bg-neutral-900 border-r border-neutral-200 dark:border-neutral-800 flex flex-col py-4 px-3 flex-shrink-0">
@@ -132,11 +140,11 @@ export function Sidebar({ view, onViewChange, queueCount, integrations, onConnec
 
       <div className="flex flex-col gap-0.5 mb-2">
         <NavItem icon={MessageSquare} label="Chat" active={view === 'chat'} onClick={() => onViewChange('chat')} />
+        {hasTeam && <NavItem icon={Users} label="Team" active={view === 'team'} onClick={() => onViewChange('team')} />}
         <NavItem icon={Zap} label="Skills" active={view === 'skills'} onClick={() => onViewChange('skills')} />
         <NavItem icon={CalendarIcon} label="Schedule" active={view === 'calendar'} onClick={() => onViewChange('calendar')} />
         <NavItem icon={Inbox} label="Queue" active={view === 'queue'} onClick={() => onViewChange('queue')} badge={queueCount} />
         <NavItem icon={FolderOpen} label="Files" active={view === 'files'} onClick={() => onViewChange('files')} />
-        <NavItem icon={Users} label="Team" active={view === 'team'} onClick={() => onViewChange('team')} />
       </div>
 
       <Separator className="my-3 dark:bg-neutral-800" />
@@ -148,6 +156,17 @@ export function Sidebar({ view, onViewChange, queueCount, integrations, onConnec
         {integrations
           .filter(i => i.connected)
           .slice(0, MAX_SIDEBAR_INTEGRATIONS)
+          .map(integration => (
+            <IntegrationItem
+              key={integration.slug}
+              integration={integration}
+              onConnect={onConnect}
+              onDisconnect={onDisconnect}
+            />
+          ))}
+        {integrations
+          .filter(i => !i.connected && i.suggested)
+          .slice(0, MAX_SIDEBAR_INTEGRATIONS - integrations.filter(i => i.connected).length)
           .map(integration => (
             <IntegrationItem
               key={integration.slug}

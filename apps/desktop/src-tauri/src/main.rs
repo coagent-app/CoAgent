@@ -220,7 +220,10 @@ extern "C" fn power_callback(
 static EVENT_TAP: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static APP_HANDLE: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
 
-// Callback: nanoseconds of work — detect edge, send to channel, suppress event.
+// Callback: detect fn edge, send to channel, suppress event.
+// NOTE: The emoji picker CANNOT be suppressed from code — macOS handles Globe key
+// in the kernel before CGEventTap fires. User must set System Settings → Keyboard →
+// "Press Globe key to" → "Do Nothing". We set AppleFnUsageType=0 on startup as a hint.
 #[cfg(target_os = "macos")]
 extern "C" fn fn_key_callback(
     _proxy: *mut c_void, etype: u32, event: *mut c_void, _info: *mut c_void,
@@ -231,7 +234,6 @@ extern "C" fn fn_key_callback(
         if !tap.is_null() { unsafe { cg::CGEventTapEnable(tap, true); } }
         return event;
     }
-    // If voice mode is disabled, don't intercept fn key at all
     if !VOICE_ENABLED.load(Ordering::Relaxed) {
         return event;
     }
@@ -239,30 +241,30 @@ extern "C" fn fn_key_callback(
     let flags = unsafe { cg::CGEventGetFlags(event) };
     let is_fn = (flags & FN_FLAG) != 0;
     let is_ctrl = (flags & CTRL_FLAG) != 0;
-    let was_down = FN_DOWN.load(Ordering::Relaxed);
-    let ctrl_was_down = CTRL_DOWN.load(Ordering::Relaxed);
 
-    // Detect Control press while fn is held → cancel voice
-    if is_ctrl && !ctrl_was_down {
-        CTRL_DOWN.store(true, Ordering::Release);
-        if was_down || is_fn {
-            // fn is held + Control just pressed → cancel
-            if let Some(tx) = FN_SENDER.get() { let _ = tx.send(FnKeyEvent::Cancel); }
-            return std::ptr::null_mut();
-        }
-    } else if !is_ctrl && ctrl_was_down {
-        CTRL_DOWN.store(false, Ordering::Release);
-    }
+    // Only process flagsChanged events
+    if etype != cg::K_CG_FLAGS_CHANGED { return event; }
 
-    if is_fn && !was_down {
-        FN_DOWN.store(true, Ordering::Release);
+    let was_fn = FN_DOWN.load(Ordering::Relaxed);
+    let was_ctrl = CTRL_DOWN.load(Ordering::Relaxed);
+
+    // Track modifier state
+    if is_fn != was_fn { FN_DOWN.store(is_fn, Ordering::Release); }
+    if is_ctrl != was_ctrl { CTRL_DOWN.store(is_ctrl, Ordering::Release); }
+
+    // Control+fn combo: detect edges
+    let both_now = is_fn && is_ctrl;
+    let both_before = was_fn && was_ctrl;
+
+    if both_now && !both_before {
+        // Control+fn just pressed together → voice trigger
         if let Some(tx) = FN_SENDER.get() { let _ = tx.send(FnKeyEvent::Pressed); }
-        return std::ptr::null_mut(); // suppress emoji picker
-    } else if !is_fn && was_down {
-        FN_DOWN.store(false, Ordering::Release);
+    } else if !both_now && both_before {
+        // One of them released → voice release
         if let Some(tx) = FN_SENDER.get() { let _ = tx.send(FnKeyEvent::Released); }
-        return std::ptr::null_mut();
     }
+
+    // Don't suppress the event — let fn/ctrl pass through normally
     event
 }
 
@@ -452,8 +454,17 @@ fn main() {
                         }
                     }
 
+                    // Set Globe key to "Do Nothing" — required to prevent emoji picker
+                    let _ = std::process::Command::new("defaults")
+                        .args(["write", "com.apple.HIToolbox", "AppleFnUsageType", "-int", "0"])
+                        .output();
+                    log("[Tauri] Set AppleFnUsageType=0 (Globe → Do Nothing)");
+
                     unsafe {
-                        let mask = cg::event_mask_bit(cg::K_CG_FLAGS_CHANGED);
+                        // flagsChanged + keyDown + keyUp — suppress Globe+letter shortcuts on Sequoia
+                        let mask = cg::event_mask_bit(cg::K_CG_FLAGS_CHANGED)
+                                 | cg::event_mask_bit(10)   // kCGEventKeyDown
+                                 | cg::event_mask_bit(11);  // kCGEventKeyUp
                         let tap = cg::CGEventTapCreate(
                             cg::K_CG_HID_EVENT_TAP,
                             cg::K_CG_HEAD_INSERT,

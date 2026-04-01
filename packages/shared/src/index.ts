@@ -17,6 +17,7 @@ export interface AgentSettings {
   email: string
   timezone: string
   role: string
+  what_you_do: string      // user's own description of their work, injected into system prompt
   active_hours: { start: number; end: number }
   active_days: DayName[]
   autonomy: Autonomy
@@ -26,6 +27,7 @@ export interface AgentSettings {
   voice_response: boolean  // TTS read-back of summary
   voice_hotkey: string     // shortcut string e.g. "Control+Space"
   voice_voice: string      // OpenAI TTS voice: alloy, echo, fable, onyx, nova, shimmer
+  onboarded: boolean       // false until onboarding completes — triggers onboarding flow in system prompt
 }
 
 export type TriggerSource = 'heartbeat' | 'webhook' | 'manual' | 'memory_cleanup' | 'todo_due' | 'routine' | 'task_due'
@@ -59,7 +61,7 @@ export interface TodoItem {
   createdAt: string
 }
 
-export type CalendarEntryType = 'routine' | 'task' | 'followup'
+export type CalendarEntryType = 'routine' | 'task' | 'followup' | 'event'
 
 export interface CalendarEntry {
   id: string
@@ -67,11 +69,24 @@ export interface CalendarEntry {
   label: string
   cron?: string         // routine: "0 9 * * 1-5"
   due?: string          // task/followup: ISO datetime "2026-03-28T14:30:00"
+  start?: string        // event: ISO datetime start
+  end?: string          // event: ISO datetime end
+  location?: string     // event: location string
   instruction?: string  // what the agent executes when entry fires
   notes?: string        // contextual info for any entry type
   enabled: boolean
   completed?: boolean   // for tasks and followups
   createdAt: string
+  source?: 'local' | 'google'     // undefined = local (backward compat)
+  googleEventId?: string           // Google's event ID for sync
+  googleCalendarId?: string        // which Google calendar it came from
+}
+
+export interface GoogleCalendarInfo {
+  id: string
+  name: string
+  enabled: boolean
+  color: string
 }
 
 export interface AgentMessage {
@@ -97,7 +112,9 @@ export interface Integration {
   custom?: boolean
   builtin?: boolean
   icon?: string
+  domain?: string      // website domain for favicon (e.g. "rentcast.io")
   triggers?: TriggerInfo[]
+  suggested?: boolean  // true if this integration is recommended for the user's vertical
 }
 
 export interface FileEntry {
@@ -150,12 +167,13 @@ export type WSClientMessage =
   | { type: 'set_model'; model: string }
   | { type: 'voice_chat'; message: string }
   | { type: 'voice_audio'; data: string; format?: 'm4a' | 'webm' }
+  | { type: 'voice_dictation'; data: string; format?: 'm4a' | 'webm' }
   | { type: 'get_usage' }
   | { type: 'auto_organize' }
   | { type: 'get_calendar' }
   | { type: 'complete_calendar_entry'; id: string }
   | { type: 'delete_calendar_entry'; id: string }
-  | { type: 'capability_confirm'; capabilities: string[] }
+  | { type: 'capability_confirm'; capabilities: string[]; authValues?: Record<string, string> }
   | { type: 'custom_integration_delete'; slug: string }
   | { type: 'get_skills' }
   | { type: 'update_skill'; name: string; description: string; instructions: string }
@@ -164,6 +182,12 @@ export type WSClientMessage =
   | { type: 'client_connected' }
   | { type: 'get_relay_credentials' }
   | { type: 'get_chat_history' }
+  | { type: 'google_calendar_connect' }
+  | { type: 'google_calendar_disconnect' }
+  | { type: 'google_calendar_toggle'; calendarId: string; enabled: boolean }
+  | { type: 'google_calendar_color'; calendarId: string; color: string }
+  | { type: 'get_google_calendar_status' }
+  | { type: 'google_calendar_sync' }
   | { type: 'get_file_content'; id: string }
   | { type: 'register_push_token'; token: string }
   | { type: 'update_notification_prefs'; mode: NotificationMode }
@@ -212,12 +236,14 @@ export type WSServerMessage =
   | { type: 'voice_tts_chunk'; seq: number; data: string }
   | { type: 'voice_tts_done' }
   | { type: 'voice_transcribed'; text: string }
+  | { type: 'voice_dictation_result'; text: string }
   | { type: 'usage_update'; usage: UsageSummary }
   | { type: 'auto_organize_done'; folders: string[]; moved: number }
   | { type: 'calendar_update'; entries: CalendarEntry[] }
+  | { type: 'google_calendar_status'; connected: boolean; calendars: GoogleCalendarInfo[]; lastSync: string | null }
   | { type: 'file_content'; id: string; filename: string; mimeType: string; data: string }
   | { type: 'file_content_error'; id: string; error: string }
-  | { type: 'capability_card'; name: string; capabilities: { name: string; description: string; checked: boolean }[] }
+  | { type: 'capability_card'; name: string; capabilities: { name: string; description: string; checked: boolean }[]; authFields?: { name: string; displayName: string; description: string; helpUrl?: string; helpText?: string }[] }
   | { type: 'whatsapp_qr'; dataUrl: string }
   | { type: 'relay_credentials'; relayUrl: string; token: string; userId: string }
   | { type: 'push_notification'; title: string; body: string }

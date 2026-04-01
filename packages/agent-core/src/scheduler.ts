@@ -1,6 +1,7 @@
 import cron from 'node-cron'
 import { execSync, spawn } from 'child_process'
-import { writeFileSync, unlinkSync } from 'fs'
+import { writeFileSync, readFileSync, unlinkSync } from 'fs'
+import { join } from 'path'
 import type { Agent } from './agent.js'
 import { purgeEventStore } from './relay-client.js'
 import { readSettings, isActiveNow } from './settings.js'
@@ -144,12 +145,47 @@ function cancelScheduledWake(): void {
   else if (process.platform === 'win32') cancelWindowsWake()
 }
 
+/** Track all caffeinate PIDs so we can kill them on exit */
+const activeCaffeinates = new Set<ReturnType<typeof spawn>>()
+
+function cleanupCaffeinates(): void {
+  for (const proc of activeCaffeinates) {
+    try { proc.kill() } catch {}
+  }
+  activeCaffeinates.clear()
+}
+
+// Kill all our caffeinate processes when the node process exits
+process.on('exit', cleanupCaffeinates)
+process.on('SIGINT', () => { cleanupCaffeinates(); process.exit(0) })
+process.on('SIGTERM', () => { cleanupCaffeinates(); process.exit(0) })
+
+/** Kill orphaned caffeinate processes from previous CoAgent runs */
+function killOrphanedCaffeinates(): void {
+  if (process.platform !== 'darwin') return
+  try {
+    const out = execSync('pgrep -f "caffeinate -i"', { encoding: 'utf8', timeout: 3000 }).trim()
+    if (!out) return
+    const pids = out.split('\n').filter(Boolean)
+    if (pids.length > 0) {
+      execSync(`kill ${pids.join(' ')}`, { stdio: 'ignore', timeout: 3000 })
+      console.log(`[Scheduler] Killed ${pids.length} orphaned caffeinate processes`)
+    }
+  } catch {}
+}
+
 /** Keep the machine awake briefly while a heartbeat runs, then release */
 function keepAwakeDuring<T>(promise: Promise<T>): Promise<T> {
   if (process.platform === 'darwin') {
-    const proc = spawn('caffeinate', ['-i', '-t', '180'], { stdio: 'ignore', detached: false })
+    // -t 300 = self-destruct after 5 min even if we fail to kill it
+    const proc = spawn('caffeinate', ['-i', '-t', '300'], { stdio: 'ignore', detached: false })
     proc.on('error', () => {})
-    return promise.finally(() => { proc.kill() })
+    activeCaffeinates.add(proc)
+    proc.on('exit', () => activeCaffeinates.delete(proc))
+    return promise.finally(() => {
+      try { proc.kill() } catch {}
+      activeCaffeinates.delete(proc)
+    })
   }
   if (process.platform === 'win32') {
     // ES_CONTINUOUS | ES_SYSTEM_REQUIRED — prevents sleep during execution
@@ -189,7 +225,52 @@ export interface SchedulerHandle {
   rescheduleHeartbeat: () => void
 }
 
+// ── 3 AM job tracking ─────────────────────────────────────────────────────
+
+interface NightlyRunLog {
+  lastRun: string       // ISO timestamp
+  status: 'success' | 'failed'
+  error?: string
+  runs: Array<{ date: string; status: 'success' | 'failed'; error?: string }>
+}
+
+function nightlyLogPath(dataDir: string): string {
+  return join(dataDir, 'nightly-run.json')
+}
+
+function readNightlyLog(dataDir: string): NightlyRunLog {
+  try {
+    return JSON.parse(readFileSync(nightlyLogPath(dataDir), 'utf8'))
+  } catch {
+    return { lastRun: '', status: 'success', runs: [] }
+  }
+}
+
+function writeNightlyRun(dataDir: string, status: 'success' | 'failed', error?: string): void {
+  const log = readNightlyLog(dataDir)
+  const entry = { date: new Date().toISOString(), status, ...(error ? { error } : {}) }
+  log.lastRun = entry.date
+  log.status = status
+  log.error = error
+  log.runs.push(entry)
+  // Keep last 30 runs
+  if (log.runs.length > 30) log.runs = log.runs.slice(-30)
+  writeFileSync(nightlyLogPath(dataDir), JSON.stringify(log, null, 2))
+}
+
 export function startScheduler(agent: Agent, dataDir: string, callbacks?: SchedulerCallbacks): SchedulerHandle {
+  // Kill any caffeinate processes leaked by previous runs
+  killOrphanedCaffeinates()
+
+  // Log last nightly run status on startup
+  const nightlyLog = readNightlyLog(dataDir)
+  if (nightlyLog.lastRun) {
+    const ago = Math.round((Date.now() - new Date(nightlyLog.lastRun).getTime()) / 3600000)
+    console.log(`[Scheduler] Last 3 AM run: ${nightlyLog.lastRun} (${ago}h ago) — ${nightlyLog.status}`)
+  } else {
+    console.log('[Scheduler] No 3 AM run recorded yet')
+  }
+
   // ── 3 AM: memory updates + cleanup (single Haiku call) ──
 
   // Schedule a wake so the Mac doesn't sleep through the 3 AM job
@@ -203,6 +284,7 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
   scheduleNightlyWake()
 
   cron.schedule('0 3 * * *', async () => {
+    console.log('[Scheduler] 3 AM job starting...')
     try {
       const { tools: allTools, serverMap } = await agent.mcpManager.getAllTools()
       const memoryTools = allTools.filter(t => serverMap.get(t.name) === 'memory')
@@ -210,8 +292,10 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
         agent.mcpManager.callTool('memory', tool, args)
       await keepAwakeDuring(extractInsights(dataDir, memoryTools, callMemoryTool))
       await pruneOldEntries(dataDir)
+      writeNightlyRun(dataDir, 'success')
       console.log('[Scheduler] 3 AM job complete (memory updates + cleanup)')
     } catch (err: any) {
+      writeNightlyRun(dataDir, 'failed', err.message)
       console.error('[Scheduler] 3 AM job failed:', err.message)
     }
     // Schedule tomorrow's wake

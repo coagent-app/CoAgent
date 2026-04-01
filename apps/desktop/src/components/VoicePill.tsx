@@ -115,10 +115,10 @@ function Shimmer() {
       borderRadius: 9999,
     }}>
       <div style={{
-        width: '50%',
+        width: '60%',
         height: '100%',
-        background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.06), transparent)',
-        animation: 'shimmer 2s ease-in-out infinite',
+        background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.03), transparent)',
+        animation: 'shimmer 4s ease-in-out infinite',
       }} />
     </div>
   )
@@ -129,6 +129,20 @@ export function VoicePill() {
   const [text, setText] = useState('')
   const [volume, setVolume] = useState(0)
   const [isLocked, setIsLocked] = useState(false)
+  const [showHint, setShowHint] = useState(false)
+
+  // Cycle: start with "Listening…", show hint for 3s every 8s
+  useEffect(() => {
+    if (state !== 'listening') { setShowHint(false); return }
+    let mounted = true
+    const cycle = () => {
+      if (!mounted) return
+      setShowHint(true)
+      setTimeout(() => { if (mounted) setShowHint(false) }, 3000)
+    }
+    const id = setInterval(cycle, 8000)
+    return () => { mounted = false; clearInterval(id) }
+  }, [state])
 
   useEffect(() => {
     const unlistens: Promise<() => void>[] = []
@@ -193,7 +207,7 @@ export function VoicePill() {
       justifyContent: 'center',
       padding: isExpanded ? '12px 20px' : '4px 8px',
       borderRadius: 9999,
-      background: isIdle ? 'rgba(23,23,23,0.85)' : '#171717',
+      background: '#171717',
       boxShadow: isExpanded ? '0 25px 50px -12px rgba(0,0,0,0.5)' : '0 4px 16px rgba(0,0,0,0.4)',
       border: `1px solid rgba(64,64,64,${isIdle ? 0.4 : 0.5})`,
       maxWidth: isExpanded ? 400 : 32,
@@ -219,7 +233,7 @@ export function VoicePill() {
           <>
             <Shimmer />
             <AudioBars volume={volume} />
-            <span style={labelStyle}>{isLocked ? 'Listening (fn to stop)' : 'Listening...'}</span>
+            <span style={labelStyle}>{showHint ? 'ctrl+fn to send' : 'Listening…'}</span>
           </>
         )}
         {state === 'thinking' && (

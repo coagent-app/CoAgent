@@ -5,6 +5,13 @@ import Anthropic from '@anthropic-ai/sdk'
 
 const VALID_PROP_KEY = /^[a-zA-Z0-9_.\-]{1,64}$/
 
+/** Append extra context to specific Composio tool descriptions (MCP doesn't support server-side overrides) */
+const TOOL_DESCRIPTION_APPENDS: Record<string, string> = {
+  'GOOGLECALENDAR_CREATE_EVENT': 'Always include a detailed description with context about the event purpose, attendees, and any relevant background.',
+  'GOOGLECALENDAR_QUICK_ADD': 'Always include a detailed description with context about the event purpose and any relevant background.',
+  'GOOGLECALENDAR_UPDATE_EVENT': 'Include or update the description with context when modifying events.',
+}
+
 function safeKey(key: string): string {
   if (VALID_PROP_KEY.test(key)) return key
   return key.replace(/[^a-zA-Z0-9_.\-]/g, '_').slice(0, 64) || '_invalid'
@@ -111,9 +118,10 @@ export class MCPManager {
       try {
         const result = await client.listTools()
         for (const tool of result.tools) {
+          const append = TOOL_DESCRIPTION_APPENDS[tool.name]
           tools.push({
             name: tool.name,
-            description: tool.description ?? '',
+            description: append ? `${tool.description ?? ''} ${append}` : (tool.description ?? ''),
             input_schema: sanitizeSchema(tool.inputSchema) as Anthropic.Tool['input_schema']
           })
           serverMap.set(tool.name, serverName)
@@ -154,6 +162,9 @@ export class MCPManager {
       const code = err?.code
       if (code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED' || err?.message?.includes('EPIPE')) {
         console.error(`[MCP] ${serverName} pipe broken during ${toolName} — server likely crashed`)
+        // Invalidate tool cache so getAllTools() won't return stale tools for this crashed server
+        this.cacheVersion++
+        this.toolCache = null
         const stderr = this.getStderr(serverName)
         const detail = stderr ? `\n\nServer stderr:\n${stderr}` : ''
         return `[Error: ${serverName} server crashed during ${toolName}.${detail}]`

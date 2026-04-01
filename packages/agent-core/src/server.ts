@@ -3,9 +3,10 @@ import { WebSocketServer, WebSocket } from 'ws'
 import { writeFile, mkdir } from 'fs/promises'
 import { existsSync, accessSync, constants } from 'fs'
 import { Agent } from './agent.js'
+import { GoogleCalendarService } from './google-calendar.js'
 import { MCPServerConfig } from './mcp-manager.js'
 import { setupComposioMcp } from './composio-setup.js'
-import { INTEGRATIONS, getIntegrationStatuses, generateAuthUrl, getRequiredFields, disconnectIntegration, getConnectedSlugs, subscribeTriggersForSlug, subscribeSingleTrigger, purgeExpiredAccounts, getAvailableTriggersForSlug, getSubscribedTriggers, setTriggerEnabled } from './composio-integrations.js'
+import { INTEGRATIONS, getIntegrationStatuses, generateAuthUrl, getRequiredFields, disconnectIntegration, getConnectedSlugs, subscribeTriggersForSlug, subscribeSingleTrigger, purgeExpiredAccounts, getAvailableTriggersForSlug, getSubscribedTriggers, setTriggerEnabled, markLocalConnected, seedLocalConnectionsIfNeeded, ensureWebhookSubscription, invalidateAccountsCache } from './composio-integrations.js'
 import { startScheduler } from './scheduler.js'
 import { readSettings, writeSettings } from './settings.js'
 
@@ -19,24 +20,35 @@ function composioKey(): string | undefined {
   return process.env.RELAY_TOKEN
 }
 
-/** Returns the per-user Composio entity ID — relay user ID when available, otherwise 'default' */
+/** Returns the per-user Composio entity ID — explicit entity, or relay user ID, or 'default' */
 function composioUserId(): string {
-  return process.env.RELAY_USER_ID || 'default'
+  return process.env.COMPOSIO_ENTITY_ID || process.env.RELAY_USER_ID || 'default'
 }
 
 import { RelayClient } from './relay-client.js'
 import { TeamClient } from '@coagent/team-core'
 import { WhatsAppClient, WhatsAppMedia } from './whatsapp-client.js'
+import { getEdition } from './edition.js'
 import type { WSClientMessage, WSServerMessage } from '@coagent/shared'
 import { join } from 'path'
 import { homedir } from 'os'
 import { readRegistry, writeCustomMcpCredentials, disconnectCustomMcp, deleteCustomMcp, getCustomMcpConfigs, getCustomIntegrations, readCustomMcpCode, updateCustomMcpCode, getCustomMcpDir } from './custom-mcp.js'
 
-// Load from ~/.coagent/.env — the secure isolated folder on the user's machine.
+// Load from data dir .env — the secure isolated folder on the user's machine.
 // loadApiKeysToEnv runs first so any keys already in process.env (e.g. from the
 // shell) are respected; dotenv fills in whatever remains.
-loadApiKeysToEnv(join(homedir(), '.coagent'))
-config({ path: join(homedir(), '.coagent', '.env') })
+const _envDir = process.env.COAGENT_DATA_DIR || join(homedir(), '.coagent')
+loadApiKeysToEnv(_envDir)
+config({ path: join(_envDir, '.env') })
+config({ path: join(__dirname, '..', '..', '..', '.env') })
+
+function timeAgo(isoTimestamp: string): string {
+  const seconds = Math.floor((Date.now() - new Date(isoTimestamp).getTime()) / 1000)
+  if (seconds < 60) return 'just now'
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}min ago`
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`
+  return `${Math.floor(seconds / 86400)}d ago`
+}
 
 // ── OpenAI TTS helper ─────────────────────────────────────────────────────────
 function stripMdForTts(s: string): string {
@@ -103,17 +115,19 @@ async function generateTts(text: string, voice?: string): Promise<string | null>
 /** Stream TTS audio — sends chunks over WebSocket as they arrive from OpenAI */
 async function streamTts(text: string, voice: string | undefined, sendFn: (msg: any) => void): Promise<void> {
   const proxy = getOpenAIProxy()
-  if (!proxy) return
+  if (!proxy) { console.log('[TTS] No proxy configured, skipping'); return }
   const clean = stripMdForTts(text)
-  if (!clean) return
+  if (!clean) { console.log('[TTS] No text after markdown cleanup, skipping'); return }
   const ttsVoice = voice || 'alloy'
+  console.log('[TTS] Streaming (voice: %s) text: %s', ttsVoice, clean.slice(0, 80))
   try {
     const res = await fetch(`${proxy.baseUrl}/v1/audio/speech`, {
       method: 'POST',
       headers: { 'Authorization': proxy.authHeader, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: 'tts-1', input: clean, voice: ttsVoice, response_format: 'mp3' }),
     })
-    if (!res.ok || !res.body) return
+    if (!res.ok) { console.error('[TTS] API error:', res.status, await res.text().catch(() => '')); return }
+    if (!res.body) { console.error('[TTS] No response body'); return }
     const reader = res.body.getReader()
     let seq = 0
     while (true) {
@@ -122,6 +136,7 @@ async function streamTts(text: string, voice: string | undefined, sendFn: (msg: 
       sendFn({ type: 'voice_tts_chunk', seq, data: Buffer.from(value).toString('base64') })
       seq++
     }
+    console.log('[TTS] Stream complete, sent %d chunks', seq)
     sendFn({ type: 'voice_tts_done' })
   } catch (err: any) {
     console.error('[TTS] Stream failed:', err.message)
@@ -189,6 +204,22 @@ function resolveMcpImessage(): { command: string; args: string[] } {
   return { command: 'node', args: [mcpPath] }
 }
 
+function resolveMcpExa(): { command: string; args: string[] } | null {
+  // Only enable if EXA_API_KEY is configured
+  if (!process.env.EXA_API_KEY) return null
+  const { dirname } = require('path') as typeof import('path')
+  const sidecarPath = join(dirname(process.execPath), 'coagent-exa')
+  if (existsSync(sidecarPath)) {
+    return { command: sidecarPath, args: [] }
+  }
+  try {
+    const mcpPath = require.resolve('@coagent/mcp-exa')
+    return { command: 'node', args: [mcpPath] }
+  } catch {
+    return null
+  }
+}
+
 function resolveMcpContacts(): { command: string; args: string[] } {
   const { dirname } = require('path') as typeof import('path')
   const sidecarPath = join(dirname(process.execPath), 'coagent-contacts')
@@ -219,21 +250,39 @@ function canAccessAddressBook(): boolean {
 
 function buildMcpConfigs(): MCPServerConfig[] {
   const mem = resolveMcpMemory()
-  return [
+  const configs: MCPServerConfig[] = [
     {
       name: 'memory',
       command: mem.command,
       args: mem.args,
       env: {
-        COAGENT_DATA_DIR: join(homedir(), '.coagent'),
+        COAGENT_DATA_DIR: process.env.COAGENT_DATA_DIR || join(homedir(), '.coagent'),
         ...(process.env.RELAY_URL ? { RELAY_URL: process.env.RELAY_URL } : {}),
         ...(process.env.RELAY_TOKEN ? { RELAY_TOKEN: process.env.RELAY_TOKEN } : {})
       } as Record<string, string>
     }
   ]
+
+  const exa = resolveMcpExa()
+  if (exa) {
+    configs.push({
+      name: 'exa',
+      command: exa.command,
+      args: exa.args,
+      env: {
+        COAGENT_DATA_DIR: process.env.COAGENT_DATA_DIR || join(homedir(), '.coagent'),
+        EXA_API_KEY: process.env.EXA_API_KEY!,
+        ...(process.env.RELAY_URL ? { RELAY_URL: process.env.RELAY_URL } : {}),
+        ...(process.env.RELAY_USER_ID ? { RELAY_USER_ID: process.env.RELAY_USER_ID } : {}),
+      } as Record<string, string>
+    })
+    console.log('[Server] Exa MCP enabled (Powered by Exa)')
+  }
+
+  return configs
 }
 
-const DATA_DIR = join(homedir(), '.coagent')
+const DATA_DIR = process.env.COAGENT_DATA_DIR || join(homedir(), '.coagent')
 
 // --- Default memory files (written on first run, never overwritten) ---
 
@@ -267,8 +316,15 @@ CoAgent is a personal AI assistant that runs privately on your computer. Nothing
 
 Consolidated tools — each handles multiple actions via an \`action\` parameter:
 - **memory** (search/grep/read/write/edit/append/list/delete) — long-term memory. Use directly, never via search_tools. Prefer search (semantic) or grep (pattern match within a file) over read.
-- **files** (list/search/read/delete/stats) — uploaded file management.
+- **files** (list/search/grep/read/delete/stats/create_folder/move/get_pdf_fields/fill_pdf) — uploaded file management + content search + PDF form filling.
+  - **grep**: regex search across file contents (PDFs, DOCX, XLSX, text). Scope by folder or single file id. Returns matching snippets with context — use this instead of reading entire files.
+  - **create_folder** / **move**: organize files into folders.
+  - **get_pdf_fields**: list fillable form fields in a PDF (text, checkbox, dropdown, radio). Only works on fillable PDF forms.
+  - **fill_pdf**: fill fields in a fillable PDF form by name→value map. Saves as a new file, original untouched.
 - **schedule** (create/update/delete/complete/list) — unified schedule for routines (recurring cron), tasks (one-time due), and followups (check-back reminders that fire like tasks).
+- **exa** (search/find_similar/get_contents) — web search. Auto-saves to research DB.
+- **research** (search/list/stats) — local research DB queries. Free, instant.
+- **monitor** (create/list/delete/trigger) — recurring web searches on specific domains.
 - **skills** (save/list/delete/execute) — reusable automations. Use execute to run a skill by name — loads its full instructions for you to follow.
 - **search_tools** — find and load external service tools (Gmail, Calendar, Slack, etc.). Optional "context" param greps recent tool logs for activity context.
 - **queue_approval** / **add_done_item** — approval queue and activity log.
@@ -283,7 +339,7 @@ Notes in \`~/.coagent/memory/\` — my brain across conversations.
 
 - **setup.md** — this file (read-only).
 - **agent.md** — user profile: who you are, preferences, how to handle things.
-- **routines.md** — heartbeat schedule: what to check and when.
+- **heartbeat.md** — what to check and how to handle events during heartbeats.
 - **preferences.md** — tone, format, behavior preferences.
 - **contacts.md** — key people and how to handle their messages.
 - **projects.md** — active projects, context, deadlines.
@@ -291,6 +347,10 @@ Notes in \`~/.coagent/memory/\` — my brain across conversations.
 Updated as we work together. User can edit directly.
 
 **Off-limits to the 3 AM job:** setup.md, agent.md, routines.md, preferences.md — only the user or main agent edits these.
+
+## Workflows
+
+Combine tools for multi-step tasks: lead gen (exa → research → email outreach), competitor monitoring (monitor → research), daily briefings (email + calendar), outreach campaigns (research → gmail/mailchimp).
 
 ## What I can always do
 
@@ -398,13 +458,147 @@ Then delete this file (onboarding.md) — onboarding is complete.
 `,
 }
 
+// ── Vertical-specific starter kits ───────────────────────────────────────────
+
+const VERTICAL_MEMORY: Record<string, Record<string, string>> = {
+  'real-estate': {
+    'onboarding.md': `# Onboarding — Real Estate Edition
+
+This file exists because the user hasn't set up their profile yet. Follow these instructions, then delete this file when done.
+
+## Step 1: Introduction
+
+Start with this exact opening, then immediately ask the first question:
+
+"Hey, I'm CoAgent — your AI assistant built for real estate agents. I run privately on your machine and can help with contracts, clients, listings, and your daily workflow.
+
+Let me get to know how you work. What market are you in — and do you primarily work with buyers, sellers, or both?"
+
+## Step 2: Get to know them
+
+Ask follow-up questions ONE AT A TIME. Cover:
+1. Their market and property types (residential, commercial, luxury?)
+2. Buyers, sellers, or both — and typical deal volume
+3. What part of the deal cycle takes the most time (lead gen, showings, paperwork, follow-ups?)
+4. What tools they use (MLS, CRM, DocuSign, email?)
+5. Which of their connected tools (check setup.md) they want monitored
+6. How hands-off they want it — what should CoAgent handle vs. always ask first
+
+ONE question per message. If they mention contracts, ask about that. If they mention lead follow-up, dig into that.
+
+## Step 3: Write their profile
+
+When you have a clear picture, write their profile to agent.md:
+
+# [their name]
+**About**: Real estate agent in [market]. [buyers/sellers/both]. [property types].
+**Focus**: [top 1-2 things they want help with]
+
+## How I work
+- Handle automatically: [list]
+- Always ask first: [list]
+
+## What to monitor
+- [tool]: [what to watch for]
+
+## Step 4: Set up routines
+
+Based on what they told you, create schedule entries:
+- Morning briefing routine if they want daily updates
+- Follow-up reminders for active deals
+- Weekly pipeline review if they have volume
+
+## Step 5: Wrap up
+
+Update settings with what_you_do (their work description) and set onboarded: true.
+
+End with: "All set. I'll run in the background and surface anything that needs you. Your Contracts, Listings, Clients, and Marketing folders are ready for files.
+
+Tip: upload a fillable PDF contract and I can fill it out for you. Type @contract-review to analyze any contract."
+
+Then delete this file (onboarding.md) — onboarding is complete.
+`,
+  },
+}
+
+const VERTICAL_FOLDERS: Record<string, string[]> = {
+  'real-estate': ['Contracts', 'Listings', 'Clients', 'Marketing'],
+}
+
+const VERTICAL_SKILLS: Record<string, Record<string, { name: string; description: string; instructions: string; placeholder?: string }>> = {
+  'real-estate': {
+    'contract-review': {
+      name: 'contract-review',
+      description: 'Analyze a real estate contract for key terms, dates, and red flags',
+      placeholder: 'review a contract…',
+      instructions: `The user wants a contract reviewed. Follow these steps:
+
+1. Ask which contract to review, or if they mention one, find it:
+   - files(action: 'list', folder: 'Contracts') to see available contracts
+   - Or files(action: 'search', query: '[what they mentioned]')
+
+2. Use files(action: 'grep') to search the contract for key terms:
+   - grep pattern: "closing date|settlement date|close of escrow"
+   - grep pattern: "commission|compensation|broker fee"
+   - grep pattern: "earnest money|deposit|escrow"
+   - grep pattern: "contingenc|inspection|appraisal|financing"
+   - grep pattern: "penalty|default|termination|cancel"
+
+3. Summarize findings:
+   - Closing date and key deadlines
+   - Commission structure
+   - Earnest money amount and terms
+   - All contingencies and their deadlines
+   - Any unusual clauses or red flags
+
+4. If it's a fillable PDF, mention they can use fill_pdf to fill it out.
+
+Keep the summary concise and actionable.`,
+    },
+    'listing-prep': {
+      name: 'listing-prep',
+      description: 'Draft an MLS listing description from property details',
+      placeholder: 'draft a listing description…',
+      instructions: `The user wants to prepare a listing. Ask for (one at a time, skip what they already gave):
+
+1. Property address
+2. Property type (single family, condo, townhouse, etc.)
+3. Beds/baths/sqft
+4. Key features (updated kitchen, pool, view, etc.)
+5. Price point
+
+Then write an MLS-ready description:
+- Lead with the strongest selling point
+- 150-250 words, professional tone
+- Highlight location, features, recent updates
+- End with a call to action
+
+Save the description to memory (write to a file like "listing-[address].md") and offer to create a PDF listing sheet with create_document.`,
+    },
+  },
+}
+
 async function writeMemoryFiles(): Promise<void> {
   const memDir = join(DATA_DIR, 'memory')
   await mkdir(memDir, { recursive: true })
-  for (const [filename, content] of Object.entries(MEMORY_FILES)) {
+
+  // Merge vertical-specific memory (overrides base files like onboarding.md)
+  const { vertical } = getEdition()
+  const verticalMemory = VERTICAL_MEMORY[vertical] || {}
+  const allMemory = { ...MEMORY_FILES, ...verticalMemory }
+
+  for (const [filename, content] of Object.entries(allMemory)) {
     const filePath = join(memDir, filename)
     if (!existsSync(filePath)) {
       await writeFile(filePath, content, 'utf-8')
+    }
+  }
+
+  // Seed folders for the vertical
+  const folders = VERTICAL_FOLDERS[vertical]
+  if (folders) {
+    for (const folder of folders) {
+      try { await createFolder(DATA_DIR, folder) } catch { /* already exists */ }
     }
   }
 }
@@ -412,10 +606,11 @@ async function writeMemoryFiles(): Promise<void> {
 writeMemoryFiles().catch(err => console.error('[Server] Failed to write memory files:', err.message))
 
 // ── Default skills (shipped with the app, read-only) ─────────────────────────
-const DEFAULT_SKILLS: Record<string, { name: string; description: string; instructions: string }> = {
+const DEFAULT_SKILLS: Record<string, { name: string; description: string; instructions: string; placeholder?: string }> = {
   'skill-creator': {
     name: 'skill-creator',
     description: 'Build custom skills to automate your workflows — @skill-creator to start',
+    placeholder: 'create a new skill…',
     instructions: `The user wants to create a custom skill. Ask what they want to automate (one question at a time), then build it with save_skill.
 
 A good skill has: a kebab-case name, a one-line description, and instructions that specify exactly which tools to call and in what order. Use actual tool names. No filler.
@@ -432,6 +627,7 @@ Examples to suggest if they need ideas:
   'integration-builder': {
     name: 'integration-builder',
     description: 'Create custom integrations from any API — @integration-builder to start',
+    placeholder: 'build a custom integration…',
     instructions: `The user wants to connect a new API as a custom integration. Follow these steps exactly:
 
 ## Step 1: Identify the API
@@ -585,7 +781,13 @@ Start simple (1-2 tools), get it working, then iterate to add more capabilities.
 async function writeDefaultSkills(): Promise<void> {
   const dir = join(DATA_DIR, 'skills')
   await mkdir(dir, { recursive: true })
-  for (const [filename, skill] of Object.entries(DEFAULT_SKILLS)) {
+
+  // Merge vertical-specific skills into defaults
+  const { vertical } = getEdition()
+  const verticalSkills = VERTICAL_SKILLS[vertical] || {}
+  const allSkills = { ...DEFAULT_SKILLS, ...verticalSkills }
+
+  for (const [filename, skill] of Object.entries(allSkills)) {
     const filePath = join(dir, `${filename}.json`)
     // Always write defaults — they're read-only and ship with the app
     await writeFile(filePath, JSON.stringify(skill, null, 2), 'utf-8')
@@ -597,6 +799,7 @@ writeDefaultSkills().catch(err => console.error('[Server] Failed to write defaul
 const agent = new Agent(buildMcpConfigs(), DATA_DIR)
 
 let wss: WebSocketServer | null = null
+let voiceProcessing = false
 
 const scheduler = startScheduler(agent, DATA_DIR, {
   onHeartbeat: (status, summary) => {
@@ -636,11 +839,51 @@ agent.onSkillsChanged = async () => {
   broadcast({ type: 'skills_update', skills })
 }
 
+// Google Calendar
+const googleCal = (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET)
+  ? new GoogleCalendarService(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      DATA_DIR,
+    )
+  : null
+
+if (googleCal) {
+  googleCal.setUpdateCallback(async () => {
+    broadcast({ type: 'calendar_update', entries: agent.calendar.getAll() } as any)
+    const status = await googleCal.getStatus()
+    broadcast({ type: 'google_calendar_status', ...status } as any)
+  })
+  googleCal.init().then(async () => {
+    agent.googleCalendarConnected = await googleCal.isConnected()
+  }).catch(err => console.error('[Server] Google Calendar init error:', err.message))
+}
+
 agent.onCustomIntegration = async (action, data) => {
   if (action === 'propose') {
-    const caps = (data.capabilities || []).map((c: any) => ({ name: c.name, description: c.description, checked: true }))
-    broadcast({ type: 'capability_card', name: data.display_name || data.name, capabilities: caps })
-    return 'Capabilities proposed to the user. They will see checkboxes to confirm which capabilities they want. Ask them to review and confirm.'
+    // Normalize capabilities — agent may send array, object, or JSON string
+    let parsed = data.capabilities
+    if (typeof parsed === 'string') {
+      try { parsed = JSON.parse(parsed) } catch { parsed = null }
+    }
+    let rawCaps: { name: string; description: string }[] = []
+    if (Array.isArray(parsed)) {
+      rawCaps = parsed.map((c: any) =>
+        typeof c === 'string' ? { name: c, description: '' } : { name: c.name || '', description: c.description || '' }
+      )
+    } else if (typeof parsed === 'object' && parsed !== null) {
+      rawCaps = Object.entries(parsed).map(([k, v]) => ({ name: k, description: String(v) }))
+    }
+    const caps = rawCaps.filter(c => c.name).map(c => ({ ...c, checked: true }))
+    // Normalize auth_fields
+    let parsedAuth = data.auth_fields
+    if (typeof parsedAuth === 'string') { try { parsedAuth = JSON.parse(parsedAuth) } catch { parsedAuth = [] } }
+    const authFields = (Array.isArray(parsedAuth) ? parsedAuth : []).map((f: any) => ({
+      name: f.name, displayName: f.display_name || f.displayName || f.name,
+      description: f.description || '', helpUrl: f.help_url || f.helpUrl, helpText: f.help_text || f.helpText,
+    }))
+    broadcast({ type: 'capability_card', name: data.display_name || data.name, capabilities: caps, authFields: authFields.length > 0 ? authFields : undefined } as any)
+    return 'Capabilities proposed to the user. They will see checkboxes to confirm which capabilities they want, plus input fields for any required auth credentials (API keys, etc.). Ask them to review and confirm.'
   }
 
   if (action === 'create') {
@@ -650,8 +893,12 @@ agent.onCustomIntegration = async (action, data) => {
     const name = data.name
     const displayName = data.display_name
     const description = data.description || ''
-    const capabilities = (data.capabilities || []).map((c: any) => c.name)
-    const authFields = (data.auth_fields || []).map((f: any) => ({
+    let parsedCaps = data.capabilities
+    if (typeof parsedCaps === 'string') { try { parsedCaps = JSON.parse(parsedCaps) } catch { parsedCaps = [] } }
+    const capabilities = (Array.isArray(parsedCaps) ? parsedCaps : []).map((c: any) => typeof c === 'string' ? c : c.name)
+    let parsedAuth = data.auth_fields
+    if (typeof parsedAuth === 'string') { try { parsedAuth = JSON.parse(parsedAuth) } catch { parsedAuth = [] } }
+    const authFields = (Array.isArray(parsedAuth) ? parsedAuth : []).map((f: any) => ({
       name: f.name,
       displayName: f.display_name,
       description: f.description,
@@ -680,7 +927,8 @@ agent.onCustomIntegration = async (action, data) => {
         createdAt: new Date().toISOString(),
         connected: false,
         authFields,
-        ...(data.icon ? { icon: data.icon } : {})
+        ...(data.icon ? { icon: data.icon } : {}),
+        ...(data.domain ? { domain: data.domain } : {})
       }, data.code, pkg)
 
       // Run npm install
@@ -911,6 +1159,12 @@ async function refreshComposioMcp(slugs: string[]): Promise<void> {
 
 if (composioKey()) {
   console.log('[Composio] API key present, initializing MCP connection...')
+  // Seed local connection tracking from Composio on first run (backwards compat)
+  seedLocalConnectionsIfNeeded(composioKey()!, composioUserId())
+    .catch(err => console.warn('[Composio] Failed to seed local connections:', err.message))
+  // Ensure webhook subscription exists so Composio delivers trigger events to this user's relay
+  ensureWebhookSubscription(composioKey()!)
+    .catch(err => console.warn('[Composio] Failed to ensure webhook subscription:', err.message))
   // Clean up any stale expired accounts on boot to prevent duplicate buildup
   purgeExpiredAccounts(composioKey()!, composioUserId())
     .catch(err => console.error('[Composio] Failed to purge expired accounts:', err.message))
@@ -973,25 +1227,106 @@ wss = new WebSocketServer({ host: '127.0.0.1', port: PORT })
 
 relay.connect()
 
-// Team client
+// Team client — only initialize if edition includes team
 try {
-  if (process.env.RELAY_URL && process.env.RELAY_TOKEN) {
+  if (getEdition().team && process.env.RELAY_URL && process.env.RELAY_TOKEN) {
     teamClient = new TeamClient({
       relayUrl: process.env.RELAY_URL.replace(/\/$/, ''),
       relayToken: process.env.RELAY_TOKEN,
       userId: process.env.RELAY_USER_ID || '',
       dataDir: DATA_DIR,
       onTaggedMessage: async (message) => {
-        const teamPrompt = `[TEAM MESSAGE from ${message.from.name} (${message.from.role})]\n${message.visible}\n\n[Agent Context]: ${message.agentContext}\n\nRespond to this team message. Use the send_team_message tool to reply in the team channel.`
         try {
-          const response = await agent.chat(teamPrompt, (text) => broadcast({ type: 'chat_chunk', text }), (tool, label) => broadcast({ type: 'tool_start', tool, label } as any))
+          // If this is a reply from an agent we messaged, resolve the waiting tool call
+          const pendingCallback = message.from.isAgent ? agent.pendingAgentReplies.get(message.from.userId) : undefined
+          if (pendingCallback) {
+            console.log(`[Team] Resolving pending reply from ${message.from.userId}`)
+            agent.pendingAgentReplies.delete(message.from.userId)
+            pendingCallback(message.visible)
+            return
+          }
+
+          broadcast({ type: 'team_status', status: 'processing', from: message.from.name } as any)
+          const log = teamClient!.getTeamLog()
+          const myUserId = process.env.RELAY_USER_ID || ''
+
+          // Determine channel filter
+          const isDm = message.to !== null
+          const filter = isDm
+            ? { dmWith: message.from.userId + (message.from.isAgent ? '' : '-agent'), myUserId }
+            : { broadcast: true }
+
+          // 1. Recent messages (same channel)
+          const recent = await log.getRecentMessages(5, filter)
+          const recentIds = new Set(recent.map(m => m.id))
+          recentIds.add(message.id)
+
+          // 2. Semantic search (all messages you've seen)
+          const semantic = await log.searchMessages(message.visible, 5, recentIds)
+
+          // 3. Fetch shared team notes
+          let teamNotes = ''
+          try {
+            const relayUrl = process.env.RELAY_URL?.replace(/\/$/, '')
+            const relayToken = process.env.RELAY_TOKEN
+            if (relayUrl && relayToken) {
+              const notesRes = await fetch(`${relayUrl}/team/notes`, {
+                headers: { 'Authorization': `Bearer ${relayToken}` }
+              })
+              if (notesRes.ok) {
+                const data = await notesRes.json() as { content: string }
+                if (data.content) teamNotes = data.content
+              }
+            }
+          } catch (err) {
+            console.warn('[Team] Failed to fetch team notes:', err)
+          }
+
+          // 4. Assemble context
+          const parts: string[] = []
+
+          if (teamNotes) {
+            parts.push(`[Team Notes]\n${teamNotes}`)
+          }
+
+          if (recent.length > 0) {
+            const recentLines = recent.map(m => {
+              const ago = timeAgo(m.timestamp)
+              const sender = m.from.isAgent ? `${m.from.name}'s Agent` : m.from.name
+              return `- ${sender} (${ago}): "${m.visible}"`
+            })
+            parts.push(`[Recent team messages]\n${recentLines.join('\n')}`)
+          }
+
+          if (semantic.length > 0) {
+            const semanticLines = semantic.map(r => {
+              const ago = timeAgo(r.timestamp)
+              return `- ${r.from} (${ago}): "${r.content.slice(0, 200)}"`
+            })
+            parts.push(`[Relevant older context]\n${semanticLines.join('\n')}`)
+          }
+
+          const teamContext = parts.length > 0 ? parts.join('\n\n') : ''
+
+          const senderLabel = message.from.isAgent ? `${message.from.name}'s Agent` : message.from.name
+          const replyTo = message.from.isAgent
+            ? `Reply to @${message.from.userId}-agent so their agent receives your response.`
+            : `Reply to @${message.from.name} to notify the human.`
+          const teamPrompt = `[TEAM MESSAGE from ${senderLabel} (${message.from.role})]\n${message.visible}${message.agentContext ? `\n\n[Agent Context]: ${message.agentContext}` : ''}\n\nRespond to this team message. Use the send_team_message tool to reply. ${replyTo}`
+
+          const response = await agent.teamChat(teamPrompt, teamContext, (text) => broadcast({ type: 'chat_chunk', text }), (tool, label) => broadcast({ type: 'tool_start', tool, label } as any))
           broadcast({ type: 'chat_response', message: { role: 'assistant', content: response, timestamp: new Date().toISOString() } })
+          broadcast({ type: 'team_status', status: 'idle' } as any)
         } catch (err) {
           console.warn('[Team] Failed to process tagged message:', err)
+          broadcast({ type: 'team_status', status: 'idle' } as any)
         }
       },
       onHumanNotify: async (message) => {
         broadcast({ type: 'push_notification', title: message.from.name, body: message.visible } as any)
+      },
+      onMessage: (message) => {
+        broadcast({ type: 'team_message', message } as any)
       }
     })
     agent.teamClient = teamClient
@@ -1011,8 +1346,9 @@ function send(ws: WebSocket, msg: WSServerMessage): void {
 
 function broadcast(msg: WSServerMessage): void {
   if (!wss) return
+  const json = JSON.stringify(msg)
   for (const client of wss.clients) {
-    if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(msg))
+    if (client.readyState === WebSocket.OPEN) client.send(json)
   }
 }
 
@@ -1024,18 +1360,23 @@ async function sendIntegrations(ws: WebSocket): Promise<void> {
     integrations = await getIntegrationStatuses(composioKey()!, composioUserId())
   }
 
-  // Enrich Composio integrations with available trigger info
+  // Mark suggested integrations from the vertical preset
+  const { preset } = getEdition()
+  const suggestedSlugs = new Set(preset.suggestedIntegrations.map(s => s.toLowerCase()))
+
+  // Enrich Composio integrations with available trigger info + suggested flag
   const subscribedSet = getSubscribedTriggers()
   integrations = integrations.map(integration => {
+    const suggested = suggestedSlugs.has(integration.slug.toLowerCase())
     const availableTriggers = getAvailableTriggersForSlug(integration.slug)
-    if (availableTriggers.length === 0) return integration
+    if (availableTriggers.length === 0) return suggested ? { ...integration, suggested } : integration
     const triggers = availableTriggers.map(t => ({
       slug: t.slug,
       label: t.label,
       appSlug: integration.slug,
       enabled: subscribedSet.has(t.slug),
     }))
-    return { ...integration, triggers }
+    return { ...integration, triggers, ...(suggested ? { suggested } : {}) }
   })
 
   const custom = await getCustomIntegrations()
@@ -1112,6 +1453,10 @@ async function sendFullState(ws: WebSocket): Promise<void> {
   send(ws, { type: 'queue_update', items: agent.queue.getPending() })
   send(ws, { type: 'done_update', items: agent.queue.getDone() })
   send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
+  if (googleCal) {
+    const gcalStatus = await googleCal.getStatus()
+    send(ws, { type: 'google_calendar_status', ...gcalStatus } as any)
+  }
   const chatHistoryMsg = { type: 'chat_history' as const, messages: agent.getChatHistory() }
   const chatJson = JSON.stringify(chatHistoryMsg)
   console.log(`[Server] sendFullState chat_history: ${chatHistoryMsg.messages.length} msgs, ${chatJson.length} bytes`)
@@ -1121,6 +1466,13 @@ async function sendFullState(ws: WebSocket): Promise<void> {
   readSettings(DATA_DIR).then(settings => send(ws, { type: 'settings_update', settings })).catch(console.error)
   sendRelayStatus(ws).catch(console.error)
   agent.getSkills().then(skills => send(ws, { type: 'skills_update', skills })).catch(console.error)
+  // Send relay credentials so Team Notes can fetch without waiting for Settings visit
+  const relayUrl = process.env.RELAY_URL ?? ''
+  const token = process.env.RELAY_TOKEN ?? ''
+  const userId = process.env.RELAY_USER_ID ?? 'default'
+  if (relayUrl && token) {
+    send(ws, { type: 'relay_credentials', relayUrl, token, userId })
+  }
 }
 
 /** Broadcast full agent state to all connected WebSocket clients. */
@@ -1136,8 +1488,35 @@ function broadcastFullState(): void {
 wss.on('connection', (ws) => {
   sendFullState(ws).catch(console.error)
 
+  ws.on('close', () => { console.log('[Server] Client disconnected') })
+  ws.on('error', (err) => { console.error('[Server] WS error:', err.message); ws.close() })
+
   ws.on('message', async (raw) => {
     const msg: WSClientMessage = JSON.parse(raw.toString())
+
+    // Exa monitor results — auto-save to research storage
+    if ((msg as any).type === 'exa_monitor') {
+      const data = (msg as any).data
+      if (data?.results?.length) {
+        try {
+          const { saveResearch } = await import('@coagent/mcp-exa/dist/research-store.js')
+          const query = data.search?.query || data.query || 'monitor'
+          const entries = data.results.map((r: any) => ({
+            url: r.url,
+            company: r.title || undefined,
+            summary: r.summary || r.text?.slice(0, 300) || undefined,
+            source: 'monitor',
+            query,
+            tags: ['monitor'],
+          }))
+          const res = saveResearch(DATA_DIR, entries)
+          console.log(`[Server] Exa monitor auto-save: ${res.added} new, ${res.duplicates} merged`)
+        } catch (err: any) {
+          console.error(`[Server] Exa monitor auto-save failed: ${err.message}`)
+        }
+      }
+      return
+    }
 
     if (msg.type === 'client_connected') {
       console.log('[Server] Remote client connected via relay — broadcasting full state')
@@ -1192,6 +1571,8 @@ wss.on('connection', (ws) => {
     if (msg.type === 'stop_agent') {
       console.log('[Server] Stop agent requested')
       agent.stop()
+      voiceProcessing = false
+      broadcast({ type: 'voice_tts_cancel' } as any)
       return
     }
 
@@ -1212,18 +1593,24 @@ wss.on('connection', (ws) => {
       broadcast({ type: 'agent_thinking' } as any)
       try {
         let streamed = ''
-        const response = await agent.chat(
-          msg.message,
-          (chunk) => {
-            streamed += chunk
-            broadcast({ type: 'chat_chunk', text: chunk } as any)
-          },
-          (tool, label) => {
-            broadcast({ type: 'chat_segment_end' } as any)
-            broadcast({ type: 'tool_start', tool, label } as any)
-          },
-          msg.fileIds
+        const chatTimeout = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Agent chat timed out after 5 minutes')), 5 * 60 * 1000)
         )
+        const response = await Promise.race([
+          agent.chat(
+            msg.message,
+            (chunk) => {
+              streamed += chunk
+              broadcast({ type: 'chat_chunk', text: chunk } as any)
+            },
+            (tool, label) => {
+              broadcast({ type: 'chat_segment_end' } as any)
+              broadcast({ type: 'tool_start', tool, label } as any)
+            },
+            msg.fileIds
+          ),
+          chatTimeout
+        ])
         broadcast({
           type: 'chat_response',
           message: { role: 'assistant', content: streamed || response, timestamp: new Date().toISOString() }
@@ -1239,7 +1626,43 @@ wss.on('connection', (ws) => {
       }
     }
 
+    // Dictation: transcribe audio → clean up with Haiku → return text
+    if (msg.type === 'voice_dictation') {
+      const proxy = getOpenAIProxy()
+      if (!proxy) { send(ws, { type: 'voice_dictation_result', text: '' }); return }
+      try {
+        const buf = Buffer.from(msg.data, 'base64')
+        const fmt = msg.format === 'm4a' ? { mime: 'audio/mp4', ext: 'm4a' } : { mime: 'audio/webm', ext: 'webm' }
+        const blob = new Blob([buf], { type: fmt.mime })
+        const form = new FormData()
+        form.append('file', blob, `dictation.${fmt.ext}`)
+        form.append('model', 'whisper-1')
+        form.append('language', 'en')
+        form.append('prompt', 'Dictation for a chat message to an AI assistant.')
+        form.append('temperature', '0.2')
+        const res = await fetch(`${proxy.baseUrl}/v1/audio/transcriptions`, {
+          method: 'POST',
+          headers: { 'Authorization': proxy.authHeader },
+          body: form,
+        })
+        const data = await res.json() as { text?: string }
+        const text = data.text?.trim() || ''
+        if (text) console.log('[Dictation] Result:', text.slice(0, 80))
+        send(ws, { type: 'voice_dictation_result', text })
+      } catch (err: any) {
+        console.error('[Dictation] Error:', err.message)
+        send(ws, { type: 'voice_dictation_result', text: '' })
+      }
+      return
+    }
+
     if (msg.type === 'voice_audio') {
+      // Guard: skip if another voice request is already being processed
+      if (voiceProcessing) {
+        console.log('[Voice] Skipping duplicate voice_audio — already processing')
+        return
+      }
+      voiceProcessing = true
       // Receive base64 audio from frontend, transcribe with Whisper, then process as voice chat
       const voiceProxy = getOpenAIProxy()
       if (!voiceProxy) {
@@ -1283,19 +1706,41 @@ wss.on('connection', (ws) => {
         broadcast({ type: 'voice_transcribed', text } as any)
         broadcast({ type: 'agent_thinking' } as any)
         let streamed = ''
+        let currentSegment = ''
         const settingsForTts = await readSettings(DATA_DIR)
+        const doTts = settingsForTts.voice_response && !!getOpenAIProxy()
+        // Queue TTS segments so they play in order (each awaits the previous)
+        let ttsChain = Promise.resolve()
         const voicePrompt = text + ' [voice]'
-        const response = await agent.chat(
-          voicePrompt,
-          (chunk) => {
-            streamed += chunk
-            broadcast({ type: 'chat_chunk', text: chunk } as any)
-          },
-          (tool, label) => {
-            broadcast({ type: 'chat_segment_end' } as any)
-            broadcast({ type: 'tool_start', tool, label } as any)
-          }
+        const voiceAudioTimeout = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Agent chat timed out after 5 minutes')), 5 * 60 * 1000)
         )
+        const response = await Promise.race([
+          agent.chat(
+            voicePrompt,
+            (chunk) => {
+              streamed += chunk
+              currentSegment += chunk
+              broadcast({ type: 'chat_chunk', text: chunk } as any)
+            },
+            (tool, label) => {
+              // Text segment ended — TTS it now before the tool runs
+              if (doTts && currentSegment.trim()) {
+                const segText = currentSegment
+                ttsChain = ttsChain.then(() => streamTts(segText, settingsForTts.voice_voice, (msg) => send(ws, msg as any)))
+              }
+              currentSegment = ''
+              broadcast({ type: 'chat_segment_end' } as any)
+              broadcast({ type: 'tool_start', tool, label } as any)
+            }
+          ),
+          voiceAudioTimeout
+        ])
+        // TTS the final segment (after last tool call, or the whole response if no tools)
+        if (doTts && currentSegment.trim()) {
+          const segText = currentSegment
+          ttsChain = ttsChain.then(() => streamTts(segText, settingsForTts.voice_voice, (msg) => send(ws, msg as any)))
+        }
         const fullResponse = streamed || response
         broadcast({ type: 'chat_response', message: { role: 'assistant', content: fullResponse, timestamp: new Date().toISOString() } } as any)
         send(ws, { type: 'queue_update', items: agent.queue.getPending() })
@@ -1303,11 +1748,11 @@ wss.on('connection', (ws) => {
         send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
         sendFilesAndFolders(ws).catch(console.error)
         send(ws, { type: 'voice_summary', summary: fullResponse })
-        // TTS the full response — no early fire that cuts off
-        if (settingsForTts.voice_response && getOpenAIProxy()) {
-          streamTts(fullResponse, settingsForTts.voice_voice, (msg) => send(ws, msg as any))
-        }
+        // Wait for all TTS segments to finish streaming
+        await ttsChain
+        voiceProcessing = false
       } catch (err: any) {
+        voiceProcessing = false
         console.error('[Voice] Transcription/chat error:', err.message)
         send(ws, { type: 'error', message: `Voice failed: ${err.message}` })
         send(ws, { type: 'agent_stopped' })
@@ -1325,19 +1770,38 @@ wss.on('connection', (ws) => {
       broadcast({ type: 'agent_thinking' } as any)
       try {
         let streamed = ''
+        let currentSegment = ''
         const settingsForTts = await readSettings(DATA_DIR)
+        const doTts = settingsForTts.voice_response && !!getOpenAIProxy()
+        let ttsChain = Promise.resolve()
         const voicePrompt = msg.message + ' [voice]'
-        const response = await agent.chat(
-          voicePrompt,
-          (chunk) => {
-            streamed += chunk
-            broadcast({ type: 'chat_chunk', text: chunk } as any)
-          },
-          (tool, label) => {
-            broadcast({ type: 'chat_segment_end' } as any)
-            broadcast({ type: 'tool_start', tool, label } as any)
-          }
+        const voiceChatTimeout = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Agent chat timed out after 5 minutes')), 5 * 60 * 1000)
         )
+        const response = await Promise.race([
+          agent.chat(
+            voicePrompt,
+            (chunk) => {
+              streamed += chunk
+              currentSegment += chunk
+              broadcast({ type: 'chat_chunk', text: chunk } as any)
+            },
+            (tool, label) => {
+              if (doTts && currentSegment.trim()) {
+                const segText = currentSegment
+                ttsChain = ttsChain.then(() => streamTts(segText, settingsForTts.voice_voice, (m) => send(ws, m as any)))
+              }
+              currentSegment = ''
+              broadcast({ type: 'chat_segment_end' } as any)
+              broadcast({ type: 'tool_start', tool, label } as any)
+            }
+          ),
+          voiceChatTimeout
+        ])
+        if (doTts && currentSegment.trim()) {
+          const segText = currentSegment
+          ttsChain = ttsChain.then(() => streamTts(segText, settingsForTts.voice_voice, (m) => send(ws, m as any)))
+        }
         const fullResp = streamed || response
         broadcast({
           type: 'chat_response',
@@ -1348,9 +1812,7 @@ wss.on('connection', (ws) => {
         send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
         sendFilesAndFolders(ws).catch(console.error)
         send(ws, { type: 'voice_summary', summary: fullResp })
-        if (settingsForTts.voice_response && getOpenAIProxy()) {
-          streamTts(fullResp, settingsForTts.voice_voice, (m) => send(ws, m as any))
-        }
+        await ttsChain
       } catch (err: any) {
         console.error('[Server] voice_chat error:', err.message)
         broadcast({ type: 'error', message: err.message ?? 'Something went wrong.' } as any)
@@ -1422,6 +1884,75 @@ wss.on('connection', (ws) => {
       send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
     }
 
+    if (msg.type === 'get_google_calendar_status') {
+      if (googleCal) {
+        const status = await googleCal.getStatus()
+        send(ws, { type: 'google_calendar_status', ...status } as any)
+      } else {
+        send(ws, { type: 'google_calendar_status', connected: false, calendars: [], lastSync: null } as any)
+      }
+    }
+
+    if (msg.type === 'google_calendar_connect') {
+      if (!googleCal) {
+        send(ws, { type: 'error', message: 'Google Calendar not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.' })
+        return
+      }
+      try {
+        send(ws, { type: 'agent_thinking' })
+        await googleCal.connect()
+        const { entries } = await googleCal.sync()
+        agent.calendar.setGoogleEvents(entries)
+        const status = await googleCal.getStatus()
+        broadcast({ type: 'google_calendar_status', ...status } as any)
+        broadcast({ type: 'calendar_update', entries: agent.calendar.getAll() })
+        agent.googleCalendarConnected = true
+      } catch (err: any) {
+        console.error('[Server] Google Calendar connect error:', err.message)
+        send(ws, { type: 'error', message: `Google Calendar connection failed: ${err.message}` })
+      }
+    }
+
+    if (msg.type === 'google_calendar_disconnect') {
+      if (googleCal) {
+        await googleCal.disconnect()
+        agent.calendar.clearGoogleEvents()
+        agent.googleCalendarConnected = false
+        const status = await googleCal.getStatus()
+        broadcast({ type: 'google_calendar_status', ...status } as any)
+        broadcast({ type: 'calendar_update', entries: agent.calendar.getAll() })
+      }
+    }
+
+    if (msg.type === 'google_calendar_toggle') {
+      if (googleCal) {
+        googleCal.toggleCalendar((msg as any).calendarId, (msg as any).enabled)
+        const { entries } = await googleCal.sync()
+        if (entries.length > 0) agent.calendar.setGoogleEvents(entries)
+        const status = await googleCal.getStatus()
+        broadcast({ type: 'google_calendar_status', ...status } as any)
+        broadcast({ type: 'calendar_update', entries: agent.calendar.getAll() })
+      }
+    }
+
+    if (msg.type === 'google_calendar_color') {
+      if (googleCal) {
+        googleCal.setCalendarColor((msg as any).calendarId, (msg as any).color)
+        const status = await googleCal.getStatus()
+        broadcast({ type: 'google_calendar_status', ...status } as any)
+      }
+    }
+
+    if (msg.type === 'google_calendar_sync') {
+      if (googleCal) {
+        const { entries, changed } = await googleCal.sync()
+        if (changed && entries.length > 0) agent.calendar.setGoogleEvents(entries)
+        const status = await googleCal.getStatus()
+        broadcast({ type: 'google_calendar_status', ...status } as any)
+        broadcast({ type: 'calendar_update', entries: agent.calendar.getAll() })
+      }
+    }
+
     if (msg.type === 'get_calendar') {
       send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
     }
@@ -1440,6 +1971,8 @@ wss.on('connection', (ws) => {
 
     if (msg.type === 'get_integrations') {
       if (composioKey()) {
+        // Always fetch fresh data when UI polls (e.g. after OAuth completion)
+        invalidateAccountsCache()
         const slugs = await getConnectedSlugs(composioKey()!, composioUserId())
         const newSlugs = slugs.filter(s => !currentMcpSlugs.includes(s))
         if (newSlugs.length > 0) {
@@ -1581,6 +2114,20 @@ wss.on('connection', (ws) => {
           const entry = registry.find(e => e.name === name)
           if (entry && entry.authFields.length > 0) {
             send(ws, { type: 'integration_needs_fields', slug: msg.slug, fields: entry.authFields })
+          } else {
+            // No auth fields needed — connect directly
+            try {
+              await agent.mcpManager.disconnect(`custom:${name}`)
+              const configs = await getCustomMcpConfigs()
+              const config = configs.find(c => c.name === `custom:${name}`)
+              if (config) {
+                await agent.mcpManager.connect([config])
+                embedToolsFromMcp().catch(() => {})
+              }
+              await sendIntegrations(ws)
+            } catch (err: any) {
+              send(ws, { type: 'error', message: err.message })
+            }
           }
         }
         return
@@ -1590,11 +2137,21 @@ wss.on('connection', (ws) => {
       } else {
         try {
           const url = await generateAuthUrl(composioKey()!, msg.slug, composioUserId(), msg.params)
+          await markLocalConnected(msg.slug)
+          if (url === 'CONNECTED_DIRECTLY') {
+            // API key integrations connect without OAuth redirect
+            invalidateAccountsCache()
+            const slugs = await getConnectedSlugs(composioKey()!, composioUserId())
+            await refreshComposioMcp(slugs).catch(console.error)
+            await sendIntegrations(ws)
+            return
+          }
           send(ws, { type: 'integration_auth_url', slug: msg.slug, url })
         } catch (err: any) {
           if (err.message === 'NEEDS_FIELDS') {
             send(ws, { type: 'integration_needs_fields', slug: msg.slug, fields: err.fields })
           } else {
+            console.error(`[Composio] Connect ${msg.slug} failed:`, err.message)
             send(ws, { type: 'error', message: err.message })
           }
         }
@@ -1685,7 +2242,10 @@ wss.on('connection', (ws) => {
 
     if (msg.type === 'capability_confirm') {
       const selected = msg.capabilities.join(', ')
-      const chatMsg = `The user confirmed these capabilities for the custom integration: ${selected}. Now generate the MCP server code and call create_custom_integration with action "create" to build it.`
+      const authInfo = msg.authValues && Object.keys(msg.authValues).length > 0
+        ? `\nThe user provided these auth credentials: ${JSON.stringify(msg.authValues)}. Store these securely in the integration's env config.`
+        : ''
+      const chatMsg = `The user confirmed these capabilities for the custom integration: ${selected}.${authInfo} Now generate the MCP server code and call create_custom_integration with action "create" to build it.`
       send(ws, { type: 'agent_thinking' })
       try {
         let streamed = ''
@@ -2031,17 +2591,25 @@ wss.on('connection', (ws) => {
 
     // Handle team messages from desktop client
     if (msg.type === 'team_send') {
-      if (teamClient) {
+      if (teamClient && teamClient.teamId) {
+        console.log(`[Team] Sending human message to: ${(msg as any).to || 'broadcast'}`)
         await teamClient.sendHumanMessage((msg as any).message, (msg as any).to || null)
+      } else {
+        console.warn('[Team] Cannot send — teamClient not connected or no teamId')
       }
     }
 
     if (msg.type === 'get_team_info') {
-      if (teamClient && teamClient.teamId) {
-        send(ws, {
-          type: 'team_info',
-          team: { teamId: teamClient.teamId, name: teamClient.teamName || '', ownerId: '', created: '', members: teamClient.getRoster() }
-        } as any)
+      if (teamClient) {
+        await teamClient.fetchRoster()
+        if (teamClient.teamId) {
+          send(ws, {
+            type: 'team_info',
+            team: { teamId: teamClient.teamId, name: teamClient.teamName || '', ownerId: '', created: '', members: teamClient.getRoster() }
+          } as any)
+        } else {
+          send(ws, { type: 'team_info', team: null } as any)
+        }
       } else {
         send(ws, { type: 'team_info', team: null } as any)
       }

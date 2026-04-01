@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk'
-import { readFile, writeFile, mkdir, unlink, rename, readdir, rm } from 'fs/promises'
+import { readFile, writeFile, mkdir, unlink, rename, readdir, rm, rmdir } from 'fs/promises'
 import { existsSync } from 'fs'
 import { join, extname, basename, dirname } from 'path'
 import type { FileEntry } from '@coagent/shared'
@@ -85,6 +85,13 @@ export async function listFolders(dataDir: string): Promise<string[]> {
   // Sort: saved-order items first (in order), remaining alphabetically
   const savedFiltered = savedOrder.filter(n => allPaths.includes(n))
   const remaining = allPaths.filter(n => !savedFiltered.includes(n)).sort()
+
+  // Prune stale entries from folder-order.json if any were removed
+  if (savedFiltered.length !== savedOrder.length) {
+    const merged = [...savedFiltered, ...remaining]
+    saveFolderOrder(dataDir, merged).catch(() => {})
+  }
+
   return [...savedFiltered, ...remaining]
 }
 
@@ -322,6 +329,13 @@ async function sampleContent(filename: string, buffer: Buffer, mimeType: string)
     return { type: 'text', text: buffer.toString('utf-8').slice(0, 500) }
   }
 
+  // Video/audio — store but don't try to extract content
+  const mediaExts = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v', '.wmv', '.flv', '.mp3', '.m4a', '.wav', '.aac', '.ogg']
+  if (mediaExts.includes(ext) || mimeType.startsWith('video/') || mimeType.startsWith('audio/')) {
+    const sizeMB = (buffer.length / (1024 * 1024)).toFixed(1)
+    return { type: 'text', text: `${mimeType.startsWith('video/') || ['.mp4','.mov','.avi','.mkv','.webm','.m4v','.wmv','.flv'].includes(ext) ? 'Video' : 'Audio'} file: ${filename} (${sizeMB}MB)` }
+  }
+
   // Unknown — try UTF-8
   const sample = buffer.toString('utf-8').slice(0, 500)
   const binaryCharCount = (sample.match(/[\x00-\x08\x0e-\x1f\x7f-\x9f]/g) ?? []).length
@@ -543,7 +557,13 @@ export async function ingestFile(
   group?: string
 ): Promise<FileEntry> {
   const sample = await sampleContent(filename, buffer, mimeType)
-  const summary = await generateSummary(dataDir, filename, sample)
+  // Skip Haiku summary for media files — use the sampleContent description directly
+  const ext = extname(filename).toLowerCase()
+  const mediaExts = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v', '.wmv', '.flv', '.mp3', '.m4a', '.wav', '.aac', '.ogg']
+  const isMedia = mediaExts.includes(ext) || mimeType.startsWith('video/') || mimeType.startsWith('audio/')
+  const summary = isMedia && sample.type === 'text'
+    ? sample.text
+    : await generateSummary(dataDir, filename, sample)
 
   // Save file to the target folder (or root if no group)
   const safeFilename = basename(filename)
@@ -604,7 +624,7 @@ function keywordMatch(entry: FileIndexEntry, q: string): boolean {
   // Match if ALL query words appear somewhere in the haystack
   const words = q.toLowerCase().split(/\s+/).filter(w => w.length > 1)
   if (words.length === 0) return false
-  return words.some(w => haystack.includes(w))
+  return words.every(w => haystack.includes(w))
 }
 
 export async function searchFiles(dataDir: string, query: string, limit = 5): Promise<FileEntry[]> {
@@ -665,6 +685,9 @@ export async function readFileBase64(dataDir: string, id: string): Promise<{ bas
     '.txt': 'text/plain', '.md': 'text/markdown', '.json': 'application/json',
     '.html': 'text/html', '.zip': 'application/zip',
     '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.avi': 'video/x-msvideo',
+    '.mkv': 'video/x-matroska', '.webm': 'video/webm', '.m4v': 'video/x-m4v',
+    '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4', '.wav': 'audio/wav', '.ogg': 'audio/ogg',
   }
   return { base64: buffer.toString('base64'), filename: entry.filename, mimeType: mimeTypes[ext] ?? 'application/octet-stream' }
 }
@@ -713,6 +736,179 @@ export async function readFileContent(dataDir: string, id: string): Promise<stri
   }
 
   return buffer.toString('utf-8')
+}
+
+// ── Grep across file contents ────────────────────────────────────────────────
+
+interface GrepMatch {
+  fileId: string
+  filename: string
+  group: string
+  matches: string[]  // each match is a snippet with surrounding context
+}
+
+async function extractText(entry: FileIndexEntry): Promise<string | null> {
+  try {
+    const buffer = await readFile(entry.path)
+    const ext = extname(entry.filename).toLowerCase()
+    if (ext === '.pdf') {
+      try { const pdfParse = (await import('pdf-parse')).default; return (await pdfParse(buffer)).text }
+      catch { return null }
+    }
+    if (ext === '.docx') {
+      try { const mammoth = await import('mammoth'); return (await mammoth.extractRawText({ buffer })).value }
+      catch { return null }
+    }
+    if (ext === '.xlsx' || ext === '.xls') {
+      try {
+        const XLSX = await import('xlsx')
+        const wb = XLSX.read(buffer, { type: 'buffer' })
+        return wb.SheetNames.map(s => XLSX.utils.sheet_to_csv(wb.Sheets[s])).join('\n')
+      } catch { return null }
+    }
+    // Images/video/audio — not searchable
+    const binaryExts = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v', '.wmv', '.flv', '.mp3', '.m4a', '.wav', '.aac', '.ogg']
+    if (binaryExts.includes(ext)) return null
+    const text = buffer.toString('utf-8')
+    const binaryCount = (text.slice(0, 500).match(/[\x00-\x08\x0e-\x1f\x7f-\x9f]/g) ?? []).length
+    if (binaryCount > 50) return null
+    return text
+  } catch { return null }
+}
+
+export async function grepFiles(
+  dataDir: string,
+  pattern: string,
+  opts?: { folder?: string; fileId?: string },
+  maxMatchesPerFile = 5,
+  contextChars = 80
+): Promise<GrepMatch[]> {
+  const index = await readIndex(dataDir)
+  let filtered = index
+  if (opts?.fileId) {
+    filtered = index.filter(e => e.id === opts.fileId)
+  } else if (opts?.folder) {
+    const folderLower = opts.folder.toLowerCase()
+    filtered = index.filter(e => e.group.toLowerCase() === folderLower || e.group.toLowerCase().startsWith(`${folderLower}/`))
+  }
+
+  let re: RegExp
+  try { re = new RegExp(pattern, 'gi') }
+  catch { re = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi') }
+
+  const results: GrepMatch[] = []
+
+  for (const entry of filtered) {
+    const text = await extractText(entry)
+    if (!text) continue
+
+    const snippets: string[] = []
+    let match: RegExpExecArray | null
+    while ((match = re.exec(text)) !== null && snippets.length < maxMatchesPerFile) {
+      const start = Math.max(0, match.index - contextChars)
+      const end = Math.min(text.length, match.index + match[0].length + contextChars)
+      const prefix = start > 0 ? '...' : ''
+      const suffix = end < text.length ? '...' : ''
+      snippets.push(`${prefix}${text.slice(start, end).replace(/\n/g, ' ')}${suffix}`)
+    }
+
+    if (snippets.length > 0) {
+      results.push({ fileId: entry.id, filename: entry.filename, group: entry.group, matches: snippets })
+    }
+  }
+
+  return results
+}
+
+// ── PDF form filling ─────────────────────────────────────────────────────────
+
+export interface PdfFieldInfo {
+  name: string
+  type: 'text' | 'checkbox' | 'dropdown' | 'radio' | 'other'
+  value?: string
+  options?: string[]  // for dropdowns
+}
+
+export async function getPdfFormFields(dataDir: string, id: string): Promise<PdfFieldInfo[]> {
+  const index = await readIndex(dataDir)
+  const entry = index.find(e => e.id === id)
+  if (!entry) throw new Error(`File ${id} not found`)
+  if (!entry.filename.toLowerCase().endsWith('.pdf')) throw new Error('Not a PDF file')
+
+  const { PDFDocument } = await import('pdf-lib')
+  const buffer = await readFile(entry.path)
+  const pdf = await PDFDocument.load(buffer)
+  const form = pdf.getForm()
+  const fields = form.getFields()
+
+  return fields.map(field => {
+    const name = field.getName()
+    const typeName = field.constructor.name
+    if (typeName === 'PDFTextField') {
+      const tf = form.getTextField(name)
+      return { name, type: 'text' as const, value: tf.getText() ?? undefined }
+    }
+    if (typeName === 'PDFCheckBox') {
+      const cb = form.getCheckBox(name)
+      return { name, type: 'checkbox' as const, value: cb.isChecked() ? 'checked' : 'unchecked' }
+    }
+    if (typeName === 'PDFDropdown') {
+      const dd = form.getDropdown(name)
+      return { name, type: 'dropdown' as const, value: dd.getSelected()?.[0], options: dd.getOptions() }
+    }
+    if (typeName === 'PDFRadioGroup') {
+      const rg = form.getRadioGroup(name)
+      return { name, type: 'radio' as const, value: rg.getSelected() ?? undefined, options: rg.getOptions() }
+    }
+    return { name, type: 'other' as const }
+  })
+}
+
+export async function fillPdfForm(
+  dataDir: string,
+  id: string,
+  fieldValues: Record<string, string>,
+  outputFilename?: string
+): Promise<FileEntry> {
+  const index = await readIndex(dataDir)
+  const entry = index.find(e => e.id === id)
+  if (!entry) throw new Error(`File ${id} not found`)
+  if (!entry.filename.toLowerCase().endsWith('.pdf')) throw new Error('Not a PDF file')
+
+  const { PDFDocument } = await import('pdf-lib')
+  const buffer = await readFile(entry.path)
+  const pdf = await PDFDocument.load(buffer)
+  const form = pdf.getForm()
+
+  for (const [name, value] of Object.entries(fieldValues)) {
+    try {
+      const field = form.getField(name)
+      const typeName = field.constructor.name
+      if (typeName === 'PDFTextField') {
+        form.getTextField(name).setText(value)
+      } else if (typeName === 'PDFCheckBox') {
+        const cb = form.getCheckBox(name)
+        if (value === 'true' || value === 'checked' || value === 'yes') cb.check()
+        else cb.uncheck()
+      } else if (typeName === 'PDFDropdown') {
+        form.getDropdown(name).select(value)
+      } else if (typeName === 'PDFRadioGroup') {
+        form.getRadioGroup(name).select(value)
+      }
+    } catch (err) {
+      console.warn(`[FileStore] Could not set field "${name}": ${(err as Error).message}`)
+    }
+  }
+
+  const filledBytes = await pdf.save()
+  const filledBuffer = Buffer.from(filledBytes)
+
+  // Save as a new file in the same folder
+  const baseName = entry.filename.replace(/\.pdf$/i, '')
+  const safeName = outputFilename ?? `${baseName} (filled).pdf`
+  const newEntry = await ingestFile(dataDir, safeName, filledBuffer, 'application/pdf', entry.group)
+
+  return newEntry
 }
 
 export async function renameFile(dataDir: string, id: string, newName: string): Promise<void> {
@@ -783,6 +979,16 @@ export async function deleteFileEntry(dataDir: string, id: string): Promise<void
 
   if (existsSync(entry.path)) {
     await unlink(entry.path).catch(() => {})
+    // Clean up empty parent directories
+    const filesDir = join(dataDir, FILES_DIR)
+    let dir = dirname(entry.path)
+    while (dir !== filesDir && dir.startsWith(filesDir)) {
+      try {
+        const contents = await readdir(dir)
+        if (contents.length === 0) { await rmdir(dir).catch(() => {}); dir = dirname(dir) }
+        else break
+      } catch { break }
+    }
   }
 
   await writeIndex(dataDir, index.filter(e => e.id !== id))

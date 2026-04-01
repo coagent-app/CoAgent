@@ -14,6 +14,7 @@ export interface CustomMCPEntry {
   connected: boolean
   authFields: { name: string; displayName: string; description: string; helpUrl?: string; helpText?: string }[]
   icon?: string          // SVG string for the integration icon
+  domain?: string        // website domain for favicon (e.g. "rentcast.io")
 }
 
 const CUSTOM_MCP_DIR = join(homedir(), '.coagent', 'custom-mcps')
@@ -146,7 +147,7 @@ export async function getCustomMcpConfigs(): Promise<MCPServerConfig[]> {
 /** Get Integration objects for the integrations modal */
 export async function getCustomIntegrations(): Promise<Array<{
   slug: string; name: string; connected: boolean; category: string;
-  description: string; capabilities: string; custom: boolean; icon?: string
+  description: string; capabilities: string; custom: boolean; icon?: string; domain?: string
 }>> {
   const registry = await readRegistry()
   return registry.map(e => ({
@@ -157,6 +158,7 @@ export async function getCustomIntegrations(): Promise<Array<{
     description: e.description,
     capabilities: e.capabilities.join(', '),
     custom: true,
-    ...(e.icon ? { icon: e.icon } : {})
+    ...(e.icon ? { icon: e.icon } : {}),
+    ...(e.domain ? { domain: e.domain } : {})
   }))
 }

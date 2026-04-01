@@ -65,7 +65,10 @@ export async function setupComposioMcp(
     console.log(`[Composio] Created MCP config: ${created.id}`)
   }
 
-  const url = `${mcpBaseUrl}?user_id=${encodeURIComponent(userId)}`
+  // MCP URL goes direct to Composio (not relay), so use the resolved numeric user ID
+  const { resolveComposioUserId } = await import('./composio-integrations.js')
+  const mcpUserId = await resolveComposioUserId(apiKey, userId)
+  const url = `${mcpBaseUrl}?user_id=${encodeURIComponent(mcpUserId)}`
   writeConfig({ ...cfg, [cacheKey]: url })
   console.log(`[Composio] MCP URL: ${url}`)
   return { url, apiKey }

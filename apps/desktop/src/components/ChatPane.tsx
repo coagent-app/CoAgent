@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react'
-import { Send, Square, FileText, Sheet, File, X, ChevronLeft, ChevronRight, ExternalLink, Paperclip } from 'lucide-react'
+import { Send, Square, FileText, Sheet, File, X, ChevronLeft, ChevronRight, ExternalLink, Paperclip, Mic } from 'lucide-react'
 import { CapabilityCard } from '@/components/CapabilityCard'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { invoke } from '@tauri-apps/api/core'
@@ -25,10 +25,101 @@ interface ChatPaneProps {
   files: FileEntry[]
   onNavigateToSettings?: () => void
   lastHeartbeat?: { time: Date; status: string } | null
-  skills?: { name: string; description: string }[]
-  capabilityCard?: { name: string; capabilities: { name: string; description: string; checked: boolean }[] } | null
-  onConfirmCapabilities?: (selected: string[]) => void
+  skills?: { name: string; description: string; placeholder?: string }[]
+  capabilityCard?: { name: string; capabilities: { name: string; description: string; checked: boolean }[]; authFields?: { name: string; displayName: string; description: string; helpUrl?: string; helpText?: string }[] } | null
+  onConfirmCapabilities?: (selected: string[], authValues?: Record<string, string>) => void
+  userName?: string
+  userRole?: string
+  onboarded?: boolean
   className?: string
+}
+
+function getWelcomeMessage(userName?: string, userRole?: string, onboarded?: boolean): string {
+  const name = userName ? `, ${userName}` : ''
+  if (!onboarded) {
+    if (userRole?.toLowerCase().includes('real estate')) {
+      return `Hey${name}! I'm CoAgent, your AI assistant built for real estate. I run privately on your machine and can help with contracts, client follow-ups, listings, and your daily workflow.\n\nLet's get you set up — what market are you in, and do you primarily work with buyers, sellers, or both?`
+    }
+    return `Hey${name}! I'm CoAgent — your personal AI assistant. I run privately on your machine and can manage your email, calendar, tasks, and workflows.\n\nLet's get you set up. What do you do for work, and what would you like help with?`
+  }
+  const hour = new Date().getHours()
+  const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening'
+  return `${greeting}${name}. What can I help you with?`
+}
+
+// ── Typing placeholder ──────────────────────────────────────────────────────
+const PLACEHOLDER_PREFIX = 'Ask Co-Agent to '
+const DEFAULT_SUFFIXES = [
+  'check your calendar…',
+  'summarize your emails…',
+  'draft a follow-up…',
+  'find upcoming meetings…',
+  'search your contacts…',
+  'schedule a reminder…',
+]
+
+// Turn a skill description into a short placeholder suffix
+
+// Shuffle array (Fisher-Yates)
+function shuffle<T>(arr: T[]): T[] {
+  const a = [...arr]
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[a[i], a[j]] = [a[j], a[i]]
+  }
+  return a
+}
+
+function useTypingPlaceholder(active: boolean, skills: { name: string; description: string; placeholder?: string }[] = []) {
+  const suffixes = React.useMemo(() => {
+    const skillSuffixes = skills.map(s => s.placeholder).filter((p): p is string => !!p)
+    const all = [...DEFAULT_SUFFIXES, ...skillSuffixes, 'do anything… (@ for skills)']
+    return shuffle(all)
+  }, [skills])
+
+  const [suffix, setSuffix] = useState('')
+  const idx = useRef(0)
+  const charIdx = useRef(0)
+  const direction = useRef<'typing' | 'deleting' | 'paused'>('typing')
+  const timeoutRef = useRef<ReturnType<typeof setTimeout>>()
+
+  useEffect(() => {
+    if (active) { setSuffix(''); return }
+
+    const tick = () => {
+      const s = suffixes[idx.current % suffixes.length]
+      if (direction.current === 'typing') {
+        charIdx.current++
+        setSuffix(s.slice(0, charIdx.current))
+        if (charIdx.current >= s.length) {
+          direction.current = 'paused'
+          timeoutRef.current = setTimeout(tick, 30000)
+          return
+        }
+        timeoutRef.current = setTimeout(tick, 80 + Math.random() * 60)
+      } else if (direction.current === 'paused') {
+        direction.current = 'deleting'
+        timeoutRef.current = setTimeout(tick, 50)
+      } else {
+        charIdx.current--
+        setSuffix(s.slice(0, charIdx.current))
+        if (charIdx.current <= 0) {
+          direction.current = 'typing'
+          idx.current = (idx.current + 1) % suffixes.length
+          timeoutRef.current = setTimeout(tick, 2000)
+          return
+        }
+        timeoutRef.current = setTimeout(tick, 35)
+      }
+    }
+
+    timeoutRef.current = setTimeout(tick, 1000)
+    return () => clearTimeout(timeoutRef.current)
+  }, [active, suffixes])
+
+  // Prefix always visible, only suffix animates
+  if (active) return ''
+  return PLACEHOLDER_PREFIX + suffix
 }
 
 const IMG_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico'])
@@ -335,15 +426,135 @@ const AgentBubble = React.memo(function AgentBubble({ content, files }: { conten
   )
 })
 
-export function ChatPane({ messages, streamingText, thinking, processing, toolLabel, connected, onChat, onSteer, onStop, onIngestFile, files, onNavigateToSettings, lastHeartbeat, skills = [], capabilityCard, onConfirmCapabilities, className }: ChatPaneProps) {
+// ── Dictation hook (hold-to-dictate → Whisper cleanup) ──────────────────────
+function useDictation(onResult: (text: string) => void) {
+  const [recording, setRecording] = useState(false)
+  const [transcribing, setTranscribing] = useState(false)
+  const recorderRef = useRef<MediaRecorder | null>(null)
+  const chunksRef = useRef<Blob[]>([])
+  const streamRef = useRef<MediaStream | null>(null)
+
+  const start = useCallback(async () => {
+    if (recording || transcribing) return
+    setRecording(true)
+    chunksRef.current = []
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      streamRef.current = stream
+      const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' })
+      recorder.ondataavailable = (e) => chunksRef.current.push(e.data)
+      recorder.start()
+      recorderRef.current = recorder
+    } catch (err) {
+      console.error('[Dictation] Mic access failed:', err)
+      setRecording(false)
+    }
+  }, [recording, transcribing])
+
+  const stop = useCallback(() => {
+    if (!recording) return
+    setRecording(false)
+
+    const recorder = recorderRef.current
+    if (recorder && recorder.state !== 'inactive') {
+      setTranscribing(true)
+      recorder.onstop = () => {
+        // Release mic
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach(t => t.stop())
+          streamRef.current = null
+        }
+        const blob = new Blob(chunksRef.current, { type: 'audio/webm' })
+        if (blob.size < 1000) {
+          setTranscribing(false)
+          return
+        }
+        const reader = new FileReader()
+        reader.onloadend = () => {
+          const base64 = (reader.result as string).split(',')[1] ?? ''
+          if (base64) {
+            window.dispatchEvent(new CustomEvent('coagent-ws-send', {
+              detail: { type: 'voice_dictation', data: base64 }
+            }))
+          } else {
+            setTranscribing(false)
+          }
+        }
+        reader.readAsDataURL(blob)
+      }
+      recorder.stop()
+    } else {
+      // Recorder never started or already inactive
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(t => t.stop())
+        streamRef.current = null
+      }
+    }
+  }, [recording])
+
+  // Listen for Whisper result
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const text = (e as CustomEvent).detail as string
+      setTranscribing(false)
+      if (text) onResult(text)
+    }
+    window.addEventListener('coagent-dictation', handler)
+    return () => window.removeEventListener('coagent-dictation', handler)
+  }, [onResult])
+
+  return { recording, transcribing, start, stop }
+}
+
+export function ChatPane({ messages, streamingText, thinking, processing, toolLabel, connected, onChat, onSteer, onStop, onIngestFile, files, onNavigateToSettings, lastHeartbeat, skills = [], capabilityCard, onConfirmCapabilities, userName, userRole, onboarded, className }: ChatPaneProps) {
   const [input, setInput] = useState('')
   const [skillQuery, setSkillQuery] = useState<string | null>(null)
   const [selectedSkillIdx, setSelectedSkillIdx] = useState(0)
   const [attachedFiles, setAttachedFiles] = useState<{ name: string; size: number }[]>([])
   const [isDragging, setIsDragging] = useState(false)
+  const [inputFocused, setInputFocused] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  // Dictation: append Whisper result to input
+  const handleDictation = useCallback((text: string) => {
+    setInput(prev => prev ? `${prev} ${text}` : text)
+    inputRef.current?.focus()
+  }, [])
+  const dictation = useDictation(handleDictation)
+
+  // Hold Space for 3s to dictate (only when input is not focused)
+  const spaceHoldTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const spaceHeld = useRef(false)
+  useEffect(() => {
+    const down = (e: KeyboardEvent) => {
+      if (e.code === 'Space' && !inputFocused && !e.repeat && !dictation.recording && !dictation.transcribing) {
+        e.preventDefault()
+        spaceHeld.current = true
+        spaceHoldTimer.current = setTimeout(() => {
+          if (spaceHeld.current) dictation.start()
+        }, 3000)
+      }
+    }
+    const up = (e: KeyboardEvent) => {
+      if (e.code === 'Space') {
+        spaceHeld.current = false
+        if (spaceHoldTimer.current) { clearTimeout(spaceHoldTimer.current); spaceHoldTimer.current = null }
+        if (dictation.recording) {
+          e.preventDefault()
+          dictation.stop()
+        }
+      }
+    }
+    window.addEventListener('keydown', down)
+    window.addEventListener('keyup', up)
+    return () => {
+      window.removeEventListener('keydown', down)
+      window.removeEventListener('keyup', up)
+      if (spaceHoldTimer.current) clearTimeout(spaceHoldTimer.current)
+    }
+  }, [inputFocused, dictation.recording, dictation.transcribing, dictation.start, dictation.stop])
 
   // Scroll to bottom on new messages / streaming
   useEffect(() => {
@@ -411,6 +622,7 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
   }, [onIngestFile])
 
   const isActive = processing || thinking || streamingText !== null
+  const typingPlaceholder = useTypingPlaceholder(isActive || !connected, skills)
 
   const handleSend = useCallback(() => {
     const msg = input.trim()
@@ -483,7 +695,7 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
         <div className="px-7 py-5 flex flex-col gap-3">
           {messages.length === 0 && !isActive && (
             <div className="flex justify-start">
-              <AgentBubble content="Hello. I'm Co-Agent. I'm watching your queue and ready to help. What do you need?" files={files} />
+              <AgentBubble content={getWelcomeMessage(userName, userRole, onboarded)} files={files} />
             </div>
           )}
 
@@ -523,6 +735,7 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
               <CapabilityCard
                 name={capabilityCard.name}
                 capabilities={capabilityCard.capabilities}
+                authFields={capabilityCard.authFields}
                 onConfirm={onConfirmCapabilities}
               />
             </div>
@@ -583,14 +796,49 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
           >
             <Paperclip size={16} />
           </button>
-          <Input
-            ref={inputRef}
-            className="flex-1 text-[13.5px] dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500"
-            placeholder={isActive ? 'Type to steer the agent…' : connected ? 'Ask Co-Agent anything… (type @ for skills)' : 'Starting up…'}
-            value={input}
-            onChange={e => handleInputChange(e.target.value)}
-            onKeyDown={handleKeyDown}
-          />
+          <div className="relative flex-1">
+            <Input
+              ref={inputRef}
+              className="flex-1 w-full text-[13.5px] dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500"
+              placeholder={isActive ? 'Type to steer the agent…' : !connected ? 'Starting up…' : ''}
+              value={input}
+              onChange={e => handleInputChange(e.target.value)}
+              onKeyDown={handleKeyDown}
+              onFocus={() => setInputFocused(true)}
+              onBlur={() => setInputFocused(false)}
+              readOnly={dictation.recording || dictation.transcribing}
+            />
+            {!isActive && connected && !input && !inputFocused && !dictation.recording && !dictation.transcribing && (
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[13.5px] text-neutral-400 dark:text-neutral-500 pointer-events-none">
+                {typingPlaceholder}<span className="inline-block w-[1px] h-[14px] bg-neutral-400 dark:bg-neutral-500 ml-[1px] align-middle animate-pulse" />
+              </span>
+            )}
+            {dictation.recording && (
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[13.5px] text-red-400 pointer-events-none animate-pulse">
+                Listening…
+              </span>
+            )}
+            {dictation.transcribing && (
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[13.5px] text-neutral-400 dark:text-neutral-500 pointer-events-none animate-pulse">
+                Transcribing…
+              </span>
+            )}
+          </div>
+          <button
+            onMouseDown={(e) => { e.preventDefault(); dictation.start() }}
+            onMouseUp={() => dictation.stop()}
+            onMouseLeave={() => { if (dictation.recording) dictation.stop() }}
+            disabled={!connected}
+            className={cn(
+              'p-1.5 rounded-md transition-colors disabled:opacity-30',
+              dictation.recording
+                ? 'text-red-500 bg-red-50 dark:bg-red-900/30 animate-pulse'
+                : 'text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800'
+            )}
+            title="Hold to dictate (or hold Space)"
+          >
+            <Mic size={16} />
+          </button>
           {isActive && !input.trim() ? (
             <Button size="sm" variant="outline" onClick={onStop}>
               <Square size={10} className="mr-1.5" />

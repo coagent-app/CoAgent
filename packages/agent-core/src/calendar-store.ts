@@ -78,6 +78,8 @@ export class CalendarStore {
   }
 
   delete(id: string): boolean {
+    const entry = this.entries.find(e => e.id === id)
+    if (entry?.source === 'google') return false
     const before = this.entries.length
     this.entries = this.entries.filter(e => e.id !== id)
     if (this.entries.length < before) { this.save(); return true }
@@ -86,6 +88,7 @@ export class CalendarStore {
 
   complete(id: string): CalendarEntry | undefined {
     const entry = this.entries.find(e => e.id === id)
+    if (entry?.source === 'google') return undefined
     if (!entry || (entry.type !== 'task' && entry.type !== 'followup')) return undefined
     entry.completed = true
     this.save()
@@ -94,12 +97,12 @@ export class CalendarStore {
 
   getAll(): CalendarEntry[] {
     return [...this.entries].sort((a, b) => {
-      const typeOrder: Record<string, number> = { routine: 0, task: 1, followup: 2 }
-      const aOrder = typeOrder[a.type] ?? 3
-      const bOrder = typeOrder[b.type] ?? 3
+      const typeOrder: Record<string, number> = { routine: 0, task: 1, followup: 2, event: 3 }
+      const aOrder = typeOrder[a.type] ?? 4
+      const bOrder = typeOrder[b.type] ?? 4
       if (aOrder !== bOrder) return aOrder - bOrder
-      const aTime = a.due || a.cron || ''
-      const bTime = b.due || b.cron || ''
+      const aTime = a.start || a.due || a.cron || ''
+      const bTime = b.start || b.due || b.cron || ''
       return aTime.localeCompare(bTime)
     })
   }
@@ -123,6 +126,47 @@ export class CalendarStore {
   /** Get all enabled routines */
   getRoutines(): CalendarEntry[] {
     return this.entries.filter(e => e.type === 'routine' && e.enabled)
+  }
+
+  /** Replace all Google events with new set */
+  setGoogleEvents(events: CalendarEntry[]): void {
+    this.entries = this.entries.filter(e => e.source !== 'google')
+    this.entries.push(...events)
+    this.pruneOldGoogleEvents()
+    this.save()
+  }
+
+  /** Apply incremental sync — remove cancelled, upsert changed */
+  applyGoogleSync(added: CalendarEntry[], removedGoogleEventIds: string[]): void {
+    const removeIds = new Set(removedGoogleEventIds.map(id => `gcal-${id}`))
+    this.entries = this.entries.filter(e => !removeIds.has(e.id))
+    for (const event of added) {
+      const idx = this.entries.findIndex(e => e.id === event.id)
+      if (idx >= 0) this.entries[idx] = event
+      else this.entries.push(event)
+    }
+    this.pruneOldGoogleEvents()
+    this.save()
+  }
+
+  /** Drop Google events that ended more than 1 hour ago */
+  private pruneOldGoogleEvents(): void {
+    const cutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString()
+    const before = this.entries.length
+    this.entries = this.entries.filter(e => {
+      if (e.source !== 'google') return true
+      const end = e.end || e.start
+      if (!end) return true
+      return end >= cutoff
+    })
+    const pruned = before - this.entries.length
+    if (pruned > 0) console.log(`[Calendar] Pruned ${pruned} past Google events`)
+  }
+
+  /** Remove all Google events (for disconnect) */
+  clearGoogleEvents(): void {
+    this.entries = this.entries.filter(e => e.source !== 'google')
+    this.save()
   }
 
   /** Next fire time for tasks and followups (for wake scheduling) */

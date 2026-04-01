@@ -242,7 +242,9 @@ async function scanStreamForUsage(
 async function validateRequest(request: Request, env: Env): Promise<{ token: string; data: TokenData } | Response> {
   const auth = request.headers.get('Authorization')
   const xApiKey = request.headers.get('x-api-key')
-  const token = auth?.startsWith('Bearer ') ? auth.slice(7) : xApiKey ?? null
+  const url = new URL(request.url)
+  const queryToken = url.searchParams.get('token')
+  const token = auth?.startsWith('Bearer ') ? auth.slice(7) : xApiKey ?? queryToken ?? null
   if (!token) {
     return jsonResponse({ error: 'Missing auth' }, 401)
   }
@@ -382,6 +384,7 @@ async function proxyOpenAITranscription(request: Request, env: Env, token: strin
 
 const COMPOSIO_ALLOWED: { method: string; pattern: RegExp }[] = [
   { method: 'POST', pattern: /^\/connected_accounts$/ },
+  { method: 'POST', pattern: /^\/connected_accounts\/link$/ },
   { method: 'GET', pattern: /^\/connected_accounts$/ },
   { method: 'DELETE', pattern: /^\/connected_accounts\/[a-zA-Z0-9_-]+$/ },
   { method: 'POST', pattern: /^\/trigger_instances\/[a-zA-Z0-9_-]+\/upsert$/ },
@@ -396,11 +399,19 @@ const COMPOSIO_ALLOWED: { method: string; pattern: RegExp }[] = [
   { method: 'GET', pattern: /^\/triggers_types$/ },
   { method: 'GET', pattern: /^\/triggers_types\/list\/enum$/ },
   { method: 'GET', pattern: /^\/triggers_types\/[a-zA-Z0-9_-]+$/ },
+  { method: 'GET', pattern: /^\/webhook_subscriptions$/ },
+  { method: 'POST', pattern: /^\/webhook_subscriptions$/ },
+  { method: 'DELETE', pattern: /^\/webhook_subscriptions\/[a-zA-Z0-9_-]+$/ },
 ]
 
 async function proxyComposio(request: Request, env: Env, token: string, data: TokenData): Promise<Response> {
   const url = new URL(request.url)
-  const composioPath = url.pathname.replace('/v1/composio', '')
+  const composioPath = url.pathname.slice('/v1/composio'.length)
+
+  // Guard against path traversal
+  if (composioPath.includes('..')) {
+    return jsonResponse({ error: 'Invalid path' }, 400)
+  }
 
   // Whitelist check
   const allowed = COMPOSIO_ALLOWED.some(
@@ -410,7 +421,15 @@ async function proxyComposio(request: Request, env: Env, token: string, data: To
     return jsonResponse({ error: 'Composio endpoint not allowed' }, 403)
   }
 
-  const composioUrl = `https://backend.composio.dev/api/v3${composioPath}${url.search}`
+  // For GET requests: strip any client-supplied user_ids and replace with the authenticated user's ID
+  const forwardSearch = new URLSearchParams(url.search)
+  if (request.method === 'GET' || request.method === 'HEAD') {
+    forwardSearch.delete('user_ids')
+    forwardSearch.append('user_ids', String(data.userId))
+  }
+  const searchString = forwardSearch.toString() ? `?${forwardSearch.toString()}` : ''
+
+  const composioUrl = `https://backend.composio.dev/api/v3${composioPath}${searchString}`
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -423,7 +442,18 @@ async function proxyComposio(request: Request, env: Env, token: string, data: To
   }
 
   if (request.method !== 'GET' && request.method !== 'HEAD') {
-    init.body = await request.text()
+    // Override user_id in body to prevent impersonation
+    let bodyText = await request.text()
+    if (bodyText) {
+      try {
+        const bodyJson = JSON.parse(bodyText)
+        bodyJson.user_id = String(data.userId)
+        bodyText = JSON.stringify(bodyJson)
+      } catch {
+        // Not JSON — pass through as-is
+      }
+    }
+    init.body = bodyText
   }
 
   const res = await fetch(composioUrl, init)
@@ -853,6 +883,14 @@ export class TeamChannel {
         created_at INTEGER NOT NULL DEFAULT (unixepoch())
       )
     `)
+    this.state.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS team_notes (
+        key TEXT PRIMARY KEY DEFAULT 'main',
+        content TEXT NOT NULL DEFAULT '',
+        updated_by TEXT NOT NULL DEFAULT '',
+        updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )
+    `)
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -940,6 +978,37 @@ export class TeamChannel {
       return new Response(JSON.stringify(messages), {
         headers: { 'Content-Type': 'application/json' }
       })
+    }
+
+    // GET /notes — read shared team notes
+    if (request.method === 'GET' && url.pathname === '/notes') {
+      const row = this.state.storage.sql.exec(
+        `SELECT content, updated_by, updated_at FROM team_notes WHERE key = 'main'`
+      ).toArray()[0]
+      const result = row
+        ? { content: row.content as string, updatedBy: row.updated_by as string, updatedAt: row.updated_at as number }
+        : { content: '', updatedBy: '', updatedAt: 0 }
+      return new Response(JSON.stringify(result), {
+        headers: { 'Content-Type': 'application/json' }
+      })
+    }
+
+    // PUT /notes — update shared team notes
+    if (request.method === 'PUT' && url.pathname === '/notes') {
+      const body = await request.json() as { content: string; userId: string }
+      this.state.storage.sql.exec(
+        `INSERT INTO team_notes (key, content, updated_by, updated_at) VALUES ('main', ?, ?, unixepoch())
+         ON CONFLICT(key) DO UPDATE SET content = ?, updated_by = ?, updated_at = unixepoch()`,
+        body.content, body.userId, body.content, body.userId
+      )
+
+      // Broadcast update notification to all connected team members
+      const notification = JSON.stringify({ type: 'team_notes_updated', updatedBy: body.userId })
+      for (const ws of this.state.getWebSockets()) {
+        ws.send(notification)
+      }
+
+      return new Response('OK', { status: 200 })
     }
 
     return new Response('Not found', { status: 404 })
@@ -1062,9 +1131,12 @@ export default {
 
         const doId = env.TEAM_CHANNEL.idFromName(teamId)
         const stub = env.TEAM_CHANNEL.get(doId)
-        // Forward with userId so the DO can tag the socket
+        // Forward with the client-supplied userId (RELAY_USER_ID) so the DO
+        // tags the socket with the same id used in message from.userId.
+        // This ensures the echo-exclusion check (uid !== msg.from.userId) works.
         const doUrl = new URL(request.url)
-        doUrl.searchParams.set('userId', userId)
+        const clientUserId = url.searchParams.get('userId') || userId
+        doUrl.searchParams.set('userId', clientUserId)
         return stub.fetch(new Request(doUrl.toString(), request))
       }
 
@@ -1099,6 +1171,38 @@ export default {
         })
       }
 
+      // GET /team/notes — read shared team notes
+      if (request.method === 'GET' && url.pathname === '/team/notes') {
+        const teamId = url.searchParams.get('teamId') || (tokenData as any).teamId
+        if (!teamId) return jsonResponse({ error: 'No team associated with this token' }, 404)
+
+        const doId = env.TEAM_CHANNEL.idFromName(teamId)
+        const stub = env.TEAM_CHANNEL.get(doId)
+        const res = await stub.fetch(new Request('https://internal/notes'))
+        return new Response(res.body, {
+          status: res.status,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders() },
+        })
+      }
+
+      // PUT /team/notes — update shared team notes
+      if (request.method === 'PUT' && url.pathname === '/team/notes') {
+        const teamId = url.searchParams.get('teamId') || (tokenData as any).teamId
+        if (!teamId) return jsonResponse({ error: 'No team associated with this token' }, 404)
+
+        const doId = env.TEAM_CHANNEL.idFromName(teamId)
+        const stub = env.TEAM_CHANNEL.get(doId)
+        const res = await stub.fetch(new Request('https://internal/notes', {
+          method: 'PUT',
+          body: request.body,
+          headers: { 'Content-Type': 'application/json' },
+        }))
+        return new Response(res.body, {
+          status: res.status,
+          headers: { ...corsHeaders() },
+        })
+      }
+
       return jsonResponse({ error: 'Not found' }, 404)
     }
 
@@ -1109,20 +1213,57 @@ export default {
       if (!token) return new Response('Missing token', { status: 401 })
       const data = await getToken(env, token)
       if (!data || !data.active) return new Response('Invalid token', { status: 401 })
-      const doId = env.USER_SESSION.idFromName(userId)
+      // Use the token's userId — the URL path userId is for backwards compat only
+      const resolvedUserId = String(data.userId)
+      const doId = env.USER_SESSION.idFromName(resolvedUserId)
       const stub = env.USER_SESSION.get(doId)
       return stub.fetch(request)
     }
 
-    // Composio webhook → push to user's DO (secured by tunnel secret)
-    if (request.method === 'POST' && url.pathname.startsWith('/webhook/')) {
-      const secret = request.headers.get('x-tunnel-secret')
-      if (!secret || secret !== env.TUNNEL_SECRET) {
-        return new Response('Unauthorized', { status: 401 })
+    // Exa monitor webhook → route to user's DO (userId in URL)
+    const exaMatch = url.pathname.match(/^\/webhook\/exa\/(.+)$/)
+    if (request.method === 'POST' && exaMatch) {
+      const userId = exaMatch[1]
+      const payload = await request.json() as Record<string, any>
+      const doId = env.USER_SESSION.idFromName(userId)
+      const stub = env.USER_SESSION.get(doId)
+      ctx.waitUntil(
+        stub.fetch(new Request('https://internal/push', {
+          method: 'POST',
+          body: JSON.stringify({ type: 'exa_monitor', data: payload }),
+          headers: { 'Content-Type': 'application/json' },
+        }))
+      )
+      return new Response('OK', { status: 200, headers: corsHeaders() })
+    }
+
+    // Composio webhook → route to user's DO (metadata-based resolution only)
+    if (request.method === 'POST' && url.pathname === '/webhook') {
+      const payload = await request.json() as Record<string, any>
+
+      // Resolve userId from Composio payload metadata only
+      let userId: string | null = null
+
+      // Try metadata.user_id → relay userId mapping from KV
+      const composioUserId = payload?.metadata?.user_id
+      if (composioUserId) {
+        const mapped = await env.TOKENS.get(`composio_user:${composioUserId}`)
+        if (mapped) userId = mapped
       }
-      const userId = url.pathname.split('/')[2]
-      if (!userId) return new Response('Missing userId', { status: 400 })
-      const payload = await request.json()
+      // Fallback: try connected_account_id → relay userId mapping
+      if (!userId) {
+        const connAccountId = payload?.metadata?.connected_account_id
+        if (connAccountId) {
+          const mapped = await env.TOKENS.get(`composio_account:${connAccountId}`)
+          if (mapped) userId = mapped
+        }
+      }
+
+      if (!userId) {
+        console.log('[Relay] Webhook dropped: could not resolve userId from payload')
+        return new Response('OK', { status: 200, headers: corsHeaders() })
+      }
+
       const doId = env.USER_SESSION.idFromName(userId)
       const stub = env.USER_SESSION.get(doId)
       ctx.waitUntil(
@@ -1133,6 +1274,26 @@ export default {
         }))
       )
       return new Response('OK', { status: 200, headers: corsHeaders() })
+    }
+
+    // Register Composio entity → relay userId mapping (called by agent on boot)
+    if (request.method === 'POST' && url.pathname === '/v1/webhook-route') {
+      const result = await validateRequest(request, env)
+      if (result instanceof Response) return result
+      const body = await request.json() as { composioUserId?: string; connectedAccountId?: string }
+      const relayUserId = String(result.data.userId)
+      if (body.composioUserId) {
+        // Prevent a user from overwriting another user's existing mapping
+        const existingOwner = await env.TOKENS.get(`composio_user:${body.composioUserId}`)
+        if (existingOwner !== null && existingOwner !== relayUserId) {
+          return jsonResponse({ error: 'Composio entity already registered to a different user' }, 403)
+        }
+        await env.TOKENS.put(`composio_user:${body.composioUserId}`, relayUserId)
+      }
+      if (body.connectedAccountId) {
+        await env.TOKENS.put(`composio_account:${body.connectedAccountId}`, relayUserId)
+      }
+      return jsonResponse({ ok: true, relayUserId })
     }
 
     // --- Available models (public, no auth) ---
@@ -1241,19 +1402,24 @@ export default {
       const users: any[] = []
       for (const key of list.keys) {
         if (key.name.startsWith('_') || key.name.startsWith('stripe:')) continue
-        const data = await getToken(env, key.name)
-        if (data) {
-          users.push({
-            token: key.name.slice(0, 8) + '...',
-            fullToken: key.name,
-            userId: data.userId,
-            model: data.model,
-            active: data.active,
-            admin: data.admin || false,
-            createdAt: data.createdAt,
-            label: data.stripeCustomerId,
-            totalCostUsd: data.usage.totalCostUsd,
-          })
+        try {
+          const data = await getToken(env, key.name)
+          if (data) {
+            users.push({
+              token: key.name.slice(0, 8) + '...',
+              fullToken: key.name,
+              userId: data.userId,
+              model: data.model,
+              active: data.active,
+              admin: data.admin || false,
+              createdAt: data.createdAt,
+              label: data.stripeCustomerId,
+              totalCostUsd: data.usage?.totalCostUsd ?? 0,
+            })
+          }
+        } catch (e) {
+          // Skip malformed token entries
+          console.error(`Skipping malformed token ${key.name}:`, e)
         }
       }
       return jsonResponse({ users })

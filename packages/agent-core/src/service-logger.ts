@@ -281,7 +281,7 @@ Search memory for existing entries about the people and projects mentioned. Then
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     const response = await (anthropic.messages.create as Function)({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: 4096,
+      max_tokens: 2048,
       system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
       tools: cachedTools,
       messages

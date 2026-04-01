@@ -1323,10 +1323,10 @@ export function FilesPane({
                 >
                   <Folder
                     size={56}
-                    strokeWidth={1.25}
-                    className={dragOverFolder === folder || nestTarget === folder ? 'text-blue-400' : 'text-neutral-700 dark:text-neutral-400'}
+                    strokeWidth={dragOverFolder === folder || nestTarget === folder ? 1.25 : 0.75}
+                    className={dragOverFolder === folder || nestTarget === folder ? 'text-blue-400' : 'text-neutral-400 dark:text-neutral-500'}
                     fill={dragOverFolder === folder || nestTarget === folder ? '#93c5fd' : 'currentColor'}
-                    fillOpacity={dragOverFolder === folder || nestTarget === folder ? 1 : 0.12}
+                    fillOpacity={dragOverFolder === folder || nestTarget === folder ? 1 : 0.15}
                   />
                   {renamingFolder === folder ? (
                     <input
@@ -1355,7 +1355,7 @@ export function FilesPane({
               {/* Inline new folder input */}
               {creatingFolder && (
                 <div className="flex flex-col items-center gap-1.5 p-2 rounded-xl">
-                  <Folder size={56} strokeWidth={1.25} className="text-neutral-700 dark:text-neutral-400" fill="currentColor" fillOpacity={0.12} />
+                  <Folder size={56} strokeWidth={0.75} className="text-neutral-400 dark:text-neutral-500" fill="currentColor" fillOpacity={0.15} />
                   <input
                     ref={newFolderInputRef}
                     value={newFolderName}
@@ -1405,7 +1405,7 @@ export function FilesPane({
                   }`}
                 >
                   <div className="flex-shrink-0 w-5 h-5 flex items-center justify-center">
-                    <Folder size={16} strokeWidth={1.5} className="text-neutral-600 dark:text-neutral-400" fill="currentColor" fillOpacity={0.15} />
+                    <Folder size={16} strokeWidth={1} className="text-neutral-400 dark:text-neutral-500" fill="currentColor" fillOpacity={0.15} />
                   </div>
                   <div className="flex-1 min-w-0">
                     {renamingFolder === folder ? (
@@ -1447,7 +1447,7 @@ export function FilesPane({
               {creatingFolder && (
                 <div className="flex items-center gap-3 px-2 py-2">
                   <div className="flex-shrink-0 w-5 h-5 flex items-center justify-center">
-                    <Folder size={16} strokeWidth={1.5} className="text-neutral-600 dark:text-neutral-400" fill="currentColor" fillOpacity={0.15} />
+                    <Folder size={16} strokeWidth={1} className="text-neutral-400 dark:text-neutral-500" fill="currentColor" fillOpacity={0.15} />
                   </div>
                   <input
                     ref={newFolderInputRef}

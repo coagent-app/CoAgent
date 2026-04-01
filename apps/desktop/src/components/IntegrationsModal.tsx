@@ -27,9 +27,10 @@ interface IntegrationsModalProps {
   whatsappQr?: string | null
   relayCredentials?: RelayCredentials | null
   onToggleTrigger?: (triggerSlug: string, appSlug: string, enabled: boolean) => void
+  onChat?: (message: string) => void
 }
 
-export function IntegrationsModal({ open, onClose, integrations, onConnect, onDisconnect, onDelete, pendingFields, onClearPendingFields, whatsappQr, relayCredentials, onToggleTrigger }: IntegrationsModalProps) {
+export function IntegrationsModal({ open, onClose, integrations, onConnect, onDisconnect, onDelete, pendingFields, onClearPendingFields, whatsappQr, relayCredentials, onToggleTrigger, onChat }: IntegrationsModalProps) {
   const [search, setSearch] = useState('')
   const [fieldValues, setFieldValues] = useState<Record<string, string>>({})
   const [detailSlug, setDetailSlug] = useState<string | null>(null)
@@ -111,9 +112,16 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
 
   if (!open) return null
 
-  const filtered = integrations.filter(i =>
-    i.name.toLowerCase().includes(search.toLowerCase())
-  )
+  const connectedIntegrations = integrations.filter(i => i.connected)
+
+  const filtered = integrations.filter(i => {
+    const q = search.toLowerCase()
+    return (
+      i.name.toLowerCase().includes(q) ||
+      (i.description?.toLowerCase().includes(q) ?? false) ||
+      (i.capabilities?.toLowerCase().includes(q) ?? false)
+    )
+  })
 
   // Group by category, preserving the order categories appear in the data
   const grouped = new Map<string, Integration[]>()
@@ -194,6 +202,13 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
                       <circle cx="16" cy="13" r="4.5" fill="white"/>
                       <path d="M8.5 24.5c0-4.142 3.358-7.5 7.5-7.5s7.5 3.358 7.5 7.5" stroke="white" strokeWidth="2.5" fill="none" strokeLinecap="round"/>
                     </svg>
+                  ) : detailIntegration.domain ? (
+                    <img
+                      src={`https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=http://${detailIntegration.domain}&size=128`}
+                      alt={detailIntegration.name}
+                      className="w-6 h-6 object-contain rounded-sm"
+                      onError={e => { (e.target as HTMLImageElement).style.opacity = '0' }}
+                    />
                   ) : detailIntegration.icon ? (
                     <div className="w-6 h-6" dangerouslySetInnerHTML={{ __html: detailIntegration.icon.replace(/viewBox/, 'class="w-6 h-6" viewBox') }} />
                   ) : detailIntegration.custom ? (
@@ -394,14 +409,12 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
             <div className="px-6 py-3 border-t border-neutral-100 dark:border-neutral-800">
               <p className="text-[12px] text-neutral-400 dark:text-neutral-500">
                 Need something else?{' '}
-                <a
-                  href="https://github.com/brettponters/coagent/issues"
-                  target="_blank"
-                  rel="noreferrer"
+                <button
+                  onClick={() => { onClose(); onChat?.('@integration-builder') }}
                   className="text-neutral-600 dark:text-neutral-300 hover:underline"
                 >
-                  Request an integration →
-                </a>
+                  Create one →
+                </button>
               </p>
             </div>
           </>
@@ -434,11 +447,79 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
                 <p className="text-[13px] text-neutral-400 dark:text-neutral-500 text-center py-8">No integrations found.</p>
               ) : (
                 <div className="flex flex-col gap-4">
+                  {/* Connected section */}
+                  {!search && connectedIntegrations.length > 0 && (
+                    <div>
+                      <p className="text-[11px] font-semibold text-neutral-400 dark:text-neutral-500 uppercase tracking-wider mb-2">Connected</p>
+                      <div className="grid grid-cols-3 gap-2">
+                        {connectedIntegrations.map(integration => (
+                          <button
+                            key={integration.slug}
+                            type="button"
+                            onClick={() => setDetailSlug(integration.slug)}
+                            className="flex items-center gap-3 p-3 rounded-xl border border-emerald-100 dark:border-emerald-900/50 bg-emerald-50/60 dark:bg-emerald-950/30 hover:bg-emerald-50 dark:hover:bg-emerald-950/50 hover:border-emerald-200 dark:hover:border-emerald-800 transition-colors text-left w-full"
+                          >
+                            {integration.slug === 'coagent:mobile' ? (
+                              <svg className="w-5 h-5 flex-shrink-0" viewBox="0 0 32 32" fill="none">
+                                <rect width="32" height="32" rx="7" fill="#1C1C1E"/>
+                                <rect x="11" y="6" width="10" height="20" rx="2" stroke="white" strokeWidth="1.5" fill="none"/>
+                                <circle cx="16" cy="23" r="1" fill="white"/>
+                              </svg>
+                            ) : integration.slug === 'coagent:whatsapp' ? (
+                              <svg className="w-5 h-5 flex-shrink-0" viewBox="0 0 32 32" fill="none">
+                                <rect width="32" height="32" rx="7" fill="#25D366"/>
+                                <path d="M16 7.5c-4.694 0-8.5 3.806-8.5 8.5 0 1.497.39 2.9 1.07 4.115L7.5 24.5l4.55-1.02A8.46 8.46 0 0016 24.5c4.694 0 8.5-3.806 8.5-8.5s-3.806-8.5-8.5-8.5zm4.15 11.47c-.175.49-.875.897-1.225.955-.35.058-.79.082-1.275-.08-.295-.1-.675-.232-1.16-.455-2.04-.935-3.375-2.99-3.475-3.13-.1-.14-.82-1.09-.82-2.08s.52-1.475.705-1.675c.185-.2.405-.25.54-.25h.39c.125 0 .295-.047.46.35.175.42.59 1.44.64 1.545.05.105.085.23.017.37-.068.14-.1.227-.2.35-.1.122-.21.273-.3.367-.1.1-.205.21-.088.41.117.2.52.855 1.115 1.385.765.68 1.41.89 1.61.99.2.1.315.085.43-.05.115-.135.49-.57.62-.765.13-.195.26-.163.44-.098.18.065 1.14.537 1.335.635.195.098.325.147.375.23.05.082.05.478-.125.968z" fill="white"/>
+                              </svg>
+                            ) : integration.slug === 'coagent:imessage' ? (
+                              <svg className="w-5 h-5 flex-shrink-0" viewBox="0 0 32 32" fill="none">
+                                <rect width="32" height="32" rx="7" fill="#34C759"/>
+                                <path d="M16 7C10.477 7 6 10.582 6 15c0 2.52 1.537 4.768 3.938 6.254-.204 1.48-.89 2.87-.89 2.87s2.47-.354 4.072-1.372C14.05 23.23 15 23.35 16 23.35c5.523 0 10-3.582 10-7.35S21.523 7 16 7z" fill="white"/>
+                              </svg>
+                            ) : integration.slug === 'coagent:contacts' ? (
+                              <svg className="w-5 h-5 flex-shrink-0" viewBox="0 0 32 32" fill="none">
+                                <rect width="32" height="32" rx="7" fill="#A2845E"/>
+                                <circle cx="16" cy="13" r="4.5" fill="white"/>
+                                <path d="M8.5 24.5c0-4.142 3.358-7.5 7.5-7.5s7.5 3.358 7.5 7.5" stroke="white" strokeWidth="2.5" fill="none" strokeLinecap="round"/>
+                              </svg>
+                            ) : integration.domain ? (
+                              <img
+                                src={`https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=http://${integration.domain}&size=128`}
+                                alt={integration.name}
+                                className="w-5 h-5 object-contain flex-shrink-0 rounded-sm"
+                                onError={e => { (e.target as HTMLImageElement).style.opacity = '0' }}
+                              />
+                            ) : integration.icon ? (
+                              <div className="w-5 h-5 flex-shrink-0" dangerouslySetInnerHTML={{ __html: integration.icon.replace(/viewBox/, 'class="w-5 h-5" viewBox') }} />
+                            ) : integration.custom ? (
+                              <div className="w-5 h-5 rounded bg-neutral-200 dark:bg-neutral-700 flex items-center justify-center flex-shrink-0">
+                                <span className="text-[10px] font-bold text-neutral-500 dark:text-neutral-400">+</span>
+                              </div>
+                            ) : (
+                              <img
+                                src={`https://logos.composio.dev/api/${integration.slug}`}
+                                alt={integration.name}
+                                className="w-5 h-5 object-contain flex-shrink-0"
+                                onError={e => { (e.target as HTMLImageElement).style.opacity = '0' }}
+                              />
+                            )}
+                            <div className="flex-1 min-w-0">
+                              <p className="text-[13px] font-medium text-neutral-800 dark:text-neutral-200 truncate">{integration.name}</p>
+                            </div>
+                            <span className="w-1.5 h-1.5 rounded-full flex-shrink-0 bg-emerald-400" />
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
                   {sortedCategories.map(category => {
                     const items = grouped.get(category)!
                     return (
                       <div key={category}>
-                        <p className="text-[11px] font-semibold text-neutral-400 dark:text-neutral-500 uppercase tracking-wider mb-2">{category}</p>
+                        <div className="flex items-center gap-2 mb-2">
+                          <p className="text-[11px] font-semibold text-neutral-400 dark:text-neutral-500 uppercase tracking-wider">{category}</p>
+                          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-neutral-100 dark:bg-neutral-800 text-neutral-400 dark:text-neutral-500">{items.length}</span>
+                        </div>
                         <div className="grid grid-cols-3 gap-2">
                           {items.map(integration => (
                             <button
@@ -469,6 +550,13 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
                                   <circle cx="16" cy="13" r="4.5" fill="white"/>
                                   <path d="M8.5 24.5c0-4.142 3.358-7.5 7.5-7.5s7.5 3.358 7.5 7.5" stroke="white" strokeWidth="2.5" fill="none" strokeLinecap="round"/>
                                 </svg>
+                              ) : integration.domain ? (
+                                <img
+                                  src={`https://t3.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=http://${integration.domain}&size=128`}
+                                  alt={integration.name}
+                                  className="w-5 h-5 object-contain flex-shrink-0 rounded-sm"
+                                  onError={e => { (e.target as HTMLImageElement).style.opacity = '0' }}
+                                />
                               ) : integration.icon ? (
                                 <div className="w-5 h-5 flex-shrink-0" dangerouslySetInnerHTML={{ __html: integration.icon.replace(/viewBox/, 'class="w-5 h-5" viewBox') }} />
                               ) : integration.custom ? (
@@ -501,14 +589,12 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
             <div className="px-6 py-3 border-t border-neutral-100 dark:border-neutral-800">
               <p className="text-[12px] text-neutral-400 dark:text-neutral-500">
                 Need something else?{' '}
-                <a
-                  href="https://github.com/brettponters/coagent/issues"
-                  target="_blank"
-                  rel="noreferrer"
+                <button
+                  onClick={() => { onClose(); onChat?.('@integration-builder') }}
                   className="text-neutral-600 dark:text-neutral-300 hover:underline"
                 >
-                  Request an integration →
-                </a>
+                  Create one →
+                </button>
               </p>
             </div>
           </>

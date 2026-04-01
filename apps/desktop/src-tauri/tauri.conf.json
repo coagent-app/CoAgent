@@ -35,6 +35,7 @@
         "url": "overlay.html",
         "transparent": true,
         "decorations": false,
+        "shadow": false,
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "width": 440,

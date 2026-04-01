@@ -1,6 +1,6 @@
 import WebSocket from 'ws'
 import type { TeamMessage, TeamMember } from '@coagent/shared'
-import { TeamLog } from './team-log'
+import { TeamLog } from './team-log.js'
 
 export interface TeamClientOptions {
   relayUrl: string
@@ -9,6 +9,7 @@ export interface TeamClientOptions {
   dataDir: string
   onTaggedMessage?: (message: TeamMessage) => void
   onHumanNotify?: (message: TeamMessage) => void
+  onMessage?: (message: TeamMessage) => void
 }
 
 export class TeamClient {
@@ -21,10 +22,11 @@ export class TeamClient {
   private roster: TeamMember[] = []
   public teamId: string | null = null
   public teamName: string | null = null
+  public get userId(): string { return this.options.userId }
 
   constructor(options: TeamClientOptions) {
     this.options = options
-    this.teamLog = new TeamLog(options.dataDir)
+    this.teamLog = new TeamLog(options.dataDir, options.relayUrl, options.relayToken)
   }
 
   async init(): Promise<void> {
@@ -55,15 +57,16 @@ export class TeamClient {
     return this.teamLog
   }
 
-  private async fetchRoster(): Promise<void> {
+  async fetchRoster(): Promise<void> {
     try {
       const res = await fetch(`${this.options.relayUrl}/team/roster`, {
         headers: { 'Authorization': `Bearer ${this.options.relayToken}` }
       })
       const data = await res.json() as any
-      if (data.teamId) {
-        this.teamId = data.teamId
-        this.teamName = data.name || null
+      const team = data.team || data
+      if (team.teamId) {
+        this.teamId = team.teamId
+        this.teamName = team.name || null
         this.roster = data.members || []
         console.log(`[Team] Connected to team "${this.teamName}" with ${this.roster.length} members`)
       }
@@ -118,19 +121,28 @@ export class TeamClient {
     const myUserId = this.options.userId
     const myAgentTag = `${myUserId}-agent`
 
+    console.log(`[Team] Message from ${message.from.name} (to: ${JSON.stringify(to)}) myAgent: ${myAgentTag} myUser: ${myUserId}`)
+
     const isTaggedAgent = to === myAgentTag ||
       (Array.isArray(to) && to.includes(myAgentTag))
 
     const isTaggedHuman = to === myUserId ||
       (Array.isArray(to) && to.includes(myUserId))
 
+    // Always forward to UI so messages appear in the Team pane
+    if (this.options.onMessage) {
+      this.options.onMessage(message)
+    }
+
+    // Route to specific handlers
     if (isTaggedAgent && this.options.onTaggedMessage) {
       this.options.onTaggedMessage(message)
     } else if (isTaggedHuman && this.options.onHumanNotify) {
       this.options.onHumanNotify(message)
-    } else {
-      this.teamLog.append(message).catch(console.warn)
     }
+
+    // Always log
+    this.teamLog.append(message).catch(console.warn)
   }
 
   async sendMessage(visible: string, agentContext: string = '', to: string | string[] | null = null): Promise<void> {
@@ -162,6 +174,8 @@ export class TeamClient {
         },
         body: JSON.stringify(message)
       })
+      // Append our own message to the log so it gets embedded for future search
+      this.teamLog.append(message).catch(console.warn)
     } catch (err) {
       console.warn('[Team] Failed to send message:', err)
     }

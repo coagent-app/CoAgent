@@ -11,7 +11,6 @@ let speechCheckInterval: ReturnType<typeof setInterval> | null = null
 let fnUnlisteners: UnlistenFn[] = []
 let currentHotkey: string | null = null
 let locked = false // double-tap fn locks listening on
-let lastFnPressTime = 0
 let volumeEmitInterval: ReturnType<typeof setInterval> | null = null
 let cachedStream: MediaStream | null = null
 
@@ -156,47 +155,31 @@ export function playTtsAudio(base64Mp3: string) {
   audio.play().catch(err => console.error('[Voice] TTS playback failed:', err))
 }
 
-// Streaming TTS — accumulate chunks into a growing blob, start playback on first chunk
+// Streaming TTS — accumulate chunks, play complete audio on done
 let ttsChunks: Uint8Array[] = []
-let ttsStreamUrl: string | null = null
 
-export function handleTtsChunk(base64Chunk: string, seq: number) {
+export function handleTtsChunk(base64Chunk: string, _seq: number) {
   const bytes = Uint8Array.from(atob(base64Chunk), c => c.charCodeAt(0))
   ttsChunks.push(bytes)
+}
 
-  // Start playback on first chunk
-  if (seq === 0) {
-    if (ttsAudio) { ttsAudio.pause(); ttsAudio = null }
-    if (ttsStreamUrl) { URL.revokeObjectURL(ttsStreamUrl); ttsStreamUrl = null }
-    // Build blob from what we have so far and start playing
-    const blob = new Blob(ttsChunks as BlobPart[], { type: 'audio/ogg; codecs=opus' })
-    ttsStreamUrl = URL.createObjectURL(blob)
-    const audio = new Audio(ttsStreamUrl)
-    ttsAudio = audio
-    audio.onended = () => { ttsAudio = null }
-    audio.play().catch(err => console.error('[Voice] TTS stream play failed:', err))
-  }
+export function cancelTts() {
+  ttsChunks = []
+  if (ttsAudio) { ttsAudio.pause(); ttsAudio = null }
 }
 
 export function handleTtsDone() {
-  // Rebuild the full blob and swap the audio source for complete playback
   if (ttsChunks.length === 0) return
-  const fullBlob = new Blob(ttsChunks as BlobPart[], { type: 'audio/ogg; codecs=opus' })
+  const fullBlob = new Blob(ttsChunks as BlobPart[], { type: 'audio/mpeg' })
   const fullUrl = URL.createObjectURL(fullBlob)
-
-  if (ttsAudio) {
-    const currentTime = ttsAudio.currentTime
-    const wasPlaying = !ttsAudio.paused
-    ttsAudio.pause()
-    if (ttsStreamUrl) URL.revokeObjectURL(ttsStreamUrl)
-    ttsStreamUrl = fullUrl
-    const audio = new Audio(fullUrl)
-    ttsAudio = audio
-    audio.currentTime = currentTime
-    audio.onended = () => { ttsAudio = null; URL.revokeObjectURL(fullUrl) }
-    if (wasPlaying) audio.play().catch(() => {})
-  }
   ttsChunks = []
+
+  if (ttsAudio) { ttsAudio.pause(); ttsAudio = null }
+  const audio = new Audio(fullUrl)
+  ttsAudio = audio
+  audio.onended = () => { ttsAudio = null; URL.revokeObjectURL(fullUrl) }
+  audio.play().catch(err => console.error('[Voice] TTS playback failed:', err))
+  console.log('[Voice] TTS playing (%d bytes)', fullBlob.size)
 }
 
 // Show tool activity in the pill (e.g. "Reading email...")
@@ -277,21 +260,25 @@ export async function registerVoiceHotkey(
   onStateChange = stateCallback
 
   if (hotkey === 'fn') {
-    console.log('[Voice] Registering fn key via native listener')
+    console.log('[Voice] Registering ctrl+fn (toggle mode)')
+    // Toggle: ctrl+fn to start, ctrl+fn again to send.
+    // Using combo avoids macOS Globe key emoji/Character Viewer.
     const pressUn = await listen('voice-fn-press', async () => {
-      console.log('[Voice] fn pressed — starting recording')
-      await startRecording()
+      if (locked) {
+        console.log('[Voice] ctrl+fn — sending recording')
+        locked = false
+        emitTo('voice-pill', 'voice-locked', { locked: false }).catch(() => {})
+        await stopRecordingAndSend(onAudioReady)
+      } else {
+        console.log('[Voice] ctrl+fn — start recording')
+        locked = true
+        emitTo('voice-pill', 'voice-locked', { locked: true }).catch(() => {})
+        await startRecording()
+      }
     })
-    const releaseUn = await listen('voice-fn-release', async () => {
-      console.log('[Voice] fn released — stopping recording')
-      await stopRecordingAndSend(onAudioReady)
-    })
-    const cancelUn = await listen('voice-cancel', () => {
-      console.log('[Voice] fn+Control — cancelling')
-      cancelVoice()
-    })
-    fnUnlisteners = [pressUn, releaseUn, cancelUn]
-    console.log('[Voice] fn key listeners registered')
+    const releaseUn = await listen('voice-fn-release', () => {})
+    fnUnlisteners = [pressUn, releaseUn]
+    console.log('[Voice] ctrl+fn listeners registered')
   } else {
     // Fallback to global shortcut plugin for custom hotkeys
     const { register } = await import('@tauri-apps/plugin-global-shortcut')

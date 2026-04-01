@@ -2,27 +2,34 @@
 import { readFile, writeFile, mkdir } from 'fs/promises'
 import { join } from 'path'
 import type { AgentSettings, Autonomy, DayName } from '@coagent/shared'
+import { getEdition } from './edition.js'
 
 export type { AgentSettings, Autonomy, DayName }
 
 const DAY_NAMES: DayName[] = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']
 
-export const DEFAULT_SETTINGS: AgentSettings = {
-  name: '',
-  email: '',
-  timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Chicago',
-  role: '',
-  // end: 24 is intentional — getHours() returns 0–23, so 24 means "active through midnight"
-  active_hours: { start: 7, end: 24 },
-  active_days: ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'],
-  autonomy: 'balanced',
-  heartbeat_interval: 60,
-  powerModel: 'claude-sonnet-4-6',
-  voice_enabled: false,
-  voice_response: false,
-  voice_hotkey: 'Control+Alt+Space',
-  voice_voice: 'alloy',
+function getDefaultSettings(): AgentSettings {
+  const { preset } = getEdition()
+  return {
+    name: '',
+    email: '',
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Chicago',
+    role: preset.defaultRole,
+    what_you_do: '',
+    active_hours: { ...preset.activeHours },
+    active_days: [...preset.activeDays],
+    autonomy: preset.defaultAutonomy,
+    heartbeat_interval: 60,
+    powerModel: 'claude-sonnet-4-6',
+    voice_enabled: false,
+    voice_response: false,
+    voice_hotkey: 'Control+Alt+Space',
+    voice_voice: 'alloy',
+    onboarded: false,
+  }
 }
+
+export const DEFAULT_SETTINGS: AgentSettings = getDefaultSettings()
 
 const VALID_DAYS: DayName[] = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
 const VALID_AUTONOMY: Autonomy[] = ['ask_first', 'balanced', 'autonomous']
@@ -38,6 +45,7 @@ export async function readSettings(dataDir: string): Promise<AgentSettings> {
       email: parsed.email ?? DEFAULT_SETTINGS.email,
       timezone: parsed.timezone ?? DEFAULT_SETTINGS.timezone,
       role: parsed.role ?? DEFAULT_SETTINGS.role,
+      what_you_do: parsed.what_you_do ?? DEFAULT_SETTINGS.what_you_do,
       active_hours: { ...DEFAULT_SETTINGS.active_hours, ...parsed.active_hours },
       active_days: parsed.active_days ?? DEFAULT_SETTINGS.active_days,
       autonomy: parsed.autonomy ?? DEFAULT_SETTINGS.autonomy,
@@ -47,6 +55,7 @@ export async function readSettings(dataDir: string): Promise<AgentSettings> {
       voice_response: parsed.voice_response ?? DEFAULT_SETTINGS.voice_response,
       voice_hotkey: parsed.voice_hotkey ?? DEFAULT_SETTINGS.voice_hotkey,
       voice_voice: parsed.voice_voice ?? DEFAULT_SETTINGS.voice_voice,
+      onboarded: parsed.onboarded ?? DEFAULT_SETTINGS.onboarded,
     }
   } catch (err: any) {
     if (err?.code !== 'ENOENT') {
@@ -80,6 +89,7 @@ export async function writeSettings(dataDir: string, patch: Partial<AgentSetting
     email: patch.email !== undefined ? patch.email : current.email,
     timezone: patch.timezone !== undefined ? patch.timezone : current.timezone,
     role: patch.role !== undefined ? patch.role : current.role,
+    what_you_do: patch.what_you_do !== undefined ? patch.what_you_do : current.what_you_do,
     active_hours: validatedHours ?? current.active_hours,
     active_days: validatedDays !== undefined ? validatedDays : current.active_days,
     autonomy: validatedAutonomy ?? current.autonomy,
@@ -91,6 +101,7 @@ export async function writeSettings(dataDir: string, patch: Partial<AgentSetting
     voice_response: patch.voice_response !== undefined ? patch.voice_response : current.voice_response,
     voice_hotkey: patch.voice_hotkey !== undefined ? patch.voice_hotkey : current.voice_hotkey,
     voice_voice: patch.voice_voice !== undefined ? patch.voice_voice : current.voice_voice,
+    onboarded: patch.onboarded !== undefined ? patch.onboarded : current.onboarded,
   }
 
   await writeFile(join(dataDir, SETTINGS_FILE), JSON.stringify(updated, null, 2), 'utf-8')
