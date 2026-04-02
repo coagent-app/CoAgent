@@ -233,7 +233,7 @@ export function VoicePill() {
           <>
             <Shimmer />
             <AudioBars volume={volume} />
-            <span style={labelStyle}>{showHint ? 'ctrl+fn to send' : 'Listening…'}</span>
+            <span style={labelStyle}>{showHint ? 'release or tap again to send' : 'Listening…'}</span>
           </>
         )}
         {state === 'thinking' && (

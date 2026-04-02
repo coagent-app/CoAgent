@@ -42,6 +42,7 @@ export class GoogleCalendarService {
   private calendars: CalendarConfig[] = []
   private pollTimer: ReturnType<typeof setInterval> | null = null
   private onUpdate: (() => void) | null = null
+  private onStoreEvents: ((entries: CalendarEntry[]) => void) | null = null
 
   constructor(
     private clientId: string,
@@ -57,6 +58,11 @@ export class GoogleCalendarService {
   /** Set callback for when Google events change */
   setUpdateCallback(cb: () => void): void {
     this.onUpdate = cb
+  }
+
+  /** Set callback for storing synced events into the calendar store */
+  setStoreCallback(cb: (entries: CalendarEntry[]) => void): void {
+    this.onStoreEvents = cb
   }
 
   /** Check if user has connected Google Calendar */
@@ -296,23 +302,23 @@ export class GoogleCalendarService {
   }
 
   /** Run a sync cycle and return updated Google events */
-  async sync(): Promise<{ entries: CalendarEntry[]; changed: boolean }> {
+  async sync(): Promise<{ entries: CalendarEntry[]; changed: boolean; full: boolean; removedIds?: string[] }> {
     try {
       if (!this.syncState.syncToken) {
         const entries = await this.fullSync()
         this.onUpdate?.()
-        return { entries, changed: true }
+        return { entries, changed: true, full: true }
       }
 
       const { added, removed } = await this.incrementalSync()
       if (added.length === 0 && removed.length === 0) {
-        return { entries: [], changed: false }
+        return { entries: [], changed: false, full: false }
       }
       this.onUpdate?.()
-      return { entries: added, changed: true }
+      return { entries: added, changed: true, full: false, removedIds: removed }
     } catch (err: any) {
       console.error('[GoogleCal] Sync error:', err.message)
-      return { entries: [], changed: false }
+      return { entries: [], changed: false, full: false }
     }
   }
 
@@ -320,7 +326,11 @@ export class GoogleCalendarService {
   private startPolling(): void {
     this.stopPolling()
     this.pollTimer = setInterval(() => {
-      this.sync().catch(err => console.error('[GoogleCal] Poll sync error:', err.message))
+      this.sync().then(({ entries, changed }) => {
+        if (changed && entries.length > 0 && this.onStoreEvents) {
+          this.onStoreEvents(entries)
+        }
+      }).catch(err => console.error('[GoogleCal] Poll sync error:', err.message))
     }, 10 * 60 * 1000)
     console.log('[GoogleCal] Polling started (every 10 min)')
   }

@@ -6,14 +6,14 @@ import { Agent } from './agent.js'
 import { GoogleCalendarService } from './google-calendar.js'
 import { MCPServerConfig } from './mcp-manager.js'
 import { setupComposioMcp } from './composio-setup.js'
-import { INTEGRATIONS, getIntegrationStatuses, generateAuthUrl, getRequiredFields, disconnectIntegration, getConnectedSlugs, subscribeTriggersForSlug, subscribeSingleTrigger, purgeExpiredAccounts, getAvailableTriggersForSlug, getSubscribedTriggers, setTriggerEnabled, markLocalConnected, seedLocalConnectionsIfNeeded, ensureWebhookSubscription, invalidateAccountsCache } from './composio-integrations.js'
+import { INTEGRATIONS, getIntegrationStatuses, generateAuthUrl, getRequiredFields, disconnectIntegration, getConnectedSlugs, subscribeTriggersForSlug, subscribeSingleTrigger, purgeExpiredAccounts, getAvailableTriggersForSlug, getSubscribedTriggers, setTriggerEnabled, loadPersistedTriggers, markLocalConnected, seedLocalConnectionsIfNeeded, ensureWebhookSubscription, invalidateAccountsCache } from './composio-integrations.js'
 import { startScheduler } from './scheduler.js'
 import { readSettings, writeSettings } from './settings.js'
 
 import { listFiles, listFolders, ingestFile, deleteFileEntry, createFolder, moveFile, moveFolder, renameFile, renameFolder, deleteFolder, saveFolderOrder, searchFiles, autoOrganizeFiles } from './file-store.js'
-import { embedTools, setToolEmbeddingsDir } from './tool-embeddings.js'
+import { embedTools, purgeTools, setToolEmbeddingsDir } from './tool-embeddings.js'
 import { writeRelayCredentials, getRelayConfig, getOpenAIProxy, loadApiKeysToEnv } from './auth.js'
-import { getUsageSummary } from './usage-tracker.js'
+import { getUsageSummary, recordUsageGlobal, setUsageDataDir } from './usage-tracker.js'
 
 /** Returns the relay token for Composio API calls */
 function composioKey(): string | undefined {
@@ -68,50 +68,6 @@ function stripMdForTts(s: string): string {
     .trim()
 }
 
-/** Extract a short TTS-friendly summary — max ~200 chars, first 1-2 sentences */
-function ttsSnippet(s: string): string {
-  const clean = stripMdForTts(s)
-  if (!clean) return ''
-  // Try to grab first 2 sentences
-  const re = /[.!?](?:\s|$)/g
-  let count = 0, lastEnd = 0, m: RegExpExecArray | null
-  while ((m = re.exec(clean)) !== null) {
-    count++
-    lastEnd = m.index + 1
-    if (count >= 2) break
-  }
-  const snippet = count >= 1 ? clean.slice(0, lastEnd) : clean
-  // Hard cap at 250 chars — cut at last word boundary
-  if (snippet.length <= 250) return snippet
-  const cut = snippet.slice(0, 250).replace(/\s\S*$/, '')
-  return cut + '.'
-}
-
-async function generateTts(text: string, voice?: string): Promise<string | null> {
-  const proxy = getOpenAIProxy()
-  if (!proxy) { console.log('[TTS] No relay configured'); return null }
-  const clean = ttsSnippet(text)
-  if (!clean) { console.log('[TTS] No text after cleanup'); return null }
-  const ttsVoice = voice || 'alloy'
-  console.log('[TTS] Generating audio (voice: %s) for:', ttsVoice, clean.slice(0, 80))
-  try {
-    const res = await fetch(`${proxy.baseUrl}/v1/audio/speech`, {
-      method: 'POST',
-      headers: { 'Authorization': proxy.authHeader, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'tts-1', input: clean, voice: ttsVoice, response_format: 'mp3' }),
-    })
-    if (!res.ok) {
-      console.error('[TTS] Error:', res.status, await res.text())
-      return null
-    }
-    const buf = Buffer.from(await res.arrayBuffer())
-    return buf.toString('base64')
-  } catch (err: any) {
-    console.error('[TTS] Failed:', err.message)
-    return null
-  }
-}
-
 /** Stream TTS audio — sends chunks over WebSocket as they arrive from OpenAI */
 async function streamTts(text: string, voice: string | undefined, sendFn: (msg: any) => void): Promise<void> {
   const proxy = getOpenAIProxy()
@@ -138,6 +94,12 @@ async function streamTts(text: string, voice: string | undefined, sendFn: (msg: 
     }
     console.log('[TTS] Stream complete, sent %d chunks', seq)
     sendFn({ type: 'voice_tts_done' })
+    // Track TTS usage — exact character count sent to API
+    recordUsageGlobal({
+      category: 'tts', model: 'tts-1', characters: clean.length,
+      inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0,
+      timestamp: new Date().toISOString(),
+    }).catch(err => console.error('[TTS] Usage tracking failed:', err.message))
   } catch (err: any) {
     console.error('[TTS] Stream failed:', err.message)
   }
@@ -283,6 +245,7 @@ function buildMcpConfigs(): MCPServerConfig[] {
 }
 
 const DATA_DIR = process.env.COAGENT_DATA_DIR || join(homedir(), '.coagent')
+setUsageDataDir(DATA_DIR)
 
 // --- Default memory files (written on first run, never overwritten) ---
 
@@ -346,7 +309,7 @@ Notes in \`~/.coagent/memory/\` — my brain across conversations.
 
 Updated as we work together. User can edit directly.
 
-**Off-limits to the 3 AM job:** setup.md, agent.md, routines.md, preferences.md — only the user or main agent edits these.
+**Off-limits to the 3 AM job:** setup.md, agent.md, heartbeat.md, preferences.md — only the user or main agent edits these.
 
 ## Workflows
 
@@ -429,7 +392,7 @@ Tip: type @skill-creator anytime to build custom automations — like a daily br
 Then delete this file (onboarding.md) — onboarding is complete.
 `,
 
-  'routines.md': `# Routines
+  'heartbeat.md': `# Heartbeat
 
 ## Every heartbeat
 
@@ -800,11 +763,37 @@ const agent = new Agent(buildMcpConfigs(), DATA_DIR)
 
 let wss: WebSocketServer | null = null
 let voiceProcessing = false
+let chatInProgress = false
+let nextHeartbeatAt: string | undefined
 
 const scheduler = startScheduler(agent, DATA_DIR, {
-  onHeartbeat: (status, summary) => {
-    broadcast({ type: 'heartbeat', status, summary })
+  onHeartbeat: (status, summary, nextAt) => {
+    if (nextAt) nextHeartbeatAt = nextAt.toISOString()
+    broadcast({ type: 'heartbeat', status, summary, nextAt: nextAt?.toISOString() })
   },
+  onHeartbeatStream: (() => {
+    let streamed = ''
+    return (type: 'start' | 'chunk' | 'tool' | 'done', data?: any) => {
+      if (type === 'start') {
+        streamed = ''
+        broadcast({ type: 'agent_thinking' } as any)
+      } else if (type === 'chunk') {
+        streamed += data.text
+        broadcast({ type: 'chat_chunk', text: data.text })
+      } else if (type === 'tool') {
+        broadcast({ type: 'chat_segment_end' })
+        broadcast({ type: 'tool_start', tool: data.tool, label: data.label })
+      } else if (type === 'done') {
+        broadcast({ type: 'chat_segment_end' })
+        if (streamed.trim()) {
+          broadcast({ type: 'chat_response', message: { role: 'assistant', content: streamed, timestamp: new Date().toISOString() } })
+        }
+        broadcast({ type: 'queue_update', items: agent.queue.getPending() })
+        broadcast({ type: 'done_update', items: agent.queue.getDone() })
+        broadcast({ type: 'calendar_update', entries: agent.calendar.getAll() })
+      }
+    }
+  })(),
   onTodoStream: (type, data) => {
     if (type === 'start') {
       const label = `[To-do fired] ${data.task}`
@@ -828,6 +817,10 @@ agent.onNotifyUser = (title: string, body: string) => {
   broadcast({ type: 'push_notification', title, body } as any)
 }
 
+agent.onResearchProgress = (agents) => {
+  broadcast({ type: 'research_progress', agents } as any)
+}
+
 agent.onSettingsChanged = async () => {
   const settings = await readSettings(DATA_DIR)
   broadcast({ type: 'settings_update', settings })
@@ -848,14 +841,34 @@ const googleCal = (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SEC
     )
   : null
 
+/** Apply sync results correctly — full sync replaces, incremental upserts */
+function applyGoogleSyncResult(result: { entries: any[]; changed: boolean; full: boolean; removedIds?: string[] }) {
+  if (!result.changed || result.entries.length === 0 && !result.removedIds?.length) return
+  if (result.full) {
+    agent.calendar.setGoogleEvents(result.entries)
+  } else {
+    agent.calendar.applyGoogleSync(result.entries, result.removedIds || [])
+  }
+}
+
 if (googleCal) {
+  googleCal.setStoreCallback((entries) => {
+    // Polling callback — always a full set from the store callback
+    agent.calendar.setGoogleEvents(entries)
+  })
   googleCal.setUpdateCallback(async () => {
     broadcast({ type: 'calendar_update', entries: agent.calendar.getAll() } as any)
     const status = await googleCal.getStatus()
     broadcast({ type: 'google_calendar_status', ...status } as any)
   })
+  // On startup, do an initial sync to populate calendar
   googleCal.init().then(async () => {
     agent.googleCalendarConnected = await googleCal.isConnected()
+    if (agent.googleCalendarConnected) {
+      const result = await googleCal.sync()
+      applyGoogleSyncResult(result)
+      broadcast({ type: 'calendar_update', entries: agent.calendar.getAll() } as any)
+    }
   }).catch(err => console.error('[Server] Google Calendar init error:', err.message))
 }
 
@@ -944,7 +957,8 @@ agent.onCustomIntegration = async (action, data) => {
       }
 
       // Refresh integrations list
-      sendIntegrations(Array.from(wss!.clients)[0] as WebSocket).catch(() => {})
+      const clients = Array.from(wss!.clients)
+      if (clients.length > 0) sendIntegrations(clients[0] as WebSocket).catch(() => {})
 
       return `Integration "${displayName}" created and dependencies installed. ${authFields.length > 0 ? 'The user has been prompted to enter their credentials.' : 'No credentials needed — connecting now.'}`
     } catch (err: any) {
@@ -1027,16 +1041,25 @@ async function transcribeAudio(buffer: Buffer, mimetype: string): Promise<string
     form.append('model', 'whisper-1')
     form.append('language', 'en')
     form.append('temperature', '0.2')
+    form.append('response_format', 'verbose_json')
 
     const res = await fetch(`${proxy.baseUrl}/v1/audio/transcriptions`, {
       method: 'POST',
       headers: { 'Authorization': proxy.authHeader },
       body: form,
     })
-    const data = await res.json() as { text?: string; error?: { message: string } }
+    const data = await res.json() as { text?: string; duration?: number; error?: { message: string } }
     if (data.error) {
       console.error('[WhatsApp] Whisper error:', data.error.message)
       return null
+    }
+    // Track Whisper usage — duration from API verbose_json response
+    if (data.duration) {
+      recordUsageGlobal({
+        category: 'whisper', model: 'whisper-1', audioSeconds: data.duration,
+        inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0,
+        timestamp: new Date().toISOString(),
+      }).catch(err => console.error('[WhatsApp] Usage tracking failed:', err.message))
     }
     return data.text?.trim() || null
   } catch (err: any) {
@@ -1157,6 +1180,9 @@ async function refreshComposioMcp(slugs: string[]): Promise<void> {
   embedToolsFromMcp().catch(() => {})
 }
 
+// Load persisted trigger state before Composio init
+loadPersistedTriggers().catch(err => console.warn('[Composio] Failed to load persisted triggers:', err.message))
+
 if (composioKey()) {
   console.log('[Composio] API key present, initializing MCP connection...')
   // Seed local connection tracking from Composio on first run (backwards compat)
@@ -1225,6 +1251,42 @@ try {
 
 wss = new WebSocketServer({ host: '127.0.0.1', port: PORT })
 
+wss.on('error', (err: any) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`[Server] Port ${PORT} already in use — attempting to reclaim...`)
+    const { execSync } = require('child_process')
+    try {
+      if (process.platform === 'win32') {
+        const out = execSync(`netstat -ano | findstr ":${PORT}" | findstr LISTENING`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }).trim()
+        const pids: string[] = out.split('\n').map((l: string) => l.trim().split(/\s+/).pop() || '').filter(Boolean)
+        for (const pid of pids) { try { execSync(`taskkill /PID ${pid} /F`, { stdio: 'ignore' }) } catch {} }
+      } else {
+        execSync(`lsof -ti:${PORT} | xargs kill -9`, { stdio: 'ignore', timeout: 3000 })
+      }
+      console.log(`[Server] Killed stale process(es) on port ${PORT}, retrying in 1s...`)
+    } catch {
+      console.warn(`[Server] Could not kill process on port ${PORT}, retrying anyway...`)
+    }
+    setTimeout(() => {
+      wss!.removeAllListeners()
+      wss!.close()
+      wss = new WebSocketServer({ host: '127.0.0.1', port: PORT })
+      wss.on('error', (retryErr: any) => {
+        console.error(`[Server] Port ${PORT} still unavailable after retry:`, retryErr.message)
+        process.exit(1)
+      })
+      attachWssHandlers(wss)
+    }, 1000)
+  } else {
+    console.error('[Server] WebSocket server error:', err.message)
+  }
+})
+
+// When relay reports subscription expired, notify all connected frontend clients
+relay.onRevoked = () => {
+  broadcast({ type: 'subscription_expired' } as any)
+}
+
 relay.connect()
 
 // Team client — only initialize if edition includes team
@@ -1271,7 +1333,8 @@ try {
             const relayToken = process.env.RELAY_TOKEN
             if (relayUrl && relayToken) {
               const notesRes = await fetch(`${relayUrl}/team/notes`, {
-                headers: { 'Authorization': `Bearer ${relayToken}` }
+                headers: { 'Authorization': `Bearer ${relayToken}` },
+                signal: AbortSignal.timeout(15000),
               })
               if (notesRes.ok) {
                 const data = await notesRes.json() as { content: string }
@@ -1339,6 +1402,26 @@ try {
 } catch (err) {
   console.warn('[Team] Failed to initialize team client:', err)
 }
+
+function shutdown(signal: string): void {
+  console.log(`[Server] ${signal} received — shutting down gracefully`)
+  relay.stop()
+  if (teamClient) { teamClient.stop(); teamClient = null }
+  if (wss) {
+    wss.close((err) => {
+      if (err) console.error('[Server] Error closing WebSocket server:', err)
+      else console.log('[Server] WebSocket server closed')
+      process.exit(0)
+    })
+    // Force-close any still-open client connections
+    for (const client of wss.clients) client.terminate()
+  } else {
+    process.exit(0)
+  }
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'))
+process.on('SIGINT', () => shutdown('SIGINT'))
 
 function send(ws: WebSocket, msg: WSServerMessage): void {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg))
@@ -1431,20 +1514,48 @@ async function sendFilesAndFolders(ws: WebSocket): Promise<void> {
   send(ws, { type: 'folders_update', folders })
 }
 
-async function sendRelayStatus(ws: WebSocket): Promise<void> {
+/** Debounced broadcast of files/folders to all clients — coalesces rapid file ops */
+let filesBroadcastTimer: ReturnType<typeof setTimeout> | null = null
+function broadcastFilesDebounced(): void {
+  if (filesBroadcastTimer) return
+  filesBroadcastTimer = setTimeout(async () => {
+    filesBroadcastTimer = null
+    try {
+      const [files, folders] = await Promise.all([listFiles(DATA_DIR), listFolders(DATA_DIR)])
+      broadcast({ type: 'files_update', files } as any)
+      broadcast({ type: 'folders_update', folders } as any)
+    } catch (err: any) {
+      console.warn('[Server] broadcastFilesDebounced error:', err.message)
+    }
+  }, 500)
+}
+
+let relayStatusCache: { data: any; ts: number } | null = null
+const RELAY_CACHE_TTL = 5 * 60 * 1000 // 5 minutes
+
+async function sendRelayStatus(ws: WebSocket, forceRefresh = false): Promise<void> {
   const relay = getRelayConfig()
   if (!relay) {
     send(ws, { type: 'relay_status', active: false, model: null, usage: null })
     return
   }
+  if (!forceRefresh && relayStatusCache && Date.now() - relayStatusCache.ts < RELAY_CACHE_TTL) {
+    send(ws, relayStatusCache.data)
+    return
+  }
   const res = await fetch(`${relay.url}/v1/account`, {
     headers: { 'Authorization': `Bearer ${relay.token}` },
+    signal: AbortSignal.timeout(15000),
   })
   if (res.ok) {
     const data = await res.json() as { model: string; usage: any; admin?: boolean }
-    send(ws, { type: 'relay_status', active: true, model: data.model, usage: data.usage, admin: data.admin ?? false })
+    const msg = { type: 'relay_status' as const, active: true, model: data.model, usage: data.usage, admin: data.admin ?? false }
+    relayStatusCache = { data: msg, ts: Date.now() }
+    send(ws, msg)
   } else {
-    send(ws, { type: 'relay_status', active: false, model: null, usage: null })
+    const msg = { type: 'relay_status' as const, active: false, model: null, usage: null }
+    relayStatusCache = { data: msg, ts: Date.now() }
+    send(ws, msg)
   }
 }
 
@@ -1453,6 +1564,7 @@ async function sendFullState(ws: WebSocket): Promise<void> {
   send(ws, { type: 'queue_update', items: agent.queue.getPending() })
   send(ws, { type: 'done_update', items: agent.queue.getDone() })
   send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
+  if (nextHeartbeatAt) send(ws, { type: 'heartbeat', status: 'scheduled', nextAt: nextHeartbeatAt })
   if (googleCal) {
     const gcalStatus = await googleCal.getStatus()
     send(ws, { type: 'google_calendar_status', ...gcalStatus } as any)
@@ -1485,14 +1597,22 @@ function broadcastFullState(): void {
   }
 }
 
-wss.on('connection', (ws) => {
-  sendFullState(ws).catch(console.error)
+function attachWssHandlers(server: WebSocketServer): void {
+  server.on('connection', (ws) => {
+    sendFullState(ws).catch(console.error)
 
   ws.on('close', () => { console.log('[Server] Client disconnected') })
   ws.on('error', (err) => { console.error('[Server] WS error:', err.message); ws.close() })
 
   ws.on('message', async (raw) => {
-    const msg: WSClientMessage = JSON.parse(raw.toString())
+    let msg: WSClientMessage
+    try {
+      msg = JSON.parse(raw.toString())
+    } catch (err: any) {
+      console.error('[Server] Malformed WS message — could not parse JSON:', err.message)
+      ws.send(JSON.stringify({ type: 'error', message: 'Invalid message format' }))
+      return
+    }
 
     // Exa monitor results — auto-save to research storage
     if ((msg as any).type === 'exa_monitor') {
@@ -1544,6 +1664,11 @@ wss.on('connection', (ws) => {
         send(ws, { type: 'file_content_error', id: msg.id, error: 'File not found' } as any)
         return
       }
+      if (!file.path.startsWith(DATA_DIR)) {
+        console.error(`[Server] get_file_content: path outside DATA_DIR rejected: ${file.path}`)
+        send(ws, { type: 'file_content_error', id: msg.id, error: 'Access denied' } as any)
+        return
+      }
       try {
         const { readFile } = await import('fs/promises')
         const buf = await readFile(file.path)
@@ -1583,6 +1708,10 @@ wss.on('connection', (ws) => {
     }
 
     if (msg.type === 'chat') {
+      if (chatInProgress) {
+        send(ws, { type: 'error', message: 'Please wait — still processing your last message.' } as any)
+        return
+      }
       if (!getRelayConfig()) {
         send(ws, {
           type: 'chat_response',
@@ -1590,11 +1719,12 @@ wss.on('connection', (ws) => {
         })
         return
       }
+      chatInProgress = true
       broadcast({ type: 'agent_thinking' } as any)
       try {
         let streamed = ''
         const chatTimeout = new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('Agent chat timed out after 5 minutes')), 5 * 60 * 1000)
+          setTimeout(() => reject(new Error('Agent chat timed out after 10 minutes')), 10 * 60 * 1000)
         )
         const response = await Promise.race([
           agent.chat(
@@ -1618,11 +1748,13 @@ wss.on('connection', (ws) => {
         send(ws, { type: 'queue_update', items: agent.queue.getPending() })
         send(ws, { type: 'done_update', items: agent.queue.getDone() })
         send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
-        sendFilesAndFolders(ws).catch(console.error)
+        broadcastFilesDebounced()
       } catch (err: any) {
         console.error('[Server] chat error:', err.message)
         broadcast({ type: 'error', message: err.message ?? 'Something went wrong.' } as any)
         broadcast({ type: 'agent_stopped' } as any)
+      } finally {
+        chatInProgress = false
       }
     }
 
@@ -1640,14 +1772,23 @@ wss.on('connection', (ws) => {
         form.append('language', 'en')
         form.append('prompt', 'Dictation for a chat message to an AI assistant.')
         form.append('temperature', '0.2')
+        form.append('response_format', 'verbose_json')
         const res = await fetch(`${proxy.baseUrl}/v1/audio/transcriptions`, {
           method: 'POST',
           headers: { 'Authorization': proxy.authHeader },
           body: form,
         })
-        const data = await res.json() as { text?: string }
+        const data = await res.json() as { text?: string; duration?: number }
         const text = data.text?.trim() || ''
         if (text) console.log('[Dictation] Result:', text.slice(0, 80))
+        // Track Whisper usage — duration from API response
+        if (data.duration) {
+          recordUsageGlobal({
+            category: 'whisper', model: 'whisper-1', audioSeconds: data.duration,
+            inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0,
+            timestamp: new Date().toISOString(),
+          }).catch(err => console.error('[Dictation] Usage tracking failed:', err.message))
+        }
         send(ws, { type: 'voice_dictation_result', text })
       } catch (err: any) {
         console.error('[Dictation] Error:', err.message)
@@ -1666,6 +1807,7 @@ wss.on('connection', (ws) => {
       // Receive base64 audio from frontend, transcribe with Whisper, then process as voice chat
       const voiceProxy = getOpenAIProxy()
       if (!voiceProxy) {
+        voiceProcessing = false
         send(ws, { type: 'error', message: 'Relay not configured — voice input unavailable.' })
         return
       }
@@ -1680,17 +1822,28 @@ wss.on('connection', (ws) => {
         form.append('language', 'en')
         form.append('prompt', 'This is a voice command to a personal AI assistant called Co-Agent. The user is speaking naturally in English.')
         form.append('temperature', '0.2')
+        form.append('response_format', 'verbose_json')
 
         const res = await fetch(`${voiceProxy.baseUrl}/v1/audio/transcriptions`, {
           method: 'POST',
           headers: { 'Authorization': voiceProxy.authHeader },
           body: form,
         })
-        const data = await res.json() as { text?: string; error?: { message: string } }
+        const data = await res.json() as { text?: string; duration?: number; error?: { message: string } }
         const text = data.text?.trim()
+
+        // Track Whisper usage — duration from API verbose_json response
+        if (data.duration) {
+          recordUsageGlobal({
+            category: 'whisper', model: 'whisper-1', audioSeconds: data.duration,
+            inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0,
+            timestamp: new Date().toISOString(),
+          }).catch(err => console.error('[Voice] Usage tracking failed:', err.message))
+        }
 
         if (!text) {
           // Nothing transcribed — silently dismiss the pill
+          voiceProcessing = false
           send(ws, { type: 'voice_summary', summary: '' })
           return
         }
@@ -1699,6 +1852,7 @@ wss.on('connection', (ws) => {
 
         // Process as a voice chat message
         if (!getRelayConfig()) {
+          voiceProcessing = false
           send(ws, { type: 'chat_response', message: { role: 'assistant', content: 'Relay not configured — cannot respond.', timestamp: new Date().toISOString() } })
           return
         }
@@ -1713,7 +1867,7 @@ wss.on('connection', (ws) => {
         let ttsChain = Promise.resolve()
         const voicePrompt = text + ' [voice]'
         const voiceAudioTimeout = new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('Agent chat timed out after 5 minutes')), 5 * 60 * 1000)
+          setTimeout(() => reject(new Error('Agent chat timed out after 10 minutes')), 10 * 60 * 1000)
         )
         const response = await Promise.race([
           agent.chat(
@@ -1746,10 +1900,10 @@ wss.on('connection', (ws) => {
         send(ws, { type: 'queue_update', items: agent.queue.getPending() })
         send(ws, { type: 'done_update', items: agent.queue.getDone() })
         send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
-        sendFilesAndFolders(ws).catch(console.error)
-        send(ws, { type: 'voice_summary', summary: fullResponse })
-        // Wait for all TTS segments to finish streaming
+        broadcastFilesDebounced()
+        // Wait for all TTS segments to finish streaming before dismissing pill
         await ttsChain
+        send(ws, { type: 'voice_summary', summary: fullResponse })
         voiceProcessing = false
       } catch (err: any) {
         voiceProcessing = false
@@ -1776,7 +1930,7 @@ wss.on('connection', (ws) => {
         let ttsChain = Promise.resolve()
         const voicePrompt = msg.message + ' [voice]'
         const voiceChatTimeout = new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('Agent chat timed out after 5 minutes')), 5 * 60 * 1000)
+          setTimeout(() => reject(new Error('Agent chat timed out after 10 minutes')), 10 * 60 * 1000)
         )
         const response = await Promise.race([
           agent.chat(
@@ -1810,9 +1964,10 @@ wss.on('connection', (ws) => {
         send(ws, { type: 'queue_update', items: agent.queue.getPending() })
         send(ws, { type: 'done_update', items: agent.queue.getDone() })
         send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
-        sendFilesAndFolders(ws).catch(console.error)
-        send(ws, { type: 'voice_summary', summary: fullResp })
+        broadcastFilesDebounced()
+        // Wait for all TTS segments to finish streaming before dismissing pill
         await ttsChain
+        send(ws, { type: 'voice_summary', summary: fullResp })
       } catch (err: any) {
         console.error('[Server] voice_chat error:', err.message)
         broadcast({ type: 'error', message: err.message ?? 'Something went wrong.' } as any)
@@ -1847,7 +2002,7 @@ wss.on('connection', (ws) => {
           send(ws, { type: 'queue_update', items: agent.queue.getPending() })
           send(ws, { type: 'done_update', items: agent.queue.getDone() })
           send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
-          sendFilesAndFolders(ws).catch(console.error)
+          broadcastFilesDebounced()
         } catch (err: any) {
           console.error('[Server] approve execution error:', err.message)
           send(ws, { type: 'error', message: err.message ?? 'Something went wrong.' })
@@ -1901,8 +2056,8 @@ wss.on('connection', (ws) => {
       try {
         send(ws, { type: 'agent_thinking' })
         await googleCal.connect()
-        const { entries } = await googleCal.sync()
-        agent.calendar.setGoogleEvents(entries)
+        const result = await googleCal.sync()
+        applyGoogleSyncResult(result)
         const status = await googleCal.getStatus()
         broadcast({ type: 'google_calendar_status', ...status } as any)
         broadcast({ type: 'calendar_update', entries: agent.calendar.getAll() })
@@ -1927,8 +2082,8 @@ wss.on('connection', (ws) => {
     if (msg.type === 'google_calendar_toggle') {
       if (googleCal) {
         googleCal.toggleCalendar((msg as any).calendarId, (msg as any).enabled)
-        const { entries } = await googleCal.sync()
-        if (entries.length > 0) agent.calendar.setGoogleEvents(entries)
+        const toggleResult = await googleCal.sync()
+        applyGoogleSyncResult(toggleResult)
         const status = await googleCal.getStatus()
         broadcast({ type: 'google_calendar_status', ...status } as any)
         broadcast({ type: 'calendar_update', entries: agent.calendar.getAll() })
@@ -1945,8 +2100,8 @@ wss.on('connection', (ws) => {
 
     if (msg.type === 'google_calendar_sync') {
       if (googleCal) {
-        const { entries, changed } = await googleCal.sync()
-        if (changed && entries.length > 0) agent.calendar.setGoogleEvents(entries)
+        const syncResult = await googleCal.sync()
+        applyGoogleSyncResult(syncResult)
         const status = await googleCal.getStatus()
         broadcast({ type: 'google_calendar_status', ...status } as any)
         broadcast({ type: 'calendar_update', entries: agent.calendar.getAll() })
@@ -2205,11 +2360,22 @@ wss.on('connection', (ws) => {
         send(ws, { type: 'error', message: 'No Composio API key configured.' })
       } else {
         try {
+          // Snapshot tool names for this slug before disconnecting
+          const prefix = msg.slug.toUpperCase() + '_'
+          const { tools: priorTools } = await agent.mcpManager.getAllTools()
+          const toolsToPurge = priorTools.filter(t => t.name.startsWith(prefix)).map(t => t.name)
+
           await disconnectIntegration(composioKey()!, msg.slug, composioUserId())
           // Explicitly remove from tracked slugs so refreshComposioMcp doesn't re-add it
           currentMcpSlugs = currentMcpSlugs.filter(s => s !== msg.slug)
           const slugs = await getConnectedSlugs(composioKey()!, composioUserId())
           await refreshComposioMcp(slugs)
+
+          // Purge disconnected tools from LanceDB index
+          if (toolsToPurge.length > 0) {
+            purgeTools(toolsToPurge).catch(err => console.warn('[Server] Tool purge failed:', err.message))
+          }
+
           await sendIntegrations(ws)
         } catch (err: any) {
           send(ws, { type: 'error', message: err.message })
@@ -2445,9 +2611,18 @@ wss.on('connection', (ws) => {
 
     if (msg.type === 'trigger_heartbeat') {
       console.log('[Server] Manual heartbeat triggered')
-      send(ws, { type: 'agent_thinking' })
+      broadcast({ type: 'agent_thinking' } as any)
       try {
-        await agent.handleTrigger({ source: 'heartbeat' })
+        await agent.handleTrigger(
+          { source: 'heartbeat' },
+          (chunk) => broadcast({ type: 'chat_chunk', text: chunk }),
+          (tool, label) => {
+            broadcast({ type: 'chat_segment_end' })
+            broadcast({ type: 'tool_start', tool, label })
+          }
+        )
+        broadcast({ type: 'chat_segment_end' })
+        send(ws, { type: 'heartbeat', status: 'done' })
         send(ws, { type: 'queue_update', items: agent.queue.getPending() })
         send(ws, { type: 'done_update', items: agent.queue.getDone() })
         send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
@@ -2463,6 +2638,7 @@ wss.on('connection', (ws) => {
         agent.reinitClient()
         const res = await fetch(`${msg.relayUrl}/v1/account`, {
           headers: { 'Authorization': `Bearer ${msg.token}` },
+          signal: AbortSignal.timeout(15000),
         })
         if (res.ok) {
           const data = await res.json() as { model: string; usage: any; admin?: boolean }
@@ -2490,7 +2666,8 @@ wss.on('connection', (ws) => {
 
     if (msg.type === 'get_relay_status') {
       agent.reinitClient()
-      sendRelayStatus(ws).catch(console.error)
+      relayStatusCache = null
+      sendRelayStatus(ws, true).catch(console.error)
     }
 
     if (msg.type === 'get_relay_credentials') {
@@ -2511,6 +2688,7 @@ wss.on('connection', (ws) => {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${relayToken}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({ label: msg.label }),
+            signal: AbortSignal.timeout(15000),
           })
           if (res.ok) {
             const data = await res.json() as { token: string; userId: string }
@@ -2534,6 +2712,7 @@ wss.on('connection', (ws) => {
         try {
           const res = await fetch(`${relayUrl}/admin/list-tokens`, {
             headers: { 'Authorization': `Bearer ${relayToken}` },
+            signal: AbortSignal.timeout(15000),
           })
           if (res.ok) {
             const data = await res.json() as { users: any[] }
@@ -2559,6 +2738,7 @@ wss.on('connection', (ws) => {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${relayToken}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({ token: msg.token }),
+            signal: AbortSignal.timeout(15000),
           })
           if (res.ok) {
             const data = await res.json() as { token: string; active: boolean }
@@ -2619,7 +2799,8 @@ wss.on('connection', (ws) => {
       if (teamClient && teamClient.teamId && process.env.RELAY_URL && process.env.RELAY_TOKEN) {
         try {
           const res = await fetch(`${process.env.RELAY_URL.replace(/\/$/, '')}/team/history?limit=${(msg as any).limit || 50}`, {
-            headers: { 'Authorization': `Bearer ${process.env.RELAY_TOKEN}` }
+            headers: { 'Authorization': `Bearer ${process.env.RELAY_TOKEN}` },
+            signal: AbortSignal.timeout(15000),
           })
           const messages = await res.json()
           send(ws, { type: 'team_history', messages } as any)
@@ -2628,6 +2809,9 @@ wss.on('connection', (ws) => {
     }
 
   })
-})
+  }) // end server.on('connection')
+} // end attachWssHandlers
+
+attachWssHandlers(wss!)
 
 console.log(`Co-Agent running on ws://localhost:${PORT}`)

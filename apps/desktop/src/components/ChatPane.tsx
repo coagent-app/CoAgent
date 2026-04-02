@@ -17,6 +17,7 @@ interface ChatPaneProps {
   thinking: boolean
   processing: boolean
   toolLabel: string | null
+  researchAgents?: { query: string; status: string; detail?: string }[]
   connected: boolean
   onChat: (message: string) => void
   onSteer?: (message: string) => void
@@ -24,7 +25,7 @@ interface ChatPaneProps {
   onIngestFile?: (filename: string, mimeType: string, data: string) => void
   files: FileEntry[]
   onNavigateToSettings?: () => void
-  lastHeartbeat?: { time: Date; status: string } | null
+  lastHeartbeat?: { time: Date; status: string; nextAt?: Date } | null
   skills?: { name: string; description: string; placeholder?: string }[]
   capabilityCard?: { name: string; capabilities: { name: string; description: string; checked: boolean }[]; authFields?: { name: string; displayName: string; description: string; helpUrl?: string; helpText?: string }[] } | null
   onConfirmCapabilities?: (selected: string[], authValues?: Record<string, string>) => void
@@ -427,69 +428,36 @@ const AgentBubble = React.memo(function AgentBubble({ content, files }: { conten
 })
 
 // ── Dictation hook (hold-to-dictate → Whisper cleanup) ──────────────────────
+// Uses shared recording logic from voice.ts to avoid duplication
 function useDictation(onResult: (text: string) => void) {
   const [recording, setRecording] = useState(false)
   const [transcribing, setTranscribing] = useState(false)
-  const recorderRef = useRef<MediaRecorder | null>(null)
-  const chunksRef = useRef<Blob[]>([])
-  const streamRef = useRef<MediaStream | null>(null)
+  const sessionRef = useRef<import('@/lib/voice').DictationSession | null>(null)
 
   const start = useCallback(async () => {
     if (recording || transcribing) return
     setRecording(true)
-    chunksRef.current = []
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      streamRef.current = stream
-      const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' })
-      recorder.ondataavailable = (e) => chunksRef.current.push(e.data)
-      recorder.start()
-      recorderRef.current = recorder
+      const { startDictation } = await import('@/lib/voice')
+      sessionRef.current = await startDictation()
     } catch (err) {
       console.error('[Dictation] Mic access failed:', err)
       setRecording(false)
     }
   }, [recording, transcribing])
 
-  const stop = useCallback(() => {
+  const stop = useCallback(async () => {
     if (!recording) return
     setRecording(false)
-
-    const recorder = recorderRef.current
-    if (recorder && recorder.state !== 'inactive') {
-      setTranscribing(true)
-      recorder.onstop = () => {
-        // Release mic
-        if (streamRef.current) {
-          streamRef.current.getTracks().forEach(t => t.stop())
-          streamRef.current = null
-        }
-        const blob = new Blob(chunksRef.current, { type: 'audio/webm' })
-        if (blob.size < 1000) {
-          setTranscribing(false)
-          return
-        }
-        const reader = new FileReader()
-        reader.onloadend = () => {
-          const base64 = (reader.result as string).split(',')[1] ?? ''
-          if (base64) {
-            window.dispatchEvent(new CustomEvent('coagent-ws-send', {
-              detail: { type: 'voice_dictation', data: base64 }
-            }))
-          } else {
-            setTranscribing(false)
-          }
-        }
-        reader.readAsDataURL(blob)
-      }
-      recorder.stop()
-    } else {
-      // Recorder never started or already inactive
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(t => t.stop())
-        streamRef.current = null
-      }
-    }
+    const session = sessionRef.current
+    sessionRef.current = null
+    if (!session) return
+    const result = await session.stop()
+    if (!result) return
+    setTranscribing(true)
+    window.dispatchEvent(new CustomEvent('coagent-ws-send', {
+      detail: { type: 'voice_dictation', data: result.base64 }
+    }))
   }, [recording])
 
   // Listen for Whisper result
@@ -506,7 +474,7 @@ function useDictation(onResult: (text: string) => void) {
   return { recording, transcribing, start, stop }
 }
 
-export function ChatPane({ messages, streamingText, thinking, processing, toolLabel, connected, onChat, onSteer, onStop, onIngestFile, files, onNavigateToSettings, lastHeartbeat, skills = [], capabilityCard, onConfirmCapabilities, userName, userRole, onboarded, className }: ChatPaneProps) {
+export function ChatPane({ messages, streamingText, thinking, processing, toolLabel, researchAgents = [], connected, onChat, onSteer, onStop, onIngestFile, files, onNavigateToSettings, lastHeartbeat, skills = [], capabilityCard, onConfirmCapabilities, userName, userRole, onboarded, className }: ChatPaneProps) {
   const [input, setInput] = useState('')
   const [skillQuery, setSkillQuery] = useState<string | null>(null)
   const [selectedSkillIdx, setSelectedSkillIdx] = useState(0)
@@ -524,37 +492,56 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
   }, [])
   const dictation = useDictation(handleDictation)
 
-  // Hold Space for 3s to dictate (only when input is not focused)
+  // Hold Space to dictate: prevent the space character, start after 3s hold.
+  // On early release (<3s), insert the space that was suppressed.
   const spaceHoldTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const spaceHeld = useRef(false)
+  const spaceActivated = useRef(false)
+  const inputValueRef = useRef(input)
+  inputValueRef.current = input
+  const dictationRef = useRef(dictation)
+  dictationRef.current = dictation
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
-      if (e.code === 'Space' && !inputFocused && !e.repeat && !dictation.recording && !dictation.transcribing) {
-        e.preventDefault()
-        spaceHeld.current = true
-        spaceHoldTimer.current = setTimeout(() => {
-          if (spaceHeld.current) dictation.start()
-        }, 3000)
-      }
+      if (e.code !== 'Space' || e.repeat) return
+      const d = dictationRef.current
+      if (d.recording || d.transcribing) return
+      // Only intercept when input is empty and input is focused
+      if (inputValueRef.current) return
+      if (document.activeElement !== inputRef.current) return
+      e.preventDefault()
+      e.stopImmediatePropagation()
+      spaceHeld.current = true
+      spaceActivated.current = false
+      spaceHoldTimer.current = setTimeout(() => {
+        if (spaceHeld.current) {
+          spaceActivated.current = true
+          dictationRef.current.start()
+        }
+      }, 3000)
     }
     const up = (e: KeyboardEvent) => {
-      if (e.code === 'Space') {
-        spaceHeld.current = false
-        if (spaceHoldTimer.current) { clearTimeout(spaceHoldTimer.current); spaceHoldTimer.current = null }
-        if (dictation.recording) {
-          e.preventDefault()
-          dictation.stop()
-        }
+      if (e.code !== 'Space') return
+      if (!spaceHeld.current && !dictationRef.current.recording) return
+      spaceHeld.current = false
+      if (spaceHoldTimer.current) { clearTimeout(spaceHoldTimer.current); spaceHoldTimer.current = null }
+      if (dictationRef.current.recording) {
+        e.preventDefault()
+        e.stopImmediatePropagation()
+        dictationRef.current.stop()
+      } else if (!spaceActivated.current) {
+        // Released before 3s — insert the space they intended to type
+        setInput(prev => prev + ' ')
       }
     }
-    window.addEventListener('keydown', down)
-    window.addEventListener('keyup', up)
+    window.addEventListener('keydown', down, true)
+    window.addEventListener('keyup', up, true)
     return () => {
-      window.removeEventListener('keydown', down)
-      window.removeEventListener('keyup', up)
+      window.removeEventListener('keydown', down, true)
+      window.removeEventListener('keyup', up, true)
       if (spaceHoldTimer.current) clearTimeout(spaceHoldTimer.current)
     }
-  }, [inputFocused, dictation.recording, dictation.transcribing, dictation.start, dictation.stop])
+  }, [])
 
   // Scroll to bottom on new messages / streaming
   useEffect(() => {
@@ -676,12 +663,16 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
           <p className="text-[10px] font-semibold text-neutral-400 dark:text-neutral-500 uppercase tracking-widest mb-0.5">
             Ask anything
           </p>
-          <h1 className="text-[19px] font-bold tracking-tight text-neutral-900 dark:text-neutral-100">Co-Agent</h1>
+          <h1 className="text-[19px] font-bold tracking-tight text-neutral-900 dark:text-neutral-100">{(() => {
+            const hour = new Date().getHours()
+            const greeting = hour < 12 ? 'Good Morning' : hour < 17 ? 'Good Afternoon' : 'Good Evening'
+            return userName ? `${greeting}, ${userName.split(/\s+/)[0]}` : greeting
+          })()}</h1>
         </div>
         <div className="flex items-center gap-2">
           {lastHeartbeat && (
             <span className="text-[10px] text-neutral-400 dark:text-neutral-500" title={`Last check: ${lastHeartbeat.time.toLocaleTimeString()}`}>
-              {lastHeartbeat.status === 'started' ? 'Checking...' : `Checked ${lastHeartbeat.time.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`}
+              {lastHeartbeat.status === 'started' ? 'Checking...' : lastHeartbeat.nextAt ? `Next ${lastHeartbeat.nextAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : `Checked ${lastHeartbeat.time.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`}
             </span>
           )}
           <div
@@ -713,12 +704,29 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
 
           {thinking && !streamingText && (
             <div className="flex justify-start">
-              <div className="flex items-center gap-2 px-2 py-3">
-                <span className="w-1.5 h-1.5 bg-neutral-400 dark:bg-neutral-500 rounded-full animate-bounce [animation-delay:0ms]" />
-                <span className="w-1.5 h-1.5 bg-neutral-400 dark:bg-neutral-500 rounded-full animate-bounce [animation-delay:150ms]" />
-                <span className="w-1.5 h-1.5 bg-neutral-400 dark:bg-neutral-500 rounded-full animate-bounce [animation-delay:300ms]" />
-                {toolLabel && (
-                  <span className="text-[12px] ml-1 shimmer-text">{toolLabel}...</span>
+              <div className="flex flex-col gap-1 px-2 py-3">
+                <div className="flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 bg-neutral-400 dark:bg-neutral-500 rounded-full animate-bounce [animation-delay:0ms]" />
+                  <span className="w-1.5 h-1.5 bg-neutral-400 dark:bg-neutral-500 rounded-full animate-bounce [animation-delay:150ms]" />
+                  <span className="w-1.5 h-1.5 bg-neutral-400 dark:bg-neutral-500 rounded-full animate-bounce [animation-delay:300ms]" />
+                  {toolLabel && !researchAgents.length && (
+                    <span className="text-[12px] ml-1 shimmer-text">{toolLabel}...</span>
+                  )}
+                </div>
+                {researchAgents.length > 0 && (
+                  <div className="flex flex-col gap-0.5 mt-1 ml-1">
+                    {researchAgents.map((agent, i) => (
+                      <div key={i} className="flex items-center gap-2 text-[11px] text-neutral-500 dark:text-neutral-400">
+                        <span className={`w-3 text-center ${agent.status === 'done' ? 'text-green-500' : agent.status === 'error' ? 'text-red-400' : 'animate-spin'}`}>
+                          {agent.status === 'done' ? '✓' : agent.status === 'error' ? '✗' : '⟳'}
+                        </span>
+                        <span className="truncate max-w-[200px] opacity-70">"{agent.query}"</span>
+                        <span className={agent.status === 'done' ? 'text-green-500' : agent.status === 'error' ? 'text-red-400' : 'shimmer-text'}>
+                          {agent.status === 'done' ? 'done' : agent.status === 'error' ? 'error' : agent.status === 'branching' ? 'branching out' : agent.status === 'enriching' ? 'enriching' : 'searching'}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
                 )}
               </div>
             </div>
@@ -806,21 +814,11 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
               onKeyDown={handleKeyDown}
               onFocus={() => setInputFocused(true)}
               onBlur={() => setInputFocused(false)}
-              readOnly={dictation.recording || dictation.transcribing}
+              readOnly={dictation.recording}
             />
             {!isActive && connected && !input && !inputFocused && !dictation.recording && !dictation.transcribing && (
               <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[13.5px] text-neutral-400 dark:text-neutral-500 pointer-events-none">
                 {typingPlaceholder}<span className="inline-block w-[1px] h-[14px] bg-neutral-400 dark:bg-neutral-500 ml-[1px] align-middle animate-pulse" />
-              </span>
-            )}
-            {dictation.recording && (
-              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[13.5px] text-red-400 pointer-events-none animate-pulse">
-                Listening…
-              </span>
-            )}
-            {dictation.transcribing && (
-              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[13.5px] text-neutral-400 dark:text-neutral-500 pointer-events-none animate-pulse">
-                Transcribing…
               </span>
             )}
           </div>

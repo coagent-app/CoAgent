@@ -28,6 +28,7 @@ export interface AgentSettings {
   voice_hotkey: string     // shortcut string e.g. "Control+Space"
   voice_voice: string      // OpenAI TTS voice: alloy, echo, fable, onyx, nova, shimmer
   onboarded: boolean       // false until onboarding completes — triggers onboarding flow in system prompt
+  custom_instructions: string  // freeform text injected into every system prompt — user or agent can edit
 }
 
 export type TriggerSource = 'heartbeat' | 'webhook' | 'manual' | 'memory_cleanup' | 'todo_due' | 'routine' | 'task_due'
@@ -218,6 +219,7 @@ export type WSServerMessage =
   | { type: 'chat_history'; messages: AgentMessage[] }
   | { type: 'tool_start'; tool: string; label: string }
   | { type: 'tool_end'; tool: string }
+  | { type: 'research_progress'; agents: { query: string; status: 'searching' | 'branching' | 'enriching' | 'done' | 'error'; detail?: string }[] }
   | { type: 'agent_stopped' }
   | { type: 'settings_update'; settings: AgentSettings }
   | { type: 'files_update'; files: FileEntry[] }
@@ -228,13 +230,14 @@ export type WSServerMessage =
   | { type: 'admin_token_created'; token: string; userId: string }
   | { type: 'admin_tokens_list'; users: AdminUser[] }
   | { type: 'admin_token_toggled'; token: string; active: boolean }
-  | { type: 'heartbeat'; status: 'started' | 'done' | 'skipped' | 'escalated'; summary?: string }
+  | { type: 'heartbeat'; status: 'started' | 'done' | 'skipped' | 'escalated' | 'scheduled'; summary?: string; nextAt?: string }
   | { type: 'skills_update'; skills: { name: string; description: string; instructions: string; builtin?: boolean }[] }
   | { type: 'file_ingested'; id: string; filename: string }
   | { type: 'voice_summary'; summary: string }
   | { type: 'voice_tts_audio'; data: string }
   | { type: 'voice_tts_chunk'; seq: number; data: string }
   | { type: 'voice_tts_done' }
+  | { type: 'voice_tts_cancel' }
   | { type: 'voice_transcribed'; text: string }
   | { type: 'voice_dictation_result'; text: string }
   | { type: 'usage_update'; usage: UsageSummary }
@@ -255,6 +258,7 @@ export type WSServerMessage =
   | { type: 'team_joined'; team: TeamInfo }
   | { type: 'team_invite_code'; code: string }
   | { type: 'team_error'; error: string }
+  | { type: 'subscription_expired' }
 
 export interface AdminUser {
   userId: string
@@ -283,7 +287,7 @@ export interface DoneItem {
   completedAt: string
 }
 
-export type UsageCategory = 'chat' | 'file_ingestion' | 'nightly_job'
+export type UsageCategory = 'chat' | 'file_ingestion' | 'nightly_job' | 'research' | 'whisper' | 'tts' | 'embedding' | 'composio'
 
 export interface UsageEntry {
   category: UsageCategory
@@ -293,6 +297,11 @@ export interface UsageEntry {
   cacheReadTokens: number
   cacheCreationTokens: number
   timestamp: string
+  // Non-LLM usage (set for respective categories, 0/undefined otherwise)
+  audioSeconds?: number    // whisper: actual audio duration from API response
+  characters?: number      // tts: exact character count sent to API
+  embeddingTokens?: number // embedding: total_tokens from API response
+  actions?: number         // composio: number of tool actions executed
 }
 
 export interface UsageSummary {

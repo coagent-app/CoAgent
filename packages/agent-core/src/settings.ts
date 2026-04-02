@@ -26,6 +26,7 @@ function getDefaultSettings(): AgentSettings {
     voice_hotkey: 'Control+Alt+Space',
     voice_voice: 'alloy',
     onboarded: false,
+    custom_instructions: '',
   }
 }
 
@@ -56,6 +57,7 @@ export async function readSettings(dataDir: string): Promise<AgentSettings> {
       voice_hotkey: parsed.voice_hotkey ?? DEFAULT_SETTINGS.voice_hotkey,
       voice_voice: parsed.voice_voice ?? DEFAULT_SETTINGS.voice_voice,
       onboarded: parsed.onboarded ?? DEFAULT_SETTINGS.onboarded,
+      custom_instructions: parsed.custom_instructions ?? DEFAULT_SETTINGS.custom_instructions,
     }
   } catch (err: any) {
     if (err?.code !== 'ENOENT') {
@@ -102,6 +104,7 @@ export async function writeSettings(dataDir: string, patch: Partial<AgentSetting
     voice_hotkey: patch.voice_hotkey !== undefined ? patch.voice_hotkey : current.voice_hotkey,
     voice_voice: patch.voice_voice !== undefined ? patch.voice_voice : current.voice_voice,
     onboarded: patch.onboarded !== undefined ? patch.onboarded : current.onboarded,
+    custom_instructions: patch.custom_instructions !== undefined ? patch.custom_instructions : current.custom_instructions,
   }
 
   await writeFile(join(dataDir, SETTINGS_FILE), JSON.stringify(updated, null, 2), 'utf-8')

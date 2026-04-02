@@ -29,7 +29,8 @@ export function useAgent() {
   const [searchResults, setSearchResults] = useState<FileEntry[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [toolLabel, setToolLabel] = useState<string | null>(null)
-  const [lastHeartbeat, setLastHeartbeat] = useState<{ time: Date; status: string } | null>(null)
+  const [researchAgents, setResearchAgents] = useState<{ query: string; status: string; detail?: string }[]>([])
+  const [lastHeartbeat, setLastHeartbeat] = useState<{ time: Date; status: string; nextAt?: Date } | null>(null)
   const [skills, setSkills] = useState<{ name: string; description: string; instructions: string }[]>([])
   const [pendingFields, setPendingFields] = useState<{ slug: string; fields: { name: string; displayName: string; description: string }[] } | null>(null)
   const [relayActive, setRelayActive] = useState<boolean>(false)
@@ -116,9 +117,17 @@ export function useAgent() {
             import('@/lib/voice').then(v => v.showVoiceToolLabel(msg.label))
           }
         }
+        if (msg.type === 'research_progress') {
+          setResearchAgents(msg.agents)
+          // Clear when all done/error
+          if (msg.agents.length > 0 && msg.agents.every((a: any) => a.status === 'done' || a.status === 'error')) {
+            setTimeout(() => setResearchAgents([]), 2000)
+          }
+        }
         if (msg.type === 'chat_chunk') {
           setThinking(false)
           setToolLabel(null)
+          setResearchAgents([])
           setStreamingText(prev => (prev ?? '') + msg.text)
           // Forward just the first sentence to voice pill
           if ((window as any).__voiceActive) {
@@ -177,7 +186,14 @@ export function useAgent() {
           setIsAdmin(msg.admin ?? false)
         }
         if (msg.type === 'file_ingested') recentIngestedFiles.current.push({ id: msg.id, filename: msg.filename })
-        if (msg.type === 'heartbeat') setLastHeartbeat({ time: new Date(), status: msg.status })
+        if (msg.type === 'heartbeat') {
+          const nextAt = msg.nextAt ? new Date(msg.nextAt) : undefined
+          if (msg.status === 'scheduled') {
+            setLastHeartbeat(prev => ({ time: prev?.time ?? new Date(), status: prev?.status ?? 'done', nextAt }))
+          } else {
+            setLastHeartbeat({ time: new Date(), status: msg.status, nextAt })
+          }
+        }
         if (msg.type === 'skills_update') setSkills(msg.skills)
         if (msg.type === 'voice_transcribed') {
           // Show the user's voice input in chat (dedupe in case of multiple connections)
@@ -533,5 +549,5 @@ export function useAgent() {
     send({ type: 'team_history', limit } as any)
   }, [send])
 
-  return { queue, done, messages, streamingText, thinking, processing, toolLabel, connected, lastHeartbeat, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, pendingFields, setPendingFields, setModel, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, getTeamInfo, getTeamHistory, triggerPrompt, setTriggerPrompt }
+  return { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, pendingFields, setPendingFields, setModel, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, getTeamInfo, getTeamHistory, triggerPrompt, setTriggerPrompt }
 }

@@ -16,8 +16,10 @@ import { embedTools, searchToolsAndSchema, setToolEmbeddingsDir } from './tool-e
 import { logToolCall, extractIntegration, searchToolLogs } from './service-logger.js'
 import { recordUsage } from './usage-tracker.js'
 import { getRelayConfig } from './auth.js'
+import { runResearch } from './research.js'
 
 const HISTORY_WINDOW = 50        // total pool — recent messages
+const HISTORY_CAP = 200          // hard in-memory cap — trim from front when exceeded
 
 // --- Skills ---
 const DEFAULT_SKILL_NAMES = new Set(['skill-creator', 'integration-builder', 'spreadsheet-pro', 'lead-generation'])
@@ -63,76 +65,6 @@ function getComposioFilesUrl(): string {
   return process.env.RELAY_URL
     ? `${process.env.RELAY_URL.replace(/\/$/, '')}/v1/composio/files/upload/request`
     : 'https://backend.composio.dev/api/v3/files/upload/request'
-}
-
-/**
- * Extract the most relevant lines from search results instead of returning full chunks.
- * Scores each line by keyword overlap with the query, returns top-scoring lines up to charLimit.
- */
-/** Filter out specific files from auto-inject search results (agent can still search them manually) */
-function filterAutoInjectResults(raw: string, excludePaths: string[], maxDistance = 1.0): string | null {
-  try {
-    const results: { path: string; content: string; score: number }[] = JSON.parse(raw)
-    const filtered = results.filter(r =>
-      !excludePaths.some(p => r.path?.endsWith(p)) &&
-      (r.score ?? 999) < maxDistance  // score is distance — lower = more relevant
-    )
-    return filtered.length > 0 ? JSON.stringify(filtered) : null
-  } catch { return raw }
-}
-
-function extractSnippets(raw: string, query: string, charLimit: number): string | null {
-  let results: { path: string; content: string; score: number }[]
-  try { results = JSON.parse(raw) } catch { return raw.length > charLimit ? raw.slice(0, charLimit) + '…' : raw }
-  if (!Array.isArray(results) || results.length === 0) return null
-
-  const queryWords = new Set(query.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 2))
-  const out: string[] = []
-  let total = 0
-
-  for (const result of results) {
-    if (!result.content) continue
-    const source = (result.path ?? '').split('/').pop() ?? ''
-    const isSchedule = (result.path ?? '').startsWith('_schedule/')
-
-    // Small results or schedule items — include whole thing (they're compact)
-    if (result.content.length <= 300 || isSchedule) {
-      const block = `[${source}]\n${result.content}`
-      if (total + block.length + 1 > charLimit) break
-      out.push(block)
-      total += block.length + 1
-      continue
-    }
-
-    // Large chunks — extract only relevant lines
-    const lines = result.content.split('\n').map(l => l.trim()).filter(l => l.length > 0)
-    const scored = lines.map(line => {
-      const words = line.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)
-      let hits = 0
-      for (const w of words) { if (queryWords.has(w)) hits++ }
-      const boost = line.startsWith('#') || line.startsWith('[') ? 0.5 : 0
-      return { line, score: hits + boost }
-    }).filter(s => s.score > 0).sort((a, b) => b.score - a.score)
-
-    if (scored.length === 0) continue
-
-    const header = `[${source}]`
-    if (total + header.length + 1 > charLimit) break
-    out.push(header)
-    total += header.length + 1
-
-    for (const { line } of scored) {
-      if (total + line.length + 1 > charLimit) break
-      out.push(line)
-      total += line.length + 1
-    }
-  }
-
-  if (out.length === 0 && results[0]?.content) {
-    return results[0].content.slice(0, charLimit)
-  }
-
-  return out.length > 0 ? out.join('\n') : null
 }
 
 /**
@@ -229,6 +161,24 @@ function formatSchemaForResult(tool: Anthropic.Tool, paramNames?: string[]): str
   return `\n${tool.name} parameters:\n${params.join('\n')}${note ? '\n' + note : ''}`
 }
 
+/** Trim verbose param descriptions to save tokens when sending to the API */
+function trimToolSchema(tool: Anthropic.Tool): Anthropic.Tool {
+  const schema = tool.input_schema as any
+  if (!schema?.properties) return tool
+  const trimmed: Record<string, any> = {}
+  for (const [k, v] of Object.entries(schema.properties as Record<string, any>)) {
+    if (v.description && v.description.length > 80) {
+      trimmed[k] = { ...v, description: v.description.slice(0, 80) }
+    } else {
+      trimmed[k] = v
+    }
+  }
+  return {
+    ...tool,
+    input_schema: { ...schema, properties: trimmed }
+  }
+}
+
 const INTERNAL_TOOLS: Anthropic.Tool[] = [
   {
     name: 'get_current_time',
@@ -242,7 +192,7 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
       type: 'object' as const,
       properties: {
         query: { type: 'string', description: 'What to do: "send email", "create calendar event"' },
-        context: { type: 'string', description: 'Names/IDs/channels to look up: "Nathan slack", "email from Alex"' },
+        context: { type: 'string', description: 'Topic context for tool log lookup: "Nathan slack", "south florida leads"' },
         schema: { type: 'string', description: 'Describe full action with all fields: "send email to recipient with subject, body, CC, and attachment"' }
       },
       required: ['query', 'context', 'schema']
@@ -250,16 +200,19 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'queue_approval',
-    description: 'Queue action for user approval.',
+    description: 'Queue action for user approval. Always fill ALL fields with full context.',
     input_schema: {
       type: 'object' as const,
       properties: {
         type: { type: 'string', enum: ['task', 'document', 'message', 'request', 'other'] },
-        title: { type: 'string' }, description: { type: 'string' },
-        detail: { type: 'string' }, notes: { type: 'string' },
-        action: { type: 'string' }, metadata: { type: 'object' }
+        title: { type: 'string', description: 'Short title (e.g. "Reply to Nathan — Code Review")' },
+        description: { type: 'string', description: 'What this is and why (1-2 sentences)' },
+        detail: { type: 'string', description: 'Full draft content. For emails: include To, Subject, Body. For tasks: include steps. Markdown OK.' },
+        notes: { type: 'string', description: 'Your reasoning — why you queued this, context the user needs to decide' },
+        action: { type: 'string', description: 'Short action label — tool + target only (e.g. "Send email to nathan@gmail.com"). NO draft content here — that goes in detail.' },
+        metadata: { type: 'object', description: 'Structured fields: to, from, subject, etc.' }
       },
-      required: ['type', 'title', 'description', 'notes', 'action']
+      required: ['type', 'title', 'description', 'detail', 'notes', 'action', 'metadata']
     }
   },
   {
@@ -272,6 +225,19 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
     }
   },
   {
+    name: 'integration_notes',
+    description: 'Save notes for an integration (IDs, preferences, rules). Notes auto-inject on search_tools — do NOT call this to read. Only use to write/update.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        action: { type: 'string', enum: ['read', 'write'], description: 'read = get current notes before updating. write = save new notes.' },
+        integration: { type: 'string', description: 'Integration name (e.g. "gmail", "slack")' },
+        notes: { type: 'string', description: 'New notes content (for write). Keep brief — IDs, rules, preferences only.' },
+      },
+      required: ['action', 'integration']
+    }
+  },
+  {
     name: 'update_settings',
     description: 'Update user profile/settings.',
     input_schema: {
@@ -280,11 +246,12 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
         name: { type: 'string' }, email: { type: 'string' },
         timezone: { type: 'string' }, role: { type: 'string' },
         what_you_do: { type: 'string', description: 'Their work description for system prompt' },
+        custom_instructions: { type: 'string', description: 'Custom instructions injected into every system prompt — use this to store user preferences, lead criteria, workflow rules, etc.' },
         onboarded: { type: 'boolean', description: 'True after onboarding done' },
         active_hours: { type: 'object', properties: { start: { type: 'number' }, end: { type: 'number' } } },
         active_days: { type: 'array', items: { type: 'string', enum: ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] } },
         autonomy: { type: 'string', enum: ['ask_first', 'balanced', 'autonomous'] },
-        heartbeat_interval: { type: 'number', description: 'Minutes between heartbeats (0=off)' }
+        heartbeat_interval: { type: 'number', description: 'Minutes between heartbeats (0=off)' },
       }
     }
   },
@@ -361,14 +328,17 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'memory',
-    description: 'Long-term memory. Prefer search (semantic) or grep (pattern match in file) over read (full dump). Write things down immediately.',
+    description: 'Long-term memory. Always use search (semantic) first — it finds relevant info across all files. Only use grep for exact string matching in a known file. Write things down immediately.',
     input_schema: {
       type: 'object' as const,
       properties: {
         action: { type: 'string', enum: ['search', 'grep', 'read', 'write', 'edit', 'append', 'list', 'delete'] },
-        query: { type: 'string', description: 'Search query' },
+        query: { type: 'string', description: 'Search query (single)' },
+        queries: { type: 'array', items: { type: 'string' }, description: 'Multiple search queries — run in parallel for broader recall' },
         pattern: { type: 'string', description: 'Regex pattern (for grep)' },
         file: { type: 'string', description: 'Filename e.g. contacts.md' },
+        files: { type: 'array', items: { type: 'string' }, description: 'Batch delete — multiple files in parallel' },
+        edits: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, old_content: { type: 'string' }, new_content: { type: 'string' } }, required: ['file', 'old_content', 'new_content'] }, description: 'Batch edit — multiple sections in parallel' },
         content: { type: 'string', description: 'Content (for write/append)' },
         old_content: { type: 'string', description: 'Text to replace (for edit)' },
         new_content: { type: 'string', description: 'Replacement text (for edit)' },
@@ -462,7 +432,7 @@ const MEMORY_MCP_MAP: Record<string, string> = {
 
 function mapMemoryParams(action: string, input: Record<string, unknown>): Record<string, unknown> {
   switch (action) {
-    case 'search': return { query: input.query, topK: input.top_k ?? 3 }
+    case 'search': return { query: input.query as string, topK: input.top_k ?? 3 }
     case 'read': case 'delete': return { path: input.file }
     case 'write': case 'append': return { path: input.file, content: input.content }
     case 'edit': return { path: input.file, old_content: input.old_content, new_content: input.new_content }
@@ -487,7 +457,7 @@ const TOOL_LABELS: Record<string, string> = {
   memory: 'Checking memory',
   call_external_tool: 'Calling tool',
   exa: 'Exa search',
-  research: 'Research database',
+  research: 'Researching',
   monitor: 'Search monitor',
   create_custom_integration: 'Building custom integration',
   notify_user: 'Sending notification',
@@ -534,7 +504,7 @@ function humanizeToolName(name: string): string {
 }
 
 const HEARTBEAT_TOOLS = new Set([
-  'get_current_time', 'memory', 'search_tools', 'notify_user',
+  'get_current_time', 'memory', 'search_tools', 'notify_user', 'queue_approval',
 ])
 
 // Tools gated behind a skill — only included when the skill has been activated
@@ -553,9 +523,9 @@ function getInternalTools(context: ToolContext, activeSkillTools?: Set<string>, 
 }
 
 const AUTONOMY_DESCRIPTIONS: Record<string, string> = {
-  ask_first: 'Queue almost everything for approval — only truly mechanical lookups happen automatically.',
-  balanced: 'Act on clearly routine or read-only things. Queue anything that sends a message, edits data, or contacts someone.',
-  autonomous: 'Act freely — send emails, create events, modify data without asking. Only queue truly destructive actions (bulk deletes). WARNING: the agent may send messages and make changes on your behalf without confirmation.'
+  ask_first: 'Queue everything except read-only lookups.',
+  balanced: 'Act on routine/read-only. Queue sends, edits, outreach.',
+  autonomous: 'Act freely. Only queue destructive actions (bulk deletes).'
 }
 
 // Hard guardrail: these tool name patterns ALWAYS require queue_approval, regardless of autonomy level.
@@ -586,8 +556,8 @@ function buildSystemPrompt(connectedServices: string[], agentProfilePath: string
 
   const serviceSection = connectedServices.length > 0
     ? `External integrations: ${connectedServices.join(', ')}. For these ONLY, use search_tools → call_external_tool:
-- search_tools(query, context, schema) to find the right tool and get its params
-- call_external_tool(tool_name, parameters) to execute it
+- search_tools(query, context, schema) to find tools. Call memory search in parallel when you need context.
+- call_external_tool(tool_name, parameters) to execute.
 All other tools (memory, files, schedule, skills, send_team_message, etc.) are built-in — call them directly.`
     : 'No external integrations connected. Settings → connect. Built-in tools (memory, files, schedule, skills) are always available.'
 
@@ -597,9 +567,13 @@ All other tools (memory, files, schedule, skills, send_team_message, etc.) are b
 
   const formatHour = (h: number) => h === 24 ? 'midnight' : h === 0 ? '12am' : h < 12 ? `${h}am` : h === 12 ? '12pm' : `${h - 12}pm`
 
-  return `You are CoAgent — a private AI agent running on the user's machine. Help with anything asked.
+  const customInstructions = settings.custom_instructions?.trim()
 
-Relevant memory is auto-retrieved and included with the user's message. Use it directly — only search memory manually if you need more detail or the auto-context doesn't cover the query. Never ask for info that might be in memory.
+  return `You are CoAgent — a private AI agent running on the user's machine. Help with anything asked.
+${customInstructions ? `\n${customInstructions}\n` : ''}
+Always search memory before asking the user for info.
+ALWAYS call multiple tools in one response when independent — faster and cheaper.
+IMPORTANT: Every tool call costs real money. Be deliberate — don't make calls you don't need.
 
 ${serviceSection}
 User: ${settings.name || '?'} | ${settings.email || '?'} | ${settings.role || '?'} | ${settings.timezone || '?'}${settings.what_you_do ? `\nWhat they do: ${settings.what_you_do}` : ''}
@@ -607,22 +581,26 @@ Active: ${formatHour(settings.active_hours.start)}–${formatHour(settings.activ
 Autonomy: ${settings.autonomy} — ${AUTONOMY_DESCRIPTIONS[settings.autonomy]}
 ${settings.heartbeat_interval > 0 ? `Heartbeat: every ${settings.heartbeat_interval}min — process triggers, check memory, escalate.` : ''}
 
-Memory: your long-term brain. Use memory tool directly (NOT search_tools). Prefer search (semantic) or grep (pattern match) over read. Write things down immediately. Always search before asking for ANY info.
+Memory: your long-term brain. Search first (semantic, supports multiple queries in parallel). Call memory search in parallel with search_tools when you need both tools and context. Write things down immediately. Always search before asking for ANY info.
 Files: grep file contents (regex across PDFs, DOCX, XLSX, text) instead of reading whole files. create_folder/move to organize. get_pdf_fields + fill_pdf for fillable PDF forms. [filename](coagent-file:ID) to open. Include coagent_file_ids in tool params to auto-attach files to emails.
 Schedule: create/update/delete/complete/list — routines (cron), tasks (one-time), followups (check-back reminders).${googleCalendarConnected ? ' Google Calendar is synced — schedule(action: "list") already includes Google Calendar events. Use schedule to check the calendar, not the external Google Calendar tool.' : ''}
 Skills: @skill-name to invoke. Check skills(action: list) for unfamiliar tasks.
 Integrations: build NEW integrations from any API using create_custom_integration + @integration-builder skill.
 Approvals: queue_approval for high-stakes actions with full draft. add_done_item after routine tasks.
 Followups: after sending emails/messages/proposals, ask "Want me to follow up? When?" — never auto-create.
+Integration notes: after using an integration, save useful context (IDs, preferences, rules) via integration_notes(write). Auto-injected on search_tools — never call integration_notes(read) for context.
 
 NEVER fabricate tool results — always call the tool and use the actual response. If unsure, call the tool.
-Call multiple tools in one response when independent — faster and cheaper. Be concise. No emojis. Markdown only when helpful.
+Be concise. No emojis. Markdown only when helpful.
 ${connectedServices.includes('coagent:imessage') ? `iMessage connected. Queue sends for approval unless autonomous.` : ''}
 ${connectedServices.includes('coagent:contacts') ? `Contacts connected via search_tools.` : ''}
 [voice] = voice input. 1-2 short spoken sentences, no markdown.
 Notifications: title 2-4 words, body one sentence.
 ${exaConnected ? `
-Exa: web search, lead gen, competitor research. research tool queries saved results (free). monitor sets up recurring searches on domains.` : ''}${onboardingSection}${teamRoster && teamRoster.length > 0 ? `\n\n## Team: ${teamName || 'Your Team'}\n\nYou are part of a team. Each member has their own AI agent — when you message someone, you're talking to their agent (another AI like you), not the person directly.\nMembers:\n${teamRoster.map((m: any) => `- ${m.name} (${m.role})`).join('\n')}\n\nUse send_team_message with to="name" to message their agent. You'll wait for and receive their agent's response. Omit "to" to broadcast.\nInclude agent_context with relevant background for the receiving agent.` : ''}`
+Exa: web search, lead gen, competitor research.
+research tool: ALWAYS present your planned queries to the user first and wait for confirmation before calling. Each query dispatches a parallel Haiku sub-agent. Use 3-5 queries from different angles/keywords.
+exa tool: use directly ONLY for get_contents (enrich specific URLs), find_similar (expand from a reference URL), or quick single lookups.
+After research, save structured findings to memory. monitor tool sets up recurring searches.` : ''}${onboardingSection}${teamRoster && teamRoster.length > 0 ? `\n\n## Team: ${teamName || 'Your Team'}\n\nYou are part of a team. Each member has their own AI agent — when you message someone, you're talking to their agent (another AI like you), not the person directly.\nMembers:\n${teamRoster.map((m: any) => `- ${m.name} (${m.role})`).join('\n')}\n\nUse send_team_message with to="name" to message their agent. You'll wait for and receive their agent's response. Omit "to" to broadcast.\nInclude agent_context with relevant background for the receiving agent.` : ''}`
 }
 
 export class Agent {
@@ -642,6 +620,7 @@ export class Agent {
   private runLoopPromise: Promise<string> | null = null
   private activeStream: { abort: () => void } | null = null
   private stopped = false
+  isProcessing = false
   private missedEvents: { source: string; payload: unknown; time: string }[] = []
   private steeringQueue: string[] = []
   /** Index of the last scheduled-task message — pinned in selectHistory so it doesn't scroll out */
@@ -654,7 +633,9 @@ export class Agent {
   public onSettingsChanged?: () => void
   public onCalendarChanged?: () => void
   public googleCalendarConnected = false
+  private mcpReady: Promise<void>
   public onNotifyUser?: (title: string, body: string) => void
+  public onResearchProgress?: (agents: { query: string; status: string; detail?: string }[]) => void
   public onCustomIntegration?: (action: string, data: any) => Promise<string>
   public activeSkillTools = new Set<string>()
 
@@ -697,7 +678,7 @@ export class Agent {
     this.historyPath = join(dataDir, 'conversation.json')
     this.teamHistoryPath = join(dataDir, 'team-history.json')
     this.agentProfilePath = join(dataDir, 'memory', 'agent.md')
-    this.mcpManager.connect(mcpConfigs).catch(console.error)
+    this.mcpReady = this.mcpManager.connect(mcpConfigs).catch(err => console.error('[Agent] MCP connect error:', err))
     this.loadHistory().catch(console.error)
     this.loadTeamHistory().catch(console.error)
     setToolEmbeddingsDir(dataDir)
@@ -733,11 +714,22 @@ export class Agent {
     }
   }
 
+  /** Trim a history array in place to HISTORY_CAP, removing from the front. */
+  private capHistory(arr: Anthropic.MessageParam[]): void {
+    if (arr.length > HISTORY_CAP) {
+      arr.splice(0, arr.length - HISTORY_CAP)
+    }
+  }
+
   private async saveHistory(): Promise<void> {
-    await mkdir(join(this.historyPath, '..'), { recursive: true })
-    // Cap history to last 100 messages — both in memory and on disk
-    this.conversationHistory = this.conversationHistory.slice(-100)
-    await writeFile(this.historyPath, JSON.stringify(this.conversationHistory))
+    try {
+      await mkdir(join(this.historyPath, '..'), { recursive: true })
+      // Cap history to HISTORY_CAP messages — both in memory and on disk
+      this.capHistory(this.conversationHistory)
+      await writeFile(this.historyPath, JSON.stringify(this.conversationHistory))
+    } catch (err: any) {
+      console.error('[Agent] Failed to save history:', err.message)
+    }
   }
 
   private async loadTeamHistory(): Promise<void> {
@@ -751,12 +743,17 @@ export class Agent {
   }
 
   private async saveTeamHistory(): Promise<void> {
-    this.teamConversationHistory = this.teamConversationHistory.slice(-100)
-    await writeFile(this.teamHistoryPath, JSON.stringify(this.teamConversationHistory), 'utf-8')
+    try {
+      this.capHistory(this.teamConversationHistory)
+      await writeFile(this.teamHistoryPath, JSON.stringify(this.teamConversationHistory), 'utf-8')
+    } catch (err: any) {
+      console.error('[Agent] Failed to save team history:', err.message)
+    }
   }
 
   getChatHistory(): { role: 'user' | 'assistant'; content: string; timestamp: string }[] {
     const result: { role: 'user' | 'assistant'; content: string; timestamp: string }[] = []
+    let inHeartbeat = false
     for (const m of this.conversationHistory) {
       let text: string
       if (typeof m.content === 'string') {
@@ -768,8 +765,20 @@ export class Agent {
         continue
       }
       if (!text.trim()) continue
-      // Hide raw heartbeat trigger messages from the UI — they stay in LLM context only
-      if (m.role === 'user' && (text.startsWith('[Heartbeat —') || text.startsWith('[Heartbeat summary —'))) continue
+      // Hide raw heartbeat trigger messages and Haiku's intermediate responses from the UI
+      if (m.role === 'user' && (text.startsWith('[Heartbeat —') || text.startsWith('[Heartbeat summary —'))) {
+        inHeartbeat = true
+        continue
+      }
+      // Skip Haiku's intermediate assistant narration during heartbeats — only show the surfaced summary
+      if (inHeartbeat && m.role === 'assistant') {
+        if (text.startsWith('**[Heartbeat —')) {
+          inHeartbeat = false  // This is the surfaced summary — show it
+        } else {
+          continue  // Skip intermediate narration
+        }
+      }
+      if (m.role === 'user') inHeartbeat = false
       result.push({ role: m.role as 'user' | 'assistant', content: text, timestamp: new Date().toISOString() })
     }
     return result
@@ -780,17 +789,22 @@ export class Agent {
     onChunk?: (text: string) => void,
     onToolCall?: (tool: string, label: string) => void
   ): Promise<void> {
+    // Ensure MCP servers (memory, exa) are ready before processing
+    await this.mcpReady
+
     const isHeartbeat = trigger.source === 'heartbeat'
     const isTodoDue = trigger.source === 'todo_due' || trigger.source === 'task_due'
 
     // If agent is busy, queue webhook/incoming events for later — don't drop them
     if (this.runLoopPromise) {
       if (!isHeartbeat) {
-        this.missedEvents.push({
-          source: trigger.source,
-          payload: trigger.payload,
-          time: new Date().toISOString()
-        })
+        if (this.missedEvents.length < 50) {
+          this.missedEvents.push({
+            source: trigger.source,
+            payload: trigger.payload,
+            time: new Date().toISOString()
+          })
+        }
         console.log(`[Agent] Queued missed event (${trigger.source}) — ${this.missedEvents.length} pending`)
       } else {
         console.log(`[Agent] Skipping ${trigger.source} — agent is busy`)
@@ -818,17 +832,40 @@ export class Agent {
       this.pinnedTaskIdx = this.conversationHistory.length - 1
     }
 
-    // Haiku triage is silent — no chunks or tool calls shown in UI
-    this.runLoopPromise = this.runLoop(undefined, context, undefined)
+    // Capture event IDs before processing so we can mark them done after
+    const eventIds = isHeartbeat
+      ? ((trigger.payload as any)?.events as any[] ?? []).map((e: any) => e.id).filter(Boolean)
+      : []
+
+    // Stream the heartbeat header before Haiku starts
+    if (isHeartbeat) {
+      const time = new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' })
+      onChunk?.(`**[Heartbeat — ${time}]**\n\n`)
+    }
+
+    this.runLoopPromise = this.runLoop(onChunk, context, onToolCall)
     try {
       const result = await this.runLoopPromise
 
-      // Heartbeat escalation: Haiku gathered context → pass to Sonnet with full tools
+      // Mark heartbeat events as done so they don't pile up
+      if (eventIds.length > 0) {
+        markEventsDone(this.dataDir, eventIds).catch(err =>
+          console.error('[Agent] Failed to mark events done:', err.message)
+        )
+      }
+
+      // Haiku handles it all: queues actionable items, surfaces a summary in chat.
+      // No Sonnet escalation — the queue is the guardrail for actions.
+      // runLoop already streamed text via onChunk, but we need a clean string message
+      // in history so getChatHistory can find it (runLoop pushes ContentBlock[] which gets filtered).
       if (context === 'heartbeat' && result && !result.toLowerCase().includes('all clear')) {
-        console.log('[Agent] Heartbeat found action needed — escalating to Sonnet')
-        this.conversationHistory.push({ role: 'user', content: `[Heartbeat summary — act on this now]\n\n${result}` })
-        this.runLoopPromise = this.runLoop(onChunk, 'chat', onToolCall)
-        await this.runLoopPromise
+        const time = new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' })
+        console.log('[Agent] Heartbeat summary surfaced to user')
+        const surfaceMsg = result.startsWith('**[Heartbeat')
+          ? result
+          : `**[Heartbeat — ${time}]**\n\n${result}`
+        this.conversationHistory.push({ role: 'assistant', content: surfaceMsg })
+        this.saveHistory()
       }
     } finally {
       this.runLoopPromise = null
@@ -843,6 +880,8 @@ export class Agent {
     fileIds?: string[],
     extraContent?: any[]
   ): Promise<string> {
+    this.isProcessing = true
+    await this.mcpReady
     const resolved = await resolveSkillMentions(this.dataDir, message)
 
     // If files were attached, build a multi-part content block so Claude can see them
@@ -850,33 +889,48 @@ export class Agent {
       const contentParts: any[] = []
       // Add any extra content blocks (e.g. images from WhatsApp)
       if (extraContent) contentParts.push(...extraContent)
-      for (const fid of (fileIds || [])) {
+      const fileParts = await Promise.all((fileIds || []).map(async (fid) => {
         try {
           const { base64, filename, mimeType } = await readFileBase64(this.dataDir, fid)
           if (mimeType === 'application/pdf') {
-            contentParts.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } })
+            return { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } }
           } else if (mimeType.startsWith('image/')) {
-            contentParts.push({ type: 'image', source: { type: 'base64', media_type: mimeType, data: base64 } })
+            return { type: 'image', source: { type: 'base64', media_type: mimeType, data: base64 } }
           } else {
             const text = await readFileContent(this.dataDir, fid)
-            contentParts.push({ type: 'text', text: `[File: ${filename}]\n${text}` })
+            return { type: 'text', text: `[File: ${filename}]\n${text}` }
           }
         } catch (err) {
           console.warn(`[Agent] Could not attach file ${fid}:`, (err as Error).message)
+          return null
         }
-      }
+      }))
+      contentParts.push(...fileParts.filter(Boolean))
       contentParts.push({ type: 'text', text: resolved })
       this.conversationHistory.push({ role: 'user', content: contentParts })
     } else {
       this.conversationHistory.push({ role: 'user', content: resolved })
     }
+    this.capHistory(this.conversationHistory)
     const prev = this.runLoopPromise ?? Promise.resolve('')
-    const next: Promise<string> = prev.catch(() => '').then(() => this.runLoop(onChunk, 'chat', onToolCall))
+    const next: Promise<string> = prev
+      .catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error('[Agent] Previous runLoop failed before chat():', msg)
+        // Don't propagate — allow the new message to proceed
+      })
+      .then(() => this.runLoop(onChunk, 'chat', onToolCall))
     this.runLoopPromise = next
     try {
       return await next
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error('[Agent] runLoop error in chat():', msg)
+      onChunk?.(`\n\n_Something went wrong: ${msg}_`)
+      return ''
     } finally {
       if (this.runLoopPromise === next) this.runLoopPromise = null
+      this.isProcessing = false
     }
   }
 
@@ -891,12 +945,23 @@ export class Agent {
       : message
 
     this.teamConversationHistory.push({ role: 'user', content: fullMessage })
+    this.capHistory(this.teamConversationHistory)
 
     const prev = this.teamRunLoopPromise ?? Promise.resolve('')
-    const next: Promise<string> = prev.catch(() => '').then(() => this.runLoop(onChunk, 'team', onToolCall))
+    const next: Promise<string> = prev
+      .catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error('[Agent] Previous teamRunLoop failed before teamChat():', msg)
+      })
+      .then(() => this.runLoop(onChunk, 'team', onToolCall))
     this.teamRunLoopPromise = next
     try {
       return await next
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error('[Agent] runLoop error in teamChat():', msg)
+      onChunk?.(`\n\n_Something went wrong: ${msg}_`)
+      return ''
     } finally {
       if (this.teamRunLoopPromise === next) this.teamRunLoopPromise = null
     }
@@ -907,7 +972,7 @@ export class Agent {
     context: ToolContext = 'chat',
     onToolCall?: (tool: string, label: string) => void
   ): Promise<string> {
-    // Parallelize: tool fetching, settings read, and memory auto-search are independent
+    // Parallelize: tool fetching and settings read are independent
     const [{ tools: allExternalTools, serverMap }, settings] = await Promise.all([
       this.mcpManager.getAllTools(),
       readSettings(this.dataDir),
@@ -957,9 +1022,8 @@ export class Agent {
 
     // Model routing: Haiku for background tasks, user's power model for everything else
     const HAIKU = 'claude-haiku-4-5-20251001'
-    const useHaikuForResearch = this.activeSkillTools.has('exa')
-    const currentModel = (context === 'heartbeat' || context === 'team' || useHaikuForResearch) ? HAIKU : settings.powerModel
-    const maxTokens = context === 'heartbeat' ? 512 : 16000
+    const currentModel = (context === 'heartbeat' || context === 'team') ? HAIKU : settings.powerModel
+    const maxTokens = context === 'heartbeat' ? 2048 : 16000
 
     console.log(`[Agent] Starting ${context} on ${currentModel} (max_tokens: ${maxTokens})`)
 
@@ -971,53 +1035,44 @@ export class Agent {
     const lastUserMsg = history.filter(m => m.role === 'user').at(-1)
     const userText = typeof lastUserMsg?.content === 'string' ? lastUserMsg.content : ''
 
+
     // Tools array is 100% stable — external tools go through call_external_tool proxy.
     // This means tools never change between API calls, so the cache prefix stays warm.
     const isBackground = context === 'heartbeat'
     const contextTools = getInternalTools(context, this.activeSkillTools, !!this.teamClient)
-    const stableTools = [...contextTools, ...exaTools]
+    // Add research tool when Exa is available — uses parallel Haiku sub-agents
+    const researchTool: Anthropic.Tool[] = exaTools.length > 0 ? [{
+      name: 'research',
+      description: 'Parallel web research. Provide multiple search queries — each runs simultaneously via a sub-agent. Returns combined results. Use for broad research; use exa directly for quick single lookups.',
+      input_schema: {
+        type: 'object' as const,
+        properties: {
+          queries: { type: 'array', items: { type: 'string' }, description: 'Search queries to run in parallel (3-5 recommended). Each should target a different angle.' },
+        },
+        required: ['queries']
+      }
+    }] : []
+    const stableTools = [...contextTools, ...exaTools, ...researchTool].map(trimToolSchema)
     console.log(`[Agent] Tools available: ${stableTools.map(t => t.name).join(', ')}`)
 
     let finalText = ''
     let turn = 0
     let lastText = ''
 
-    // Parallelize memory auto-search with history processing — both are independent
-    const memorySearchPromise = (userText && userText.length > 10 && (context === 'chat' || context === 'team') && this.mcpManager.isConnected('memory'))
-      ? this.mcpManager.callTool('memory', 'search_memory', { query: userText, topK: 2 }).catch((err: any) => {
-          console.warn('[Agent] Memory auto-search failed:', err.message)
-          return ''
-        })
-      : Promise.resolve('')
-
     // Snapshot the history BEFORE tool loops begin.
     // During tool loops, new messages (tool_use + tool_result) are appended to this snapshot
     // instead of re-calling selectHistory(), which would shift the sliding window.
     // The cache breakpoint stays at a fixed position in the snapshot — the "book" stays frozen.
-    const baseMessages = this.compactToolResults(this.sanitizeHistory(this.selectHistory(userText, history)))
+    const selectedHistory = this.selectHistory(userText, history)
+    const baseMessages = this.compactToolResults(this.sanitizeHistory(selectedHistory))
+    const totalChars = baseMessages.reduce((sum, m) => {
+      if (typeof m.content === 'string') return sum + m.content.length
+      if (Array.isArray(m.content)) return sum + (m.content as any[]).reduce((s: number, b: any) => s + (b.text?.length || b.content?.length || 0), 0)
+      return sum
+    }, 0)
+    console.log(`[Agent] History: ${history.length} total msgs → ${selectedHistory.length} selected → ${baseMessages.length} after compact | ~${totalChars} chars (~${Math.round(totalChars / 4)} tokens)`)
 
-    // Resolve memory search (ran in parallel with history processing above)
-    let memoryContext = ''
-    const raw = await memorySearchPromise
-    if (raw && raw.trim() && raw !== '[]' && !raw.startsWith('[Error')) {
-      const filtered = filterAutoInjectResults(raw, ['setup.md'])
-      const snippets = filtered ? extractSnippets(filtered, userText, 600) : null
-      if (snippets) {
-        memoryContext = `[Memory context — auto-retrieved from your notes, not part of this conversation. Use if relevant, ignore if not.]\n${snippets}`
-        console.log(`[Agent] Memory auto-search injected ${snippets.length} chars`)
-      }
-    }
-
-    // Inject memory context into the last user message (after cache breakpoints)
-    if (memoryContext && baseMessages.length > 0) {
-      const lastIdx = baseMessages.length - 1
-      const last = baseMessages[lastIdx]
-      if (last.role === 'user' && typeof last.content === 'string') {
-        baseMessages[lastIdx] = { ...last, content: `${memoryContext}\n\n${last.content}` }
-      }
-    }
-
-    const cacheBreakpointIdx = baseMessages.length >= 2 ? baseMessages.length - 2 : -1
+    const cacheBreakpointIdx = baseMessages.length >= 1 ? baseMessages.length - 1 : -1
     // Tool loop messages accumulate here — appended AFTER the breakpoint
     const loopMessages: Anthropic.MessageParam[] = []
 
@@ -1025,6 +1080,7 @@ export class Agent {
     const searchCache = new Map<string, { matches: Anthropic.Tool[]; schemas: { tool: string; params: string[]; score: number }[] }>()
 
     this.stopped = false
+
 
     while (true) {
       // Check for stop
@@ -1055,23 +1111,29 @@ export class Agent {
       let retryDelay = 5000
 
       turn++
+      if (turn > 200) {
+        console.error('[Agent] Max turns (200) reached — breaking to prevent infinite loop')
+        onChunk?.('\n\n_Reached maximum turn limit. Please start a new message._')
+        await saveHistory()
+        return lastText || '_Reached maximum turn limit._'
+      }
       const t0 = Date.now()
       while (true) {
         try {
-          const stream = this.anthropic.messages.stream({
-            model: currentModel,
-            max_tokens: maxTokens,
-            system: isBackground
-              ? [{ type: 'text', text: systemPrompt }]
-              : [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral', ttl: '5m' } as any }],
-            tools: stableTools as any,
-            messages: this.addMessageCacheBreakpoint(
+          const apiMessages = this.addMessageCacheBreakpoint(
               [...baseMessages, ...loopMessages],
               isBackground,
               cacheBreakpointIdx >= 0 ? cacheBreakpointIdx : undefined,
               '5m'
-            ) as any,
-            // Note: cache_control goes on content blocks (system, tools), not request body
+            ) as any
+          const stream = this.anthropic.messages.stream({
+            model: currentModel,
+            max_tokens: maxTokens,
+            system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral', ttl: '5m' } as any }],
+            tools: stableTools.length > 0
+              ? [...stableTools.slice(0, -1), { ...stableTools[stableTools.length - 1], cache_control: { type: 'ephemeral', ttl: '5m' } }] as any
+              : [] as any,
+            messages: apiMessages,
           } as any)
           this.activeStream = stream
           stream.on('text', (text) => {
@@ -1176,7 +1238,9 @@ export class Agent {
 
         // Execute tool calls in parallel — Claude only emits multiple tool_use
         // blocks in one response when they're independent, so this is safe.
+        // Each call has its own try/catch so one failure doesn't abort the batch.
         const toolCallResults = await Promise.all(toolBlocks.map(async (block): Promise<string> => {
+          try {
           let result: string
 
           if (block.name === 'get_current_time') {
@@ -1241,46 +1305,37 @@ export class Agent {
               const hitIntegrations = new Set(
                 matches.map(t => extractIntegration(serverMap.get(t.name) || '', t.name)).filter(Boolean)
               )
+              console.log(`[Agent] search_tools("${query}") → ${matches.length} matches, integrations: ${[...hitIntegrations].join(', ') || 'none'}, result size: ${result.length} chars`)
               if (hitIntegrations.size > 0) {
-                const siblings = searchableTools.filter(t => {
-                  if (matchedNames.has(t.name)) return false
-                  const integ = extractIntegration(serverMap.get(t.name) || '', t.name)
-                  return hitIntegrations.has(integ)
-                })
-                if (siblings.length > 0) {
-                  const integNames = [...hitIntegrations].join(', ')
-                  result += `\n\nAlso available from ${integNames} (call directly, no need to search again):\n` +
-                    siblings.map(t => `- ${t.name}: ${(t.description ?? '').slice(0, 100)}`).join('\n')
-                  console.log(`[Agent] Bundled ${siblings.length} sibling tools from ${integNames}`)
-                }
+
+                // Auto-inject integration notes (only if notes exist) — parallel reads
+                const notesDir = join(this.dataDir, 'integration-notes')
+                const noteResults = await Promise.all(
+                  [...hitIntegrations].map(async (integ) => {
+                    try {
+                      const content = await readFile(join(notesDir, `${integ.replace(/[^a-z0-9_-]/gi, '_')}.txt`), 'utf-8')
+                      return content.trim() ? `[${integ} notes]: ${content.trim()}` : null
+                    } catch { return null }
+                  })
+                )
+                const noteLines = noteResults.filter((n): n is string => n !== null)
+                if (noteLines.length > 0) result += '\n\n' + noteLines.join('\n')
               }
+
             }
 
-            // Auto-inject spreadsheet skill when Sheets/Excel tools are in results
+            // Auto-inject spreadsheet skill + tool log context — parallel
             const hasSpreadsheetTools = matches.some(t => t.name.startsWith('GOOGLESHEETS_') || t.name.startsWith('EXCEL_'))
-            if (hasSpreadsheetTools) {
-              const skill = await loadSkill(this.dataDir, 'spreadsheet-pro')
-              if (skill) {
-                result += `\n\n[IMPORTANT — Spreadsheet Guide]\n${skill.instructions}\n[/Guide]`
-              }
+            const [spreadsheetSkill, logResults] = await Promise.all([
+              hasSpreadsheetTools ? loadSkill(this.dataDir, 'spreadsheet-pro') : Promise.resolve(null),
+              input.context ? searchToolLogs(this.dataDir, input.context) : Promise.resolve(null),
+            ])
+            if (spreadsheetSkill) {
+              result += `\n\n[IMPORTANT — Spreadsheet Guide]\n${spreadsheetSkill.instructions}\n[/Guide]`
             }
-
-            // Look up context (tool logs + memory) — parallel with no extra embed call
-            if (input.context) {
-              const [logResults, memoryResult] = await Promise.all([
-                searchToolLogs(this.dataDir, input.context),
-                this.mcpManager.callTool('memory', 'search_memory', { query: input.context, topK: 3 }).catch(() => '')
-              ])
-              const hasLogs = logResults && logResults.length > 0
-              const hasMem = memoryResult && memoryResult.trim()
-              if (hasLogs || hasMem) {
-                result += `\n\nContext for "${input.context}":`
-                if (hasLogs) result += '\n' + logResults.map(l => `- ${l}`).join('\n')
-                if (hasMem) result += '\n' + memoryResult
-              } else {
-                result += `\n\nNo context found for "${input.context}".`
-              }
-              console.log(`[Agent] Context: ${hasLogs ? logResults!.length + ' logs' : 'no logs'}, ${hasMem ? 'memory found' : 'no memory'}`)
+            if (logResults && logResults.length > 0) {
+              result += `\n\nTool log context for "${input.context}":\n` + logResults.map(l => `- ${l}`).join('\n')
+              console.log(`[Agent] Context: ${logResults.length} tool logs`)
             }
 
             console.log(`[Agent] search_tools("${query}"${input.context ? `, context: "${input.context}"` : ''}) → ${matches.map(t => t.name).join(', ')}`)
@@ -1292,6 +1347,23 @@ export class Agent {
           } else if (block.name === 'add_done_item') {
             this.queue.addDone((block.input as { description: string }).description)
             result = 'Added to done list.'
+
+          } else if (block.name === 'integration_notes') {
+            const input = block.input as { action: string; integration: string; notes?: string }
+            const notesDir = join(this.dataDir, 'integration-notes')
+            const notesFile = join(notesDir, `${input.integration.replace(/[^a-z0-9_-]/gi, '_')}.txt`)
+            if (input.action === 'write') {
+              await mkdir(notesDir, { recursive: true })
+              const content = (input.notes || '').slice(0, 500)
+              await writeFile(notesFile, content, 'utf-8')
+              result = `Notes saved for ${input.integration}.`
+              console.log(`[Agent] Wrote integration notes for ${input.integration} (${content.length} chars)`)
+            } else {
+              try {
+                result = await readFile(notesFile, 'utf-8')
+                if (!result.trim()) result = '(empty)'
+              } catch { result = '(none)' }
+            }
 
           } else if (block.name === 'update_settings') {
             const patch = block.input as Partial<AgentSettings>
@@ -1574,6 +1646,71 @@ export class Agent {
               } catch (err: any) {
                 result = `Memory error: ${err.message}`
               }
+            } else if (action === 'delete' && Array.isArray(input.files) && input.files.length > 0) {
+              // Batch delete — multiple files in parallel
+              try {
+                const files = input.files as string[]
+                const results = await Promise.all(
+                  files.map(f =>
+                    this.mcpManager.callTool('memory', 'delete_memory', { path: f })
+                      .then(() => `${f}: deleted`)
+                      .catch((err: any) => `${f}: ${err.message}`)
+                  )
+                )
+                result = results.join('\n')
+                console.log(`[Agent] memory batch-delete: ${files.length} files`)
+              } catch (err: any) {
+                result = `Memory error: ${err.message}`
+              }
+            } else if (action === 'edit' && Array.isArray(input.edits) && input.edits.length > 0) {
+              // Batch edit — multiple sections in parallel
+              try {
+                const edits = input.edits as { file: string; old_content: string; new_content: string }[]
+                const results = await Promise.all(
+                  edits.map(e =>
+                    this.mcpManager.callTool('memory', 'edit_memory', {
+                      path: e.file, old_content: e.old_content, new_content: e.new_content
+                    })
+                      .then((r: string) => `${e.file}: ${r}`)
+                      .catch((err: any) => `${e.file}: ${err.message}`)
+                  )
+                )
+                result = results.join('\n')
+                console.log(`[Agent] memory batch-edit: ${edits.length} edits`)
+              } catch (err: any) {
+                result = `Memory error: ${err.message}`
+              }
+            } else if (action === 'search' && Array.isArray(input.queries) && input.queries.length > 0) {
+              // Multi-query parallel search — run all queries simultaneously, dedupe results
+              try {
+                const queries = input.queries as string[]
+                const topK = (input.top_k as number) ?? 3
+                const allResults = await Promise.all(
+                  queries.map(q =>
+                    this.mcpManager.callTool('memory', 'search_memory', { query: q, topK })
+                      .catch(() => '[]')
+                  )
+                )
+                // Parse, dedupe by path+chunkIndex, keep best score
+                const seen = new Map<string, { path: string; chunkIndex: number; content: string; score: number }>()
+                for (const raw of allResults) {
+                  try {
+                    const items: { path: string; chunkIndex: number; content: string; score: number }[] = JSON.parse(raw)
+                    for (const item of items) {
+                      const key = `${item.path}:${item.chunkIndex}`
+                      const existing = seen.get(key)
+                      if (!existing || item.score < existing.score) {
+                        seen.set(key, item)
+                      }
+                    }
+                  } catch { /* skip unparseable */ }
+                }
+                const merged = [...seen.values()].sort((a, b) => a.score - b.score).slice(0, topK * 2)
+                result = JSON.stringify(merged, null, 2)
+                console.log(`[Agent] memory multi-search: ${queries.length} queries → ${merged.length} deduplicated results`)
+              } catch (err: any) {
+                result = `Memory error: ${err.message}`
+              }
             } else {
               const mcpTool = MEMORY_MCP_MAP[action]
               if (!mcpTool) {
@@ -1613,6 +1750,37 @@ export class Agent {
             } catch (err: any) {
               result = `Document creation failed: ${err.message}`
               console.error('[Agent] Document creation error:', err)
+            }
+
+          } else if (block.name === 'research') {
+            // Parallel Haiku sub-agent research
+            const input = block.input as { queries: string[] }
+            const queries = (input.queries || []).slice(0, 5)
+            onToolCall?.('research', `Researching ${queries.length} queries`)
+            try {
+              result = await runResearch(queries, this.anthropic, this.mcpManager, this.dataDir, (progress) => {
+                // Send detailed per-agent progress to frontend
+                this.onResearchProgress?.(progress.map(p => ({
+                  query: p.query,
+                  status: p.status,
+                  detail: p.detail
+                })))
+                // Also update the tool label summary
+                const done = progress.filter(p => p.status === 'done').length
+                const searching = progress.filter(p => p.status === 'searching').length
+                const branching = progress.filter(p => p.status === 'branching').length
+                const enriching = progress.filter(p => p.status === 'enriching').length
+                const parts: string[] = []
+                if (searching > 0) parts.push(`${searching} searching`)
+                if (branching > 0) parts.push(`${branching} branching out`)
+                if (enriching > 0) parts.push(`${enriching} enriching`)
+                if (done > 0) parts.push(`${done} done`)
+                onToolCall?.('research', `Researching: ${parts.join(', ')}`)
+              })
+              console.log(`[Agent] research (${queries.length} queries) → ${result.length} chars`)
+            } catch (err: any) {
+              result = `Research error: ${err.message}`
+              console.error('[Agent] research error:', err.message)
             }
 
           } else if (serverMap.get(block.name) === 'exa') {
@@ -1715,6 +1883,12 @@ export class Agent {
                   ? raw.slice(0, MAX_TOOL_RESULT) + `\n\n[Truncated: ${raw.length - MAX_TOOL_RESULT} chars omitted from history to save context]`
                   : raw
                 logToolCall(this.dataDir, serverName, extToolName, toolInput, result)
+                // Track Composio action usage
+                recordUsage(this.dataDir, {
+                  category: 'composio', model: serverName, actions: 1,
+                  inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0,
+                  timestamp: new Date().toISOString(),
+                }).catch(err => console.error('[Agent] Composio usage tracking failed:', (err as Error).message))
 
                 // Auto-ingest files returned by Composio tools into CoAgent file store
                 try {
@@ -1871,6 +2045,11 @@ export class Agent {
           }
 
           return result
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err)
+            console.error(`[Agent] Tool "${block.name}" threw unexpectedly:`, msg)
+            return `Tool error: ${msg}`
+          }
         }))
 
         for (let i = 0; i < toolBlocks.length; i++) {
@@ -1905,7 +2084,7 @@ export class Agent {
   }
 
   private buildTriggerMessage(trigger: AgentTrigger): string {
-    const time = new Date().toLocaleString('en-US', { timeStyle: 'short', dateStyle: 'medium' })
+    const time = new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' })
     if (trigger.source === 'heartbeat') {
       const events = (trigger.payload as any)?.events as { trigger: string; event: Record<string, unknown>; receivedAt: string }[] | undefined
       const eventsSection = events && events.length > 0
@@ -1916,7 +2095,7 @@ export class Agent {
         : ''
       const hasEvents = (events && events.length > 0) || this.missedEvents.length > 0
       if (this.missedEvents.length > 0) this.missedEvents = []
-      return `[Heartbeat — ${time}]${eventsSection}${missedSection}\n\nRead heartbeat.md for instructions.${hasEvents ? ' Check contacts.md for known people.' : ''} ${hasEvents ? 'Summarize what needs attention and act on it.' : 'If nothing needs attention, reply "All clear."'}`
+      return `[Heartbeat — ${time}]${eventsSection}${missedSection}\n\nRead heartbeat.md for instructions.${hasEvents ? ' Check contacts.md for known people.' : ''} ${hasEvents ? 'For actionable items from known contacts, call queue_approval (do NOT just say you queued — actually call the tool). Then summarize.' : 'If nothing needs attention, reply "All clear."'}`
     }
     if (trigger.source === 'todo_due' || trigger.source === 'task_due') {
       const payload = trigger.payload as any
@@ -2014,7 +2193,7 @@ export class Agent {
     if (messages.length <= 4) return messages
 
     // Find the last TWO user messages that contain plain text (not just tool_results).
-    // Keep 2-turn window so users can ask follow-ups about previous results.
+    // Keep 2-turn window of full-fidelity tool results.
     let userTurnCount = 0
     let compactBefore = 0
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -2031,63 +2210,58 @@ export class Agent {
 
     if (compactBefore === 0) return messages
 
-    const TRUNCATE_AT = 200
-    let compactedCount = 0
-    let savedChars = 0
-
-    // Build set of tool_use_ids that belong to search_tools — their results contain
-    // full schemas. Old ones (before compactBefore) get truncated to tool names only;
-    // recent ones are left intact via the idx >= compactBefore guard below.
-    const schemaToolUseIds = new Set<string>()
     // Skill results must NEVER be compacted — they contain instructions the agent follows across multiple turns
     const skillToolUseIds = new Set<string>()
     for (let i = 0; i < compactBefore; i++) {
       const msg = messages[i]
       if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue
       for (const block of msg.content as any[]) {
-        if (block.type === 'tool_use' && block.name === 'search_tools') {
-          schemaToolUseIds.add(block.id)
-        }
         if (block.type === 'tool_use' && block.name === 'skills' && (block.input as any)?.action === 'execute') {
           skillToolUseIds.add(block.id)
         }
       }
     }
 
-    const result = messages.map((msg, idx) => {
-      if (idx >= compactBefore) return msg
-      if (msg.role !== 'user' || !Array.isArray(msg.content)) return msg
+    let droppedBlocks = 0
+    let savedChars = 0
 
-      const hasToolResult = (msg.content as any[]).some(b => b.type === 'tool_result')
-      if (!hasToolResult) return msg
+    // For old turns: strip tool_use and tool_result blocks entirely, keep only text.
+    // The assistant's text response already contains the processed info.
+    const result: Anthropic.MessageParam[] = []
+    for (let idx = 0; idx < messages.length; idx++) {
+      const msg = messages[idx]
+      if (idx >= compactBefore) { result.push(msg); continue }
 
-      const compacted = (msg.content as any[]).map(block => {
-        if (block.type !== 'tool_result') return block
-        // Never compact skill instructions — agent needs them across multiple turns
-        if (skillToolUseIds.has(block.tool_use_id)) return block
-        // For old search_tools results, keep only the first line (tool names summary),
-        // dropping full parameter schemas to prevent unbounded token accumulation.
-        if (schemaToolUseIds.has(block.tool_use_id)) {
-          const content = typeof block.content === 'string' ? block.content : ''
-          const firstLine = content.split('\n')[0] ?? ''
-          if (content.length > firstLine.length) {
-            compactedCount++
-            savedChars += content.length - firstLine.length
-            return { ...block, content: firstLine + '\n[schemas omitted — see recent search_tools call]' }
-          }
-          return block
+      if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+        const textBlocks = (msg.content as any[]).filter(b => b.type !== 'tool_use')
+        if (textBlocks.length > 0) {
+          const stripped = (msg.content as any[]).length - textBlocks.length
+          if (stripped > 0) { droppedBlocks += stripped; savedChars += JSON.stringify(msg.content).length - JSON.stringify(textBlocks).length }
+          result.push({ ...msg, content: textBlocks })
         }
-        const content = typeof block.content === 'string' ? block.content : ''
-        if (content.length <= TRUNCATE_AT) return block
-        compactedCount++
-        savedChars += content.length - TRUNCATE_AT
-        return { ...block, content: content.slice(0, TRUNCATE_AT) + '\n[…truncated]' }
-      })
-      return { ...msg, content: compacted }
-    })
+        // If assistant message was ONLY tool_use blocks (no text), drop it entirely
+        continue
+      }
 
-    if (compactedCount > 0) {
-      console.log(`[Agent] Compacted ${compactedCount} tool result(s) — saved ~${savedChars} chars (~${Math.round(savedChars / 4)} tokens)`)
+      if (msg.role === 'user' && Array.isArray(msg.content)) {
+        const kept = (msg.content as any[]).filter(b => {
+          if (b.type !== 'tool_result') return true
+          if (skillToolUseIds.has(b.tool_use_id)) return true
+          droppedBlocks++
+          savedChars += (b.content?.length || 0)
+          return false
+        })
+        if (kept.length > 0) {
+          result.push({ ...msg, content: kept })
+        }
+        continue
+      }
+
+      result.push(msg)
+    }
+
+    if (droppedBlocks > 0) {
+      console.log(`[Agent] Stripped ${droppedBlocks} old tool blocks — saved ~${savedChars} chars (~${Math.round(savedChars / 4)} tokens)`)
     }
 
     return result

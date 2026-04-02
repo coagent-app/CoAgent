@@ -5,6 +5,18 @@ import type { CalendarEntry, TodoItem } from '@coagent/shared'
 
 type NewCalendarEntry = Omit<CalendarEntry, 'id' | 'createdAt'>
 
+/**
+ * Parse a naive datetime string (e.g., "2026-04-01T10:00:00") as local time.
+ * For date-only strings, defaults to 9:00 AM local (start of business).
+ * JS `new Date(isoWithTime)` already treats no-zone strings as local, but
+ * date-only strings ("2026-04-01") are treated as UTC — this normalizes both.
+ */
+export function parseLocalDate(dateStr: string, fallbackTime = '09:00:00'): Date {
+  if (dateStr.includes('T')) return new Date(dateStr)
+  // Date-only: append time so JS treats it as local, not UTC
+  return new Date(dateStr + 'T' + fallbackTime)
+}
+
 export class CalendarStore {
   private entries: CalendarEntry[] = []
   private filePath: string
@@ -16,6 +28,7 @@ export class CalendarStore {
     mkdirSync(dataDir, { recursive: true })
     this.entries = this.load()
     this.migrate()
+    this.purgeCompleted()
   }
 
   private load(): CalendarEntry[] {
@@ -96,15 +109,31 @@ export class CalendarStore {
   }
 
   getAll(): CalendarEntry[] {
-    return [...this.entries].sort((a, b) => {
-      const typeOrder: Record<string, number> = { routine: 0, task: 1, followup: 2, event: 3 }
-      const aOrder = typeOrder[a.type] ?? 4
-      const bOrder = typeOrder[b.type] ?? 4
-      if (aOrder !== bOrder) return aOrder - bOrder
-      const aTime = a.start || a.due || a.cron || ''
-      const bTime = b.start || b.due || b.cron || ''
-      return aTime.localeCompare(bTime)
-    })
+    // Google events filtered to current week only; local entries always included
+    const now = new Date()
+    const weekStart = new Date(now)
+    weekStart.setDate(now.getDate() - now.getDay()) // Sunday
+    weekStart.setHours(0, 0, 0, 0)
+    const weekEnd = new Date(weekStart)
+    weekEnd.setDate(weekStart.getDate() + 7)
+
+    return [...this.entries]
+      .filter(e => {
+        if (e.source !== 'google') return true
+        const start = e.start || e.end
+        if (!start) return true
+        const d = new Date(start)
+        return d >= weekStart && d < weekEnd
+      })
+      .sort((a, b) => {
+        const typeOrder: Record<string, number> = { routine: 0, task: 1, followup: 2, event: 3 }
+        const aOrder = typeOrder[a.type] ?? 4
+        const bOrder = typeOrder[b.type] ?? 4
+        if (aOrder !== bOrder) return aOrder - bOrder
+        const aTime = a.start || a.due || a.cron || ''
+        const bTime = b.start || b.due || b.cron || ''
+        return aTime.localeCompare(bTime)
+      })
   }
 
   getByType(type: CalendarEntry['type']): CalendarEntry[] {
@@ -118,8 +147,7 @@ export class CalendarStore {
       .filter(e => (e.type === 'task' || e.type === 'followup') && !e.completed && e.enabled)
       .filter(e => {
         if (!e.due) return true
-        const due = e.due.includes('T') ? new Date(e.due) : new Date(e.due + 'T23:59:59')
-        return due <= now
+        return parseLocalDate(e.due) <= now
       })
   }
 
@@ -132,7 +160,6 @@ export class CalendarStore {
   setGoogleEvents(events: CalendarEntry[]): void {
     this.entries = this.entries.filter(e => e.source !== 'google')
     this.entries.push(...events)
-    this.pruneOldGoogleEvents()
     this.save()
   }
 
@@ -145,22 +172,18 @@ export class CalendarStore {
       if (idx >= 0) this.entries[idx] = event
       else this.entries.push(event)
     }
-    this.pruneOldGoogleEvents()
     this.save()
   }
 
-  /** Drop Google events that ended more than 1 hour ago */
-  private pruneOldGoogleEvents(): void {
+  /** Get entries filtered for agent context — excludes Google events that ended more than 1 hour ago */
+  getAgentView(): CalendarEntry[] {
     const cutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString()
-    const before = this.entries.length
-    this.entries = this.entries.filter(e => {
+    return this.entries.filter(e => {
       if (e.source !== 'google') return true
       const end = e.end || e.start
       if (!end) return true
       return end >= cutoff
     })
-    const pruned = before - this.entries.length
-    if (pruned > 0) console.log(`[Calendar] Pruned ${pruned} past Google events`)
   }
 
   /** Remove all Google events (for disconnect) */
@@ -175,9 +198,25 @@ export class CalendarStore {
     let nearest: Date | null = null
     for (const entry of this.entries) {
       if ((entry.type !== 'task' && entry.type !== 'followup') || entry.completed || !entry.due) continue
-      const due = entry.due.includes('T') ? new Date(entry.due) : new Date(entry.due + 'T00:00:00')
+      const due = parseLocalDate(entry.due)
       if (due > now && (nearest === null || due < nearest)) nearest = due
     }
     return nearest
+  }
+
+  /** Remove completed tasks/followups older than 7 days */
+  private purgeCompleted(): void {
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000
+    const before = this.entries.length
+    this.entries = this.entries.filter(e => {
+      if (!e.completed) return true
+      const created = new Date(e.createdAt).getTime()
+      return created > cutoff
+    })
+    const removed = before - this.entries.length
+    if (removed > 0) {
+      this.save()
+      console.log(`[Calendar] Purged ${removed} completed entries older than 7 days`)
+    }
   }
 }

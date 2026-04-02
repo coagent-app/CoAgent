@@ -3,6 +3,7 @@ import { existsSync } from 'fs'
 import { join } from 'path'
 import WebSocket from 'ws'
 import { getOpenAIProxy } from './auth.js'
+import { recordUsageGlobal } from './usage-tracker.js'
 
 const EVENT_STORE_FILE = 'event-store.json'
 const EVENT_TTL_MS = 60 * 60 * 1000 // 1h
@@ -58,7 +59,15 @@ async function embedText(text: string): Promise<number[]> {
     headers: { Authorization: proxy.authHeader, 'Content-Type': 'application/json' },
     body: JSON.stringify({ input: text, model: 'text-embedding-3-small' })
   })
-  const data = await res.json() as { data: { embedding: number[] }[] }
+  const data = await res.json() as { data: { embedding: number[] }[]; usage?: { total_tokens?: number } }
+  // Track embedding usage — total_tokens from API response
+  if (data.usage?.total_tokens) {
+    recordUsageGlobal({
+      category: 'embedding', model: 'text-embedding-3-small', embeddingTokens: data.usage.total_tokens,
+      inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0,
+      timestamp: new Date().toISOString(),
+    }).catch(err => console.error('[RelayClient] Embed usage tracking failed:', err.message))
+  }
   return data.data[0].embedding
 }
 
@@ -251,6 +260,9 @@ export class RelayClient {
   private connectedAt: number | null = null
   private stopped = false
 
+  /** Called when the relay closes with code 4008 (subscription expired). */
+  onRevoked?: () => void
+
   constructor(dataDir: string) {
     this.dataDir = dataDir
     this.relayUrl = this.buildRelayUrl()
@@ -351,9 +363,14 @@ export class RelayClient {
       }
     })
 
-    ws.on('close', () => {
+    ws.on('close', (code) => {
       if (this.pingInterval) clearInterval(this.pingInterval)
       if (this.stopped) return
+      if (code === 4008) {
+        console.error('[Relay] Subscription expired — not reconnecting')
+        this.onRevoked?.()
+        return
+      }
       console.log('[Relay] Disconnected')
       this.localWs?.terminate()
       this.localWs = null

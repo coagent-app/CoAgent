@@ -10,7 +10,10 @@ let analyser: AnalyserNode | null = null
 let speechCheckInterval: ReturnType<typeof setInterval> | null = null
 let fnUnlisteners: UnlistenFn[] = []
 let currentHotkey: string | null = null
-let locked = false // double-tap fn locks listening on
+let locked = false // tap-lock: first tap locks listening on, second tap sends
+let pressTime = 0 // track press timing for hold-to-release vs tap detection
+let recordingReady: Promise<void> | null = null // resolves when startRecording completes
+const HOLD_THRESHOLD_MS = 400 // hold longer than this = hold-to-release mode
 let volumeEmitInterval: ReturnType<typeof setInterval> | null = null
 let cachedStream: MediaStream | null = null
 
@@ -136,10 +139,13 @@ let ttsAudio: HTMLAudioElement | null = null
 export function showVoiceSummary(_summary: string) {
   // Keep showing whatever was last displayed, then hide after a short delay
   responseAccum = ''
+  responseLocked = false
   onStateChange?.('hidden')
   ;(window as any).__voiceActive = false // voice session done
-  // If TTS audio is playing, wait for it to finish before hiding
-  if (ttsAudio && !ttsAudio.ended && !ttsAudio.paused) {
+  // If TTS audio is playing or queued, wait for it to finish before hiding
+  if (ttsPlaying || ttsQueue.length > 0) {
+    ttsOnAllDone = () => { ttsOnAllDone = null; setTimeout(() => hidePill(), 500) }
+  } else if (ttsAudio && !ttsAudio.ended && !ttsAudio.paused) {
     ttsAudio.onended = () => { ttsAudio = null; setTimeout(() => hidePill(), 500) }
   } else {
     setTimeout(() => hidePill(), 2000)
@@ -155,8 +161,11 @@ export function playTtsAudio(base64Mp3: string) {
   audio.play().catch(err => console.error('[Voice] TTS playback failed:', err))
 }
 
-// Streaming TTS — accumulate chunks, play complete audio on done
+// ── Streaming TTS — queue segments, play each as it completes ─────────────
 let ttsChunks: Uint8Array[] = []
+let ttsQueue: Blob[] = []
+let ttsPlaying = false
+let ttsOnAllDone: (() => void) | null = null
 
 export function handleTtsChunk(base64Chunk: string, _seq: number) {
   const bytes = Uint8Array.from(atob(base64Chunk), c => c.charCodeAt(0))
@@ -165,21 +174,52 @@ export function handleTtsChunk(base64Chunk: string, _seq: number) {
 
 export function cancelTts() {
   ttsChunks = []
+  ttsQueue = []
+  ttsPlaying = false
+  ttsOnAllDone = null
   if (ttsAudio) { ttsAudio.pause(); ttsAudio = null }
 }
 
-export function handleTtsDone() {
-  if (ttsChunks.length === 0) return
-  const fullBlob = new Blob(ttsChunks as BlobPart[], { type: 'audio/mpeg' })
-  const fullUrl = URL.createObjectURL(fullBlob)
-  ttsChunks = []
-
+function playNextTtsSegment() {
+  if (ttsQueue.length === 0) {
+    ttsPlaying = false
+    ttsOnAllDone?.()
+    return
+  }
+  ttsPlaying = true
+  const blob = ttsQueue.shift()!
+  const url = URL.createObjectURL(blob)
   if (ttsAudio) { ttsAudio.pause(); ttsAudio = null }
-  const audio = new Audio(fullUrl)
+  const audio = new Audio(url)
   ttsAudio = audio
-  audio.onended = () => { ttsAudio = null; URL.revokeObjectURL(fullUrl) }
-  audio.play().catch(err => console.error('[Voice] TTS playback failed:', err))
-  console.log('[Voice] TTS playing (%d bytes)', fullBlob.size)
+  audio.onended = () => {
+    ttsAudio = null
+    URL.revokeObjectURL(url)
+    playNextTtsSegment()
+  }
+  audio.onerror = () => {
+    ttsAudio = null
+    URL.revokeObjectURL(url)
+    playNextTtsSegment()
+  }
+  audio.play().catch(err => {
+    console.error('[Voice] TTS segment playback failed:', err)
+    playNextTtsSegment()
+  })
+}
+
+export function handleTtsDone() {
+  // Called per segment — server sends voice_tts_done after each streamTts() call
+  if (ttsChunks.length === 0) return
+  const segmentBlob = new Blob(ttsChunks as BlobPart[], { type: 'audio/mpeg' })
+  ttsChunks = []
+  ttsQueue.push(segmentBlob)
+  console.log('[Voice] TTS segment ready (%d bytes), queue: %d', segmentBlob.size, ttsQueue.length)
+
+  // Start playing immediately if not already playing
+  if (!ttsPlaying) {
+    playNextTtsSegment()
+  }
 }
 
 // Show tool activity in the pill (e.g. "Reading email...")
@@ -246,7 +286,65 @@ export function cancelVoice() {
   onStateChange?.('hidden')
   ;(window as any).__voiceActive = false
   hidePill()
+  cancelTts()
   console.log('[Voice] Cancelled')
+}
+
+// ── Shared dictation recording (used by ChatPane mic button) ──────────────
+export interface DictationSession {
+  stop: () => Promise<{ base64: string } | null>
+}
+
+export async function startDictation(): Promise<DictationSession> {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+  const chunks: Blob[] = []
+  let hasSpeech = false
+  const startTime = Date.now()
+
+  const ctx = new AudioContext()
+  const source = ctx.createMediaStreamSource(stream)
+  const anal = ctx.createAnalyser()
+  anal.fftSize = 512
+  source.connect(anal)
+  const buf = new Uint8Array(anal.fftSize)
+  const interval = setInterval(() => {
+    anal.getByteTimeDomainData(buf)
+    const peak = buf.reduce((max, v) => Math.max(max, Math.abs(v - 128)), 0)
+    if (peak > 15) hasSpeech = true
+  }, 50)
+
+  const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' })
+  recorder.ondataavailable = (e) => chunks.push(e.data)
+  recorder.start()
+
+  return {
+    stop: () => new Promise((resolve) => {
+      clearInterval(interval)
+      if (recorder.state === 'inactive') {
+        stream.getTracks().forEach(t => t.stop())
+        ctx.close().catch(() => {})
+        resolve(null)
+        return
+      }
+      recorder.onstop = () => {
+        stream.getTracks().forEach(t => t.stop())
+        ctx.close().catch(() => {})
+        const blob = new Blob(chunks, { type: 'audio/webm' })
+        const duration = Date.now() - startTime
+        if (!hasSpeech || blob.size < 1000 || duration < 300) {
+          resolve(null)
+          return
+        }
+        const reader = new FileReader()
+        reader.onloadend = () => {
+          const base64 = (reader.result as string).split(',')[1] ?? ''
+          resolve(base64 ? { base64 } : null)
+        }
+        reader.readAsDataURL(blob)
+      }
+      recorder.stop()
+    })
+  }
 }
 
 
@@ -260,27 +358,48 @@ export async function registerVoiceHotkey(
   onStateChange = stateCallback
 
   if (hotkey === 'fn') {
-    console.log('[Voice] Registering ctrl+fn (toggle mode)')
-    // Toggle: ctrl+fn to start, ctrl+fn again to send.
+    console.log('[Voice] Registering ctrl+fn (hold-to-release + tap-lock)')
+    // Dual mode: hold ctrl+fn to record (release sends), or quick tap to toggle lock.
     // Using combo avoids macOS Globe key emoji/Character Viewer.
     const pressUn = await listen('voice-fn-press', async () => {
-      if (locked) {
-        console.log('[Voice] ctrl+fn — sending recording')
+      pressTime = Date.now()
+      if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+        // Not recording — start on every press (both hold and tap)
+        ;(window as any).__voiceActive = true
+        // Track the promise so release can await it (prevents race condition)
+        recordingReady = startRecording().then(() => { recordingReady = null })
+      }
+      // If already recording (locked from first tap), press is noted; action on release
+    })
+    const releaseUn = await listen('voice-fn-release', async () => {
+      // Wait for recording to be fully initialized before processing release
+      if (recordingReady) await recordingReady
+      if (!mediaRecorder || mediaRecorder.state === 'inactive') return
+      const holdDuration = Date.now() - pressTime
+
+      if (holdDuration >= HOLD_THRESHOLD_MS) {
+        // Hold-to-release: held key long enough → send immediately
         locked = false
         emitTo('voice-pill', 'voice-locked', { locked: false }).catch(() => {})
+        console.log('[Voice] Hold release (%dms) — sending', holdDuration)
+        await stopRecordingAndSend(onAudioReady)
+      } else if (locked) {
+        // Second quick tap (was locked) → stop and send
+        locked = false
+        emitTo('voice-pill', 'voice-locked', { locked: false }).catch(() => {})
+        console.log('[Voice] Second tap — sending')
         await stopRecordingAndSend(onAudioReady)
       } else {
-        console.log('[Voice] ctrl+fn — start recording')
+        // First quick tap → lock recording on (keep listening)
         locked = true
         emitTo('voice-pill', 'voice-locked', { locked: true }).catch(() => {})
-        await startRecording()
+        console.log('[Voice] First tap — locked listening on')
       }
     })
-    const releaseUn = await listen('voice-fn-release', () => {})
     fnUnlisteners = [pressUn, releaseUn]
-    console.log('[Voice] ctrl+fn listeners registered')
+    console.log('[Voice] ctrl+fn listeners registered (hold or double-tap)')
   } else {
-    // Fallback to global shortcut plugin for custom hotkeys
+    // Fallback to global shortcut plugin for custom hotkeys — always hold-to-release
     const { register } = await import('@tauri-apps/plugin-global-shortcut')
     await register(hotkey, async (event) => {
       if (event.state === 'Pressed') await startRecording()

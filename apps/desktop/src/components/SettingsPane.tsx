@@ -166,6 +166,19 @@ function GeneralTab({ settings, onUpdate, relayActive, onActivateRelay }: { sett
 
       <Separator className="my-6 dark:bg-neutral-800" />
 
+      <SectionHeader eyebrow="Instructions" title="Custom instructions" />
+      <FieldRow label="Tell your agent how to behave, what to prioritize, or any context it should always have">
+        <textarea
+          key={s.custom_instructions}
+          className="w-full min-h-[120px] rounded-md border border-input bg-background px-3 py-2 text-[13.5px] text-neutral-800 dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500 focus:outline-none focus:ring-1 focus:ring-ring resize-y"
+          placeholder="e.g. A good lead has $1M+ revenue and runs paid ads. Always follow up within 24 hours. Prefer email over Slack for client communication."
+          defaultValue={s.custom_instructions || ''}
+          onBlur={e => onUpdate({ custom_instructions: e.target.value })}
+        />
+      </FieldRow>
+
+      <Separator className="my-6 dark:bg-neutral-800" />
+
       <SectionHeader eyebrow="Schedule" title="Active hours" />
       <FieldRow label="Active window">
         <div className="flex items-center gap-2">

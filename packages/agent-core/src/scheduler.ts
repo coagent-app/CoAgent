@@ -3,6 +3,7 @@ import { execSync, spawn } from 'child_process'
 import { writeFileSync, readFileSync, unlinkSync } from 'fs'
 import { join } from 'path'
 import type { Agent } from './agent.js'
+import { parseLocalDate } from './calendar-store.js'
 import { purgeEventStore } from './relay-client.js'
 import { readSettings, isActiveNow } from './settings.js'
 import { extractInsights } from './service-logger.js'
@@ -217,7 +218,8 @@ function keepAwakeDuring<T>(promise: Promise<T>): Promise<T> {
 // ── Scheduler ───────────────────────────────────────────────────────────────
 
 export interface SchedulerCallbacks {
-  onHeartbeat?: (status: 'started' | 'done' | 'skipped' | 'escalated', summary?: string) => void
+  onHeartbeat?: (status: 'started' | 'done' | 'skipped' | 'escalated' | 'scheduled', summary?: string, nextAt?: Date) => void
+  onHeartbeatStream?: (type: 'start' | 'chunk' | 'tool' | 'done', data?: any) => void
   onTodoStream?: (type: 'start' | 'chunk' | 'tool' | 'done', data?: any) => void
 }
 
@@ -315,7 +317,7 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
       if (firedTasks.has(item.id)) continue
 
       // Skip tasks overdue by more than 1 hour — stale from a previous session
-      const dueTime = item.due!.includes('T') ? new Date(item.due!) : new Date(item.due! + 'T23:59:59')
+      const dueTime = parseLocalDate(item.due!)
       const overdueMs = Date.now() - dueTime.getTime()
       if (overdueMs > 60 * 60 * 1000) {
         console.log(`[Scheduler] Skipping stale task "${item.label}" (overdue by ${Math.round(overdueMs / 60000)}min) — auto-completing`)
@@ -421,6 +423,8 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
 
   let heartbeatTimer: ReturnType<typeof setTimeout> | null = null
 
+  let heartbeatScheduledAt: number = 0
+
   async function fireHeartbeat(): Promise<void> {
     const settings = await readSettings(dataDir)
     const interval = settings.heartbeat_interval ?? 60
@@ -433,13 +437,39 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
       return
     }
 
+    // Skip stale heartbeats (fired >5 min late, e.g. after sleep/wake)
+    if (heartbeatScheduledAt > 0) {
+      const expectedAt = heartbeatScheduledAt + interval * 60 * 1000
+      const lateBy = Date.now() - expectedAt
+      if (lateBy > 5 * 60 * 1000) {
+        console.log(`[Scheduler] Stale heartbeat (${Math.round(lateBy / 60000)}min late) — skipping`)
+        callbacks?.onHeartbeat?.('skipped')
+        scheduleHeartbeatTimer()
+        return
+      }
+    }
+
+    // Skip if agent is currently processing a user message
+    if (agent.isProcessing) {
+      console.log('[Scheduler] Agent busy with user message — deferring heartbeat')
+      callbacks?.onHeartbeat?.('skipped')
+      scheduleHeartbeatTimer()
+      return
+    }
+
     await purgeEventStore(dataDir).catch((err) =>
       console.error('[Scheduler] Purge failed:', err.message)
     )
 
     callbacks?.onHeartbeat?.('started')
+    callbacks?.onHeartbeatStream?.('start')
     try {
-      await keepAwakeDuring(agent.handleTrigger({ source: 'heartbeat' }))
+      await keepAwakeDuring(agent.handleTrigger(
+        { source: 'heartbeat' },
+        (chunk) => callbacks?.onHeartbeatStream?.('chunk', { text: chunk }),
+        (tool, label) => callbacks?.onHeartbeatStream?.('tool', { tool, label })
+      ))
+      callbacks?.onHeartbeatStream?.('done')
       callbacks?.onHeartbeat?.('done')
     } catch (err: any) {
       console.error('[Scheduler] Heartbeat error:', err.message)
@@ -459,8 +489,10 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
 
       const delay = interval * 60 * 1000
       const wakeAt = new Date(Date.now() + delay)
+      heartbeatScheduledAt = Date.now()
       console.log(`[Scheduler] Next heartbeat in ${interval}min at ${wakeAt.toLocaleString()}`)
       heartbeatTimer = setTimeout(() => fireHeartbeat(), delay)
+      callbacks?.onHeartbeat?.('scheduled', undefined, wakeAt)
 
       // Wake at whichever is sooner: heartbeat, next task, or 3 AM nightly job
       const nextTask = agent.calendar.getNextTaskTime()
@@ -491,7 +523,7 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
     syncRoutineTimers()
     await fireDueTasks()
     scheduleHeartbeatTimer()
-  })()
+  })().catch(err => console.error('[Scheduler] Startup error:', (err as Error).message))
 
   return { rescheduleHeartbeat: scheduleHeartbeatTimer }
 }

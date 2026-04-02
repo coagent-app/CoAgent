@@ -4,7 +4,7 @@ import { existsSync } from 'fs'
 import { join, extname, basename, dirname } from 'path'
 import type { FileEntry } from '@coagent/shared'
 import { getRelayConfig } from './auth.js'
-import { recordUsage } from './usage-tracker.js'
+import { recordUsage, recordUsageGlobal } from './usage-tracker.js'
 
 const INDEX_FILE = 'file-index.json'
 const FILES_DIR = 'files'
@@ -260,9 +260,17 @@ async function embedText(text: string): Promise<number[]> {
     body: JSON.stringify({ input: [text], model: 'text-embedding-3-small', dimensions: 512 })
   })
   if (!res.ok) throw new Error(`Embedding error: ${res.status} ${res.statusText}`)
-  const data = await res.json() as { data: { embedding: number[] }[] }
+  const data = await res.json() as { data: { embedding: number[] }[]; usage?: { total_tokens?: number } }
   const embedding = data.data?.[0]?.embedding
   if (!embedding) throw new Error('Unexpected embedding response shape')
+  // Track embedding usage — total_tokens from API response
+  if (data.usage?.total_tokens) {
+    recordUsageGlobal({
+      category: 'embedding', model: 'text-embedding-3-small', embeddingTokens: data.usage.total_tokens,
+      inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0,
+      timestamp: new Date().toISOString(),
+    }).catch(err => console.error('[FileStore] Embed usage tracking failed:', err.message))
+  }
   return embedding
 }
 

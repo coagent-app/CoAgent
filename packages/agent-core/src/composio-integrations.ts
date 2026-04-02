@@ -167,8 +167,30 @@ const TRIGGER_MAP: Record<string, { slug: string; label: string }[]> = {
   ],
 }
 
-// Tracks which trigger slugs are currently subscribed (populated at boot + on toggle)
+// Tracks which trigger slugs are currently subscribed (persisted to triggers.json)
 const subscribedTriggers = new Set<string>()
+const TRIGGERS_FILE = 'triggers.json'
+
+async function persistTriggers(): Promise<void> {
+  try {
+    const dir = getDataDir()
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, TRIGGERS_FILE), JSON.stringify([...subscribedTriggers]), 'utf-8')
+  } catch (err: any) {
+    console.error('[Composio] Failed to persist triggers:', err.message)
+  }
+}
+
+export async function loadPersistedTriggers(): Promise<void> {
+  try {
+    const raw = await readFile(join(getDataDir(), TRIGGERS_FILE), 'utf-8')
+    const slugs = JSON.parse(raw) as string[]
+    for (const s of slugs) subscribedTriggers.add(s)
+    if (slugs.length > 0) console.log(`[Composio] Loaded ${slugs.length} persisted triggers`)
+  } catch (err: any) {
+    if (err?.code !== 'ENOENT') console.error('[Composio] Failed to load triggers:', err.message)
+  }
+}
 
 export function getAvailableTriggersForSlug(appSlug: string): { slug: string; label: string }[] {
   return TRIGGER_MAP[appSlug] ?? []
@@ -181,6 +203,7 @@ export function getSubscribedTriggers(): Set<string> {
 export function setTriggerEnabled(slug: string, enabled: boolean): void {
   if (enabled) subscribedTriggers.add(slug)
   else subscribedTriggers.delete(slug)
+  persistTriggers()
 }
 
 // When RELAY_URL is set, all Composio calls route through the relay (key stays server-side).
@@ -820,6 +843,7 @@ export async function subscribeTriggersForSlug(apiKey: string, appSlug: string, 
       const body = await res.json() as any
       if (res.ok) {
         subscribedTriggers.add(triggerSlug)
+        persistTriggers()
         console.log(`[Composio] Subscribed trigger ${triggerSlug} (${body.trigger_id})`)
       } else {
         console.warn(`[Composio] Failed to subscribe ${triggerSlug}: ${body?.error?.message ?? res.status}`)
@@ -847,6 +871,7 @@ export async function subscribeSingleTrigger(apiKey: string, triggerSlug: string
     const body = await res.json() as any
     if (res.ok) {
       subscribedTriggers.add(triggerSlug)
+      persistTriggers()
       console.log(`[Composio] Subscribed trigger ${triggerSlug} (${body.trigger_id})`)
       return true
     }

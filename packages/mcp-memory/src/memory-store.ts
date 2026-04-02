@@ -59,7 +59,30 @@ export function chunkContent(content: string): string[] {
       // Further split on paragraph breaks
       const paragraphs = section.split(/\n\n+/)
       for (const para of paragraphs) {
-        chunks.push(para)
+        if (para.length <= MAX_CHUNK_CHARS) {
+          chunks.push(para)
+        } else {
+          // Paragraph still too long — split on sentence boundaries first, then hard-cap
+          const sentences = para.split(/(?<=[.!?])\s+/)
+          let current = ''
+          for (const sentence of sentences) {
+            if (current.length + sentence.length + 1 > MAX_CHUNK_CHARS) {
+              if (current) chunks.push(current.trim())
+              current = sentence
+            } else {
+              current = current ? current + ' ' + sentence : sentence
+            }
+          }
+          if (current) chunks.push(current.trim())
+          // Hard-cap any remaining oversized pieces (e.g. no sentence breaks at all)
+          const lastIdx = chunks.length - 1
+          if (lastIdx >= 0 && chunks[lastIdx].length > MAX_CHUNK_CHARS) {
+            const oversized = chunks.pop()!
+            for (let i = 0; i < oversized.length; i += MAX_CHUNK_CHARS) {
+              chunks.push(oversized.slice(i, i + MAX_CHUNK_CHARS))
+            }
+          }
+        }
       }
     }
   }
@@ -83,16 +106,21 @@ export class MemoryStore {
   private indexedAt: Map<string, number> = new Map() // path → mtime ms when last indexed
   private scheduleHashes: Map<string, string> = new Map() // id → content hash
   private scheduleSyncTimer: ReturnType<typeof setTimeout> | null = null
+  private syncInProgress = false
+  private syncPending = false
+  private scheduleIndexPath: string
 
   constructor(baseDir: string) {
     this.baseDir = baseDir
     this.memoryDir = join(baseDir, 'memory')
     this.dbDir = join(baseDir, 'embeddings')
+    this.scheduleIndexPath = join(baseDir, 'schedule-index.json')
   }
 
   async init(): Promise<void> {
     await mkdir(this.memoryDir, { recursive: true })
     await mkdir(this.dbDir, { recursive: true })
+    this.loadScheduleIndex()
     this.db = await connect(this.dbDir)
 
     const tables = await this.db.tableNames()
@@ -127,6 +155,9 @@ export class MemoryStore {
 
     // Incrementally index any .md files that have no chunks in the DB yet
     await this.indexAllFiles()
+
+    // Purge orphaned DB entries (files deleted externally, stale schedule items)
+    await this.purgeOrphans()
 
     // Watch calendar.json and auto-index schedule items
     await this.syncSchedule()
@@ -180,19 +211,24 @@ export class MemoryStore {
   }
 
   async deleteMemory(relativePath: string): Promise<void> {
-    const fullPath = join(this.memoryDir, relativePath)
-    if (!existsSync(fullPath)) throw new Error(`File not found: ${relativePath}`)
-    await unlink(fullPath)
+    // Virtual entries (_schedule/) live only in LanceDB — no file on disk
+    const isVirtual = relativePath.startsWith('_schedule/')
 
-    // Clean up empty parent directories
-    let dir = dirname(fullPath)
-    while (dir !== this.memoryDir && dir.startsWith(this.memoryDir)) {
-      try {
-        const contents = await readdir(dir)
-        if (contents.length === 0) { await rmdir(dir).catch(() => {}) }
-        else break
-      } catch { break }
-      dir = dirname(dir)
+    if (!isVirtual) {
+      const fullPath = join(this.memoryDir, relativePath)
+      if (!existsSync(fullPath)) throw new Error(`File not found: ${relativePath}`)
+      await unlink(fullPath)
+
+      // Clean up empty parent directories
+      let dir = dirname(fullPath)
+      while (dir !== this.memoryDir && dir.startsWith(this.memoryDir)) {
+        try {
+          const contents = await readdir(dir)
+          if (contents.length === 0) { await rmdir(dir).catch(() => {}) }
+          else break
+        } catch { break }
+        dir = dirname(dir)
+      }
     }
 
     // Remove all chunks from the embeddings DB
@@ -201,6 +237,12 @@ export class MemoryStore {
       await this.table.delete(`path = '${escaped}'`)
     }
     this.indexedAt.delete(relativePath)
+
+    // Also clear schedule hash if it was a virtual entry
+    if (isVirtual) {
+      const id = relativePath.replace('_schedule/', '')
+      this.scheduleHashes.delete(id)
+    }
   }
 
   async appendMemory(relativePath: string, content: string): Promise<void> {
@@ -246,18 +288,16 @@ export class MemoryStore {
     const idx = file.indexOf(oldContent)
     if (idx === -1) return false
 
-    // Replace in file
-    const updated = file.slice(0, idx) + newContent + file.slice(idx + oldContent.length)
-    await writeFile(fullPath, updated, 'utf-8')
+    if (!this.table) {
+      // No DB — just write the file
+      const updated = file.slice(0, idx) + newContent + file.slice(idx + oldContent.length)
+      await writeFile(fullPath, updated, 'utf-8')
+      return true
+    }
 
-    if (!this.table) return true
-
-    // Delete old chunk from index, embed and add the new one
-    const escapedPath = relativePath.replace(/'/g, "''")
-    const escapedContent = oldContent.replace(/'/g, "''")
-    await this.table.delete(`path = '${escapedPath}' AND content = '${escapedContent}'`)
-
+    // Embed ALL new chunks FIRST — prevents file/DB split if embedding fails
     const chunks = chunkContent(newContent)
+    const newRows: { path: string; chunkIndex: number; content: string; vector: number[] }[] = []
     if (chunks.length > 0) {
       const escapedForMax = relativePath.replace(/'/g, "''")
       let maxIndex = -1
@@ -271,13 +311,20 @@ export class MemoryStore {
         }
       } catch { /* empty table */ }
 
-      const rows: { path: string; chunkIndex: number; content: string; vector: number[] }[] = []
       for (let i = 0; i < chunks.length; i++) {
         const vector = await this.embed(chunks[i])
-        rows.push({ path: relativePath, chunkIndex: maxIndex + 1 + i, content: chunks[i], vector })
+        newRows.push({ path: relativePath, chunkIndex: maxIndex + 1 + i, content: chunks[i], vector })
       }
-      await this.table.add(rows)
     }
+
+    // Embeddings succeeded — now atomically update DB then write file
+    const escapedPath = relativePath.replace(/'/g, "''")
+    const escapedContent = oldContent.replace(/'/g, "''")
+    await this.table.delete(`path = '${escapedPath}' AND content = '${escapedContent}'`)
+    if (newRows.length > 0) await this.table.add(newRows)
+
+    const updated = file.slice(0, idx) + newContent + file.slice(idx + oldContent.length)
+    await writeFile(fullPath, updated, 'utf-8')
     this.indexedAt.set(relativePath, Date.now())
     return true
   }
@@ -306,24 +353,27 @@ export class MemoryStore {
         score: (r._distance as number) ?? 0
       }))
 
-    // 2. Keyword fallback — catches proper nouns, names, emails that embed poorly
+    // 2. Keyword fallback — catches proper nouns, names, emails that embed poorly.
+    // Only run the full-table scan when semantic search genuinely failed (< 2 hits)
+    // to avoid loading all rows into memory on every query.
     const queryLower = query.toLowerCase()
     const keywords = queryLower.split(/\s+/).filter(w => w.length >= 2)
-    if (keywords.length === 0) return semantic
 
     let keywordResults: MemorySearchResult[] = []
-    try {
-      const allRows = await this.table.query().select(['path', 'chunkIndex', 'content']).toArray()
-      keywordResults = allRows
-        .filter(r => r.path && r.content && keywords.some(kw => (r.content as string).toLowerCase().includes(kw)))
-        .map(r => ({
-          path: r.path as string,
-          chunkIndex: (r.chunkIndex as number) ?? 0,
-          content: r.content as string,
-          score: 0.5 // keyword matches get a good score
-        }))
-        .slice(0, topK)
-    } catch { /* table may be empty */ }
+    if (keywords.length > 0 && semantic.length < 2) {
+      try {
+        const allRows = await this.table.query().select(['path', 'chunkIndex', 'content']).toArray()
+        keywordResults = allRows
+          .filter(r => r.path && r.content && keywords.some(kw => (r.content as string).toLowerCase().includes(kw)))
+          .map(r => ({
+            path: r.path as string,
+            chunkIndex: (r.chunkIndex as number) ?? 0,
+            content: r.content as string,
+            score: 0.5 // keyword matches get a good score
+          }))
+          .slice(0, topK)
+      } catch { /* table may be empty */ }
+    }
 
     // 3. Merge: dedupe by path+chunkIndex, semantic results take priority
     const seen = new Set(semantic.map(r => `${r.path}:${r.chunkIndex}`))
@@ -340,6 +390,46 @@ export class MemoryStore {
     }
 
     return semantic.slice(0, topK)
+  }
+
+  // -------------------------------------------------------------------------
+  // Orphan cleanup
+  // -------------------------------------------------------------------------
+
+  /**
+   * Remove LanceDB entries whose backing file no longer exists on disk.
+   * Virtual paths (_schedule/) are left alone — they're managed by syncSchedule().
+   */
+  private async purgeOrphans(): Promise<void> {
+    if (!this.table) return
+
+    const indexed = await this.getIndexedPaths()
+    const orphans: string[] = []
+
+    for (const path of indexed) {
+      // Virtual entries are managed separately
+      if (path.startsWith('_schedule/')) continue
+      // Seed row artifact
+      if (path === '') continue
+
+      const fullPath = join(this.memoryDir, path)
+      if (!existsSync(fullPath)) {
+        orphans.push(path)
+      }
+    }
+
+    if (orphans.length === 0) return
+
+    console.log(`[Memory] Purging ${orphans.length} orphaned DB entries: ${orphans.join(', ')}`)
+    for (const path of orphans) {
+      const escaped = path.replace(/'/g, "''")
+      try {
+        await this.table.delete(`path = '${escaped}'`)
+      } catch (err: any) {
+        console.error(`[Memory] Failed to purge ${path}:`, err.message)
+      }
+      this.indexedAt.delete(path)
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -457,6 +547,28 @@ export class MemoryStore {
   }
 
   private async syncSchedule(): Promise<void> {
+    if (this.syncInProgress) {
+      // A sync is already running — record that another is needed when it finishes
+      this.syncPending = true
+      return
+    }
+
+    this.syncInProgress = true
+    try {
+      await this._syncScheduleImpl()
+    } finally {
+      this.syncInProgress = false
+      if (this.syncPending) {
+        this.syncPending = false
+        // Run the deferred sync outside this call stack so the mutex is clear
+        setImmediate(() => this.syncSchedule().catch(err =>
+          console.error('[Memory] Deferred schedule sync failed:', err.message)
+        ))
+      }
+    }
+  }
+
+  private async _syncScheduleImpl(): Promise<void> {
     if (!this.table) return
 
     const calendarPath = join(this.baseDir, 'calendar.json')
@@ -549,6 +661,23 @@ export class MemoryStore {
     }
 
     console.error(`[Memory] Schedule sync: ${toRemove.length} removed, ${toAdd.length} indexed (${activeItems.size} active)`)
+    this.saveScheduleIndex()
+  }
+
+  private loadScheduleIndex(): void {
+    if (!existsSync(this.scheduleIndexPath)) return
+    try {
+      const entries: [string, string][] = JSON.parse(readFileSync(this.scheduleIndexPath, 'utf-8'))
+      this.scheduleHashes = new Map(entries)
+      console.log(`[Memory] Loaded schedule index: ${this.scheduleHashes.size} entries`)
+    } catch { /* corrupt file, start fresh */ }
+  }
+
+  private saveScheduleIndex(): void {
+    try {
+      const json = JSON.stringify(Array.from(this.scheduleHashes.entries()))
+      writeFile(this.scheduleIndexPath, json, 'utf-8').catch(() => {})
+    } catch { /* best effort */ }
   }
 
   private async embed(text: string): Promise<number[]> {
@@ -558,14 +687,26 @@ export class MemoryStore {
       return new Array(EMBED_DIM).fill(0).map((_, i) => (text.charCodeAt(i % text.length) / 255))
     }
 
-    const res = await fetch(embedUrl, {
-      method: 'POST',
-      headers: {
-        'Authorization': getEmbedAuth(),
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ input: [text], model: EMBED_MODEL, dimensions: EMBED_DIM })
-    })
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 15_000)
+
+    let res: Response
+    try {
+      res = await fetch(embedUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': getEmbedAuth(),
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ input: [text], model: EMBED_MODEL, dimensions: EMBED_DIM }),
+        signal: controller.signal
+      })
+    } catch (err: any) {
+      if (err.name === 'AbortError') throw new Error('Embedding request timed out after 15s')
+      throw err
+    } finally {
+      clearTimeout(timeoutId)
+    }
 
     if (!res.ok) {
       const err = await res.text()

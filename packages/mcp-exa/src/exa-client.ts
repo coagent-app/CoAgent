@@ -34,6 +34,10 @@ export interface ExaFindSimilarParams {
   numResults?: number
   includeDomains?: string[]
   excludeDomains?: string[]
+  includeText?: string[]
+  excludeText?: string[]
+  startPublishedDate?: string
+  endPublishedDate?: string
   contents?: ExaContentsOptions
 }
 
@@ -97,32 +101,80 @@ export interface ExaMonitorRun {
   createdAt: string
 }
 
-// JSON schema for structured contact extraction from Exa summaries
-const CONTACT_SCHEMA = {
-  $schema: 'http://json-schema.org/draft-07/schema#',
-  type: 'object',
-  properties: {
-    company_name: { type: 'string', description: 'Company or business name' },
-    phone: { type: 'string', description: 'Primary phone number' },
-    email: { type: 'string', description: 'Primary contact email address' },
-    address: { type: 'string', description: 'Physical street address' },
-    owner: { type: 'string', description: 'Owner, founder, or primary contact name' },
-    employees: { type: 'string', description: 'Number of employees or team size' },
-    services: { type: 'string', description: 'Main services or products offered' },
-  },
-  required: ['company_name'],
+// Baseline contact fields — always extracted
+const BASE_CONTACT_PROPERTIES: Record<string, { type: string; description: string }> = {
+  company_name: { type: 'string', description: 'Company or business name' },
+  phone: { type: 'string', description: 'Primary phone number' },
+  email: { type: 'string', description: 'Primary contact email address' },
+  address: { type: 'string', description: 'Physical street address' },
+  owner: { type: 'string', description: 'Owner, founder, or primary contact name' },
+  employees: { type: 'string', description: 'Number of employees or team size' },
+  services: { type: 'string', description: 'Main services or products offered' },
 }
 
-/** Default contents options: structured schema + contact page crawling + targeted highlights */
-const DEFAULT_CONTENTS: ExaContentsOptions = {
-  text: { maxCharacters: 1500 },
-  highlights: { query: 'phone number email address contact information', maxCharacters: 3000 },
-  summary: {
-    query: 'Extract contact information for this company: phone, email, address, owner name, employee count, services.',
-    schema: CONTACT_SCHEMA,
-  },
-  subpages: 2,
-  subpageTarget: ['contact', 'about'],
+/**
+ * Lead schema — agent writes this during onboarding based on "what makes a good lead?"
+ * File: ~/.coagent/research/lead_schema.json
+ * Format: { fields: [{ name: string, description: string }], extractionQuery: string }
+ */
+export interface LeadSchema {
+  fields: { name: string; description: string }[]
+  extractionQuery: string  // e.g. "Extract revenue, ad spend evidence, and whether they run paid ads"
+}
+
+import { readFileSync } from 'fs'
+import { join } from 'path'
+import { homedir } from 'os'
+
+function loadLeadSchema(): LeadSchema | null {
+  const dataDir = process.env.COAGENT_DATA_DIR ?? join(homedir(), '.coagent')
+  try {
+    return JSON.parse(readFileSync(join(dataDir, 'research', 'lead_schema.json'), 'utf8'))
+  } catch { return null }
+}
+
+function buildContactSchema(): { schema: Record<string, unknown>; query: string } {
+  const lead = loadLeadSchema()
+
+  const properties: Record<string, { type: string; description: string }> = { ...BASE_CONTACT_PROPERTIES }
+  const extraFields: string[] = []
+
+  if (lead?.fields) {
+    for (const f of lead.fields) {
+      const key = f.name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '')
+      if (!properties[key]) {
+        properties[key] = { type: 'string', description: f.description }
+        extraFields.push(f.description)
+      }
+    }
+  }
+
+  const baseQuery = 'Extract contact and business information: phone, email, address, owner name, employee count, services.'
+  const query = lead?.extractionQuery
+    ? `${baseQuery} Also extract: ${lead.extractionQuery}`
+    : baseQuery
+
+  return {
+    schema: {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties,
+      required: ['company_name'],
+    },
+    query,
+  }
+}
+
+/** Build default contents options — merges base contact fields with user's lead schema */
+function getDefaultContents(): ExaContentsOptions {
+  const { schema, query } = buildContactSchema()
+  return {
+    text: { maxCharacters: 400 },
+    highlights: { query: 'phone number email address contact information', maxCharacters: 3000 },
+    summary: { query, schema },
+    subpages: 2,
+    subpageTarget: ['contact', 'about'],
+  }
 }
 
 export class ExaClient {
@@ -156,7 +208,7 @@ export class ExaClient {
     if (params.startCrawlDate) body.startCrawlDate = params.startCrawlDate
     if (params.endCrawlDate) body.endCrawlDate = params.endCrawlDate
 
-    body.contents = params.contents ?? DEFAULT_CONTENTS
+    body.contents = params.contents ?? getDefaultContents()
 
     const res = await fetch(`${EXA_BASE}/search`, {
       method: 'POST',
@@ -180,8 +232,12 @@ export class ExaClient {
 
     if (params.includeDomains?.length) body.includeDomains = params.includeDomains
     if (params.excludeDomains?.length) body.excludeDomains = params.excludeDomains
+    if (params.includeText?.length) body.includeText = params.includeText
+    if (params.excludeText?.length) body.excludeText = params.excludeText
+    if (params.startPublishedDate) body.startPublishedDate = params.startPublishedDate
+    if (params.endPublishedDate) body.endPublishedDate = params.endPublishedDate
 
-    body.contents = params.contents ?? DEFAULT_CONTENTS
+    body.contents = params.contents ?? getDefaultContents()
 
     const res = await fetch(`${EXA_BASE}/findSimilar`, {
       method: 'POST',
@@ -200,7 +256,7 @@ export class ExaClient {
   async getContents(urls: string[], options?: ExaContentsOptions): Promise<ExaSearchResponse> {
     const body: Record<string, unknown> = {
       ids: urls,
-      contents: options ?? DEFAULT_CONTENTS,
+      contents: options ?? getDefaultContents(),
     }
 
     const res = await fetch(`${EXA_BASE}/contents`, {

@@ -194,7 +194,7 @@ export async function searchToolLogs(
 const SYSTEM_PROMPT = `You are a background agent that processes tool usage logs. You have two jobs, in order:
 
 1. UPDATE MEMORY: Search existing memories, then append new entries or edit existing ones.
-   - OFF-LIMITS files (never modify): routines.md, setup.md, agent.md, preferences.md
+   - OFF-LIMITS files (never modify): heartbeat.md, setup.md, agent.md, preferences.md
    - Use search_memory FIRST to check what already exists before writing anything.
    - Use edit_memory to update existing entries (pass exact old_content from read/search results).
    - Use append_memory to add NEW entries to existing files.

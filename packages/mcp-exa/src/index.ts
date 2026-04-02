@@ -2,9 +2,8 @@
 /**
  * CoAgent Exa MCP Server — Powered by Exa
  *
- * 3 tools:
- *   exa      — search, find_similar, get_contents (auto-saves to research)
- *   research — search, list, stats (read-only local queries)
+ * 2 tools:
+ *   exa      — search, find_similar, get_contents, save_lead_schema
  *   monitor  — create, list, delete, trigger
  */
 
@@ -15,9 +14,10 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
 import { ExaClient } from './exa-client.js'
-import { saveResearch, searchResearch, getResearchStats, readResearch } from './research-store.js'
+import type { LeadSchema } from './exa-client.js'
 import { homedir } from 'os'
 import { join } from 'path'
+import { writeFileSync, mkdirSync, existsSync } from 'fs'
 
 // Graceful EPIPE handling (same pattern as mcp-memory)
 process.stdout.on('error', (err: any) => {
@@ -54,9 +54,9 @@ function formatCompact(r: { url: string; title?: string | null }): string {
   return r.title?.replace(/\s*[|–—:].{0,50}$/, '') || domain
 }
 
-/** Parse structured contact from Exa summary (JSON schema response) or fall back to regex */
-function parseContact(summary: string | undefined, highlights?: string[]): { phone?: string; email?: string; address?: string; employees?: string; owner?: string; services?: string } {
-  const out: { phone?: string; email?: string; address?: string; employees?: string; owner?: string; services?: string } = {}
+/** Parse structured contact from Exa summary — returns all fields dynamically (base + lead schema) */
+function parseContact(summary: string | undefined, highlights?: string[]): Record<string, string | undefined> {
+  const out: Record<string, string | undefined> = {}
 
   // Try structured JSON parse first (from summary.schema)
   if (summary) {
@@ -69,12 +69,9 @@ function parseContact(summary: string | undefined, highlights?: string[]): { pho
           if (!s || /^n\/?a$/i.test(s) || /^(not|none|unknown)/i.test(s)) return undefined
           return s
         }
-        out.phone = clean(parsed.phone)
-        out.email = clean(parsed.email)
-        out.address = clean(parsed.address)
-        out.employees = clean(parsed.employees)
-        out.owner = clean(parsed.owner)
-        out.services = clean(parsed.services)
+        for (const [k, v] of Object.entries(parsed)) {
+          out[k] = clean(v)
+        }
         return out
       }
     } catch {
@@ -105,65 +102,19 @@ function parseContact(summary: string | undefined, highlights?: string[]): { pho
   return out
 }
 
-interface ExaResultLike { url: string; title?: string | null; summary?: string; text?: string; highlights?: string[]; subpages?: ExaResultLike[] }
-
-/** Auto-save search results (+ subpages) to research store. Returns save summary. */
-function autoSave(results: ExaResultLike[], source: string, query: string): string {
-  if (results.length === 0) return ''
-  const entries = results.map(r => {
-    // Merge contact info from main result + subpages (contact/about pages)
-    const mainContact = parseContact(r.summary, r.highlights)
-    const contact = { ...mainContact }
-
-    // Check subpages for contact info we didn't find on the main page
-    if (r.subpages?.length) {
-      for (const sub of r.subpages) {
-        const subContact = parseContact(sub.summary, sub.highlights)
-        if (!contact.phone && subContact.phone) contact.phone = subContact.phone
-        if (!contact.email && subContact.email) contact.email = subContact.email
-        if (!contact.address && subContact.address) contact.address = subContact.address
-        if (!contact.employees && subContact.employees) contact.employees = subContact.employees
-        if (!contact.owner && subContact.owner) contact.owner = subContact.owner
-      }
-    }
-
-    // Build display summary from structured data or raw text
-    let summaryText: string | undefined
-    try {
-      const parsed = JSON.parse(r.summary || '')
-      if (parsed?.services) summaryText = parsed.services
-    } catch {
-      summaryText = r.summary || r.text?.slice(0, 300) || undefined
-    }
-
-    return {
-      url: r.url,
-      company: r.title?.replace(/\s*[|–—:].{0,50}$/, '') || undefined,
-      summary: summaryText,
-      phone: contact.phone,
-      email: contact.email,
-      address: contact.address,
-      employees: contact.employees,
-      source,
-      query,
-    }
-  })
-  const res = saveResearch(DATA_DIR, entries)
-  return `\n[Auto-saved: ${res.added} new, ${res.duplicates} merged, ${res.total} total]`
-}
-
 // ── Tool definitions ────────────────────────────────────────────────────────
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: 'exa',
-      description: 'Web search powered by Exa. Actions: search, find_similar, get_contents. Results auto-save to research database. $0.007/search, $0.001/page.',
+      description: 'Web search powered by Exa. Actions: search, find_similar, get_contents, save_lead_schema. Save important findings to memory after research. $0.007/search, $0.001/page.',
       inputSchema: {
         type: 'object',
         properties: {
-          action: { type: 'string', enum: ['search', 'find_similar', 'get_contents'], description: 'Which Exa operation to run' },
+          action: { type: 'string', enum: ['search', 'find_similar', 'get_contents', 'save_lead_schema'], description: 'Which Exa operation to run' },
           query: { type: 'string', description: 'Search query (for search action)' },
+          type: { type: 'string', enum: ['auto', 'fast', 'deep', 'instant'], description: 'Search type: auto (default), fast (quick broad sweep), deep (structured extraction + query expansion)' },
           url: { type: 'string', description: 'URL (for find_similar action)' },
           urls: { type: 'array', items: { type: 'string' }, description: 'URLs (for get_contents action)' },
           numResults: { type: 'number', description: 'Number of results (1-100, default 10)' },
@@ -174,26 +125,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           excludeText: { type: 'array', items: { type: 'string' }, description: 'Must NOT contain these' },
           startPublishedDate: { type: 'string', description: 'ISO date — after this' },
           endPublishedDate: { type: 'string', description: 'ISO date — before this' },
-        },
-        required: ['action'],
-      },
-    },
-    {
-      name: 'research',
-      description: 'Query the local research database. Actions: search (text match), list (all entries), stats (overview).',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          action: { type: 'string', enum: ['search', 'list', 'stats'], description: 'Which operation' },
-          query: { type: 'string', description: 'Search query (for search action)' },
-          limit: { type: 'number', description: 'Max results (default 20 for search, 50 for list)' },
+          fields: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, description: { type: 'string' } }, required: ['name', 'description'] }, description: 'Custom extraction fields (for save_lead_schema)' },
+          extractionQuery: { type: 'string', description: 'What to extract in plain English (for save_lead_schema)' },
         },
         required: ['action'],
       },
     },
     {
       name: 'monitor',
-      description: 'Manage Exa search monitors — recurring searches that auto-save new results. Actions: create, list, delete, trigger.',
+      description: 'Manage Exa search monitors — recurring searches that deliver new results via webhook. Actions: create, list, delete, trigger.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -225,6 +165,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           if (!a.query) return { content: [{ type: 'text', text: 'Missing query.' }] }
           const res = await exa.search({
             query: a.query,
+            type: a.type,
             numResults: a.numResults,
             category: a.category,
             includeDomains: a.includeDomains,
@@ -236,15 +177,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           })
           const results = res.results || []
           if (results.length === 0) return { content: [{ type: 'text', text: `No results for "${a.query}".` }] }
-          const saved = autoSave(results, 'search', a.query)
           const lines = results.map((r, i) => {
             const contact = parseContact(r.summary, r.highlights)
             const details = [contact.phone, contact.email, contact.address].filter(Boolean).join(' | ')
             const detailLine = details ? `\n   Contact: ${details}` : ''
             const services = contact.services ? `\n   ${contact.services}` : ''
-            return `${i + 1}. ${formatCompact(r)} — ${r.url}${detailLine}${services}`
+            const bizInfo = [contact.revenue ? `Rev: ${contact.revenue}` : '', contact.employees ? `Team: ${contact.employees}` : '', contact.has_ads || ''].filter(Boolean)
+            const bizLine = bizInfo.length > 0 ? `\n   Biz: ${bizInfo.join(' | ')}` : ''
+            return `${i + 1}. ${formatCompact(r)} — ${r.url}${detailLine}${bizLine}${services}`
           })
-          return { content: [{ type: 'text', text: `${results.length} results for "${a.query}":\n${lines.join('\n')}${saved}` }] }
+          return { content: [{ type: 'text', text: `${results.length} results for "${a.query}":\n${lines.join('\n')}` }] }
         }
         case 'find_similar': {
           if (!a.url) return { content: [{ type: 'text', text: 'Missing url.' }] }
@@ -253,24 +195,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             numResults: a.numResults,
             includeDomains: a.includeDomains,
             excludeDomains: a.excludeDomains,
+            includeText: a.includeText,
+            excludeText: a.excludeText,
+            startPublishedDate: a.startPublishedDate,
+            endPublishedDate: a.endPublishedDate,
           })
           const results = res.results || []
           if (results.length === 0) return { content: [{ type: 'text', text: `No similar pages for ${a.url}.` }] }
-          const saved = autoSave(results, 'find_similar', a.url)
           const lines = results.map((r, i) => {
             const contact = parseContact(r.summary, r.highlights)
             const details = [contact.phone, contact.email, contact.address].filter(Boolean).join(' | ')
             const detailLine = details ? `\n   Contact: ${details}` : ''
             return `${i + 1}. ${formatCompact(r)} — ${r.url}${detailLine}`
           })
-          return { content: [{ type: 'text', text: `${results.length} similar to ${a.url}:\n${lines.join('\n')}${saved}` }] }
+          return { content: [{ type: 'text', text: `${results.length} similar to ${a.url}:\n${lines.join('\n')}` }] }
         }
         case 'get_contents': {
           if (!a.urls?.length) return { content: [{ type: 'text', text: 'Missing urls.' }] }
           const res = await exa.getContents(a.urls)
           const results = res.results || []
           if (results.length === 0) return { content: [{ type: 'text', text: 'No content retrieved.' }] }
-          autoSave(results, 'contents', '')
           const text = results.map(r => {
             const domain = (() => { try { return new URL(r.url).hostname.replace(/^www\./, '') } catch { return '' } })()
             const name = r.title?.replace(/\s*[|–—:].{0,50}$/, '') || domain
@@ -282,41 +226,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }).join('\n\n')
           return { content: [{ type: 'text', text }] }
         }
+        case 'save_lead_schema': {
+          if (!a.fields?.length && !a.extractionQuery) return { content: [{ type: 'text', text: 'Need fields and/or extractionQuery.' }] }
+          const schema: LeadSchema = {
+            fields: a.fields || [],
+            extractionQuery: a.extractionQuery || a.fields.map((f: any) => f.description).join(', '),
+          }
+          const dir = join(DATA_DIR, 'research')
+          if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+          writeFileSync(join(dir, 'lead_schema.json'), JSON.stringify(schema, null, 2))
+          const fieldNames = schema.fields.map((f: any) => f.name).join(', ')
+          return { content: [{ type: 'text', text: `Lead schema saved. Extraction fields: ${fieldNames || '(query only)'}. All future Exa searches will extract these fields automatically.` }] }
+        }
         default:
           return { content: [{ type: 'text', text: `Unknown exa action: ${a.action}` }] }
-      }
-    }
-
-    if (name === 'research') {
-      switch (a.action) {
-        case 'search': {
-          if (!a.query) return { content: [{ type: 'text', text: 'Missing query.' }] }
-          const hits = searchResearch(DATA_DIR, a.query, a.limit ?? 20)
-          if (hits.length === 0) return { content: [{ type: 'text', text: `No entries matching "${a.query}".` }] }
-          const text = hits.map(e =>
-            `${e.company} (${e.domain})${e.industry ? ' — ' + e.industry : ''}${e.phone ? ' | ' + e.phone : ''}${e.email ? ' | ' + e.email : ''}`
-          ).join('\n')
-          return { content: [{ type: 'text', text }] }
-        }
-        case 'list': {
-          const entries = readResearch(DATA_DIR)
-          if (entries.length === 0) return { content: [{ type: 'text', text: 'No research entries yet.' }] }
-          const limit = a.limit ?? 50
-          const limited = entries.slice(0, limit)
-          const text = limited.map(e =>
-            `${e.company} (${e.domain})${e.industry ? ' — ' + e.industry : ''}${e.phone ? ' | ' + e.phone : ''} [${e.source}]`
-          ).join('\n') + (entries.length > limit ? `\n... and ${entries.length - limit} more` : '')
-          return { content: [{ type: 'text', text }] }
-        }
-        case 'stats': {
-          const s = getResearchStats(DATA_DIR)
-          if (s.total === 0) return { content: [{ type: 'text', text: 'No research entries yet.' }] }
-          const srcParts = Object.entries(s.sources).map(([k, v]) => `${k}: ${v}`).join(', ')
-          const indParts = Object.entries(s.industries).slice(0, 5).map(([k, v]) => `${k}: ${v}`).join(', ')
-          return { content: [{ type: 'text', text: `${s.total} entries (${s.recentCount} last 24h). Sources: ${srcParts}. Industries: ${indParts}` }] }
-        }
-        default:
-          return { content: [{ type: 'text', text: `Unknown research action: ${a.action}` }] }
       }
     }
 
@@ -340,7 +263,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             trigger: { type: 'interval', period: interval },
           })
           const domainNote = a.includeDomains?.length ? ` (watching: ${a.includeDomains.join(', ')})` : ''
-          return { content: [{ type: 'text', text: `Monitor ${m.id} created — "${a.query}" every ${interval}${domainNote}. Auto-saves to research.` }] }
+          return { content: [{ type: 'text', text: `Monitor ${m.id} created — "${a.query}" every ${interval}${domainNote}.` }] }
         }
         case 'list': {
           const res = await exa.listMonitors()

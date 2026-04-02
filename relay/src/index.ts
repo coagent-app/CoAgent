@@ -4,6 +4,8 @@ export interface Env {
   OPENAI_API_KEY: string
   COMPOSIO_API_KEY: string
   STRIPE_WEBHOOK_SECRET: string
+  COMPOSIO_WEBHOOK_SECRET?: string  // Standard Webhooks HMAC secret — optional, warns if unset
+  EXA_WEBHOOK_SECRET?: string       // Shared secret for Exa monitor webhooks — optional, warns if unset
   TOKENS: KVNamespace
   USER_SESSION: DurableObjectNamespace
   TEAM_CHANNEL: DurableObjectNamespace
@@ -131,6 +133,66 @@ function generateToken(): string {
   const bytes = new Uint8Array(32)
   crypto.getRandomValues(bytes)
   return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
+}
+
+// ── Per-token rate limiting ─────────────────────────────────────────────────
+// In-memory sliding window — resets when the Worker isolate recycles (~30s idle).
+// This is a first line of defense, not bulletproof. For persistent limits,
+// use Cloudflare Rate Limiting rules on the zone.
+
+const RATE_LIMITS = {
+  api: { windowMs: 60_000, max: 60 },      // 60 API proxy requests/min (Claude, OpenAI, Composio)
+  admin: { windowMs: 60_000, max: 10 },     // 10 admin requests/min
+  general: { windowMs: 60_000, max: 120 },  // 120 general requests/min
+} as const
+
+const rateBuckets = new Map<string, number[]>()  // token → timestamps
+
+function checkRateLimit(token: string, category: keyof typeof RATE_LIMITS): Response | null {
+  const limit = RATE_LIMITS[category]
+  const now = Date.now()
+  const key = `${token.slice(0, 16)}:${category}`
+
+  let timestamps = rateBuckets.get(key)
+  if (!timestamps) {
+    timestamps = []
+    rateBuckets.set(key, timestamps)
+  }
+
+  // Remove expired entries
+  const cutoff = now - limit.windowMs
+  while (timestamps.length > 0 && timestamps[0] < cutoff) {
+    timestamps.shift()
+  }
+
+  if (timestamps.length >= limit.max) {
+    const retryAfter = Math.ceil((timestamps[0] + limit.windowMs - now) / 1000)
+    return new Response(JSON.stringify({ error: 'Rate limit exceeded' }), {
+      status: 429,
+      headers: {
+        ...corsHeaders(),
+        'Content-Type': 'application/json',
+        'Retry-After': String(retryAfter),
+      }
+    })
+  }
+
+  timestamps.push(now)
+  return null  // No rate limit hit
+}
+
+// Prevent memory leak: periodically prune stale buckets
+let lastPrune = Date.now()
+function pruneRateBuckets() {
+  const now = Date.now()
+  if (now - lastPrune < 60_000) return
+  lastPrune = now
+  const cutoff = now - 120_000  // 2 min
+  for (const [key, timestamps] of rateBuckets) {
+    if (timestamps.length === 0 || timestamps[timestamps.length - 1] < cutoff) {
+      rateBuckets.delete(key)
+    }
+  }
 }
 
 // OpenAI embeddings pricing: $0.02 per 1M tokens (text-embedding-3-small)
@@ -506,6 +568,46 @@ async function verifyStripeSignature(payload: string, sigHeader: string, secret:
   return expected === signature
 }
 
+// --- Standard Webhooks (Composio) signature verification ---
+// Spec: https://www.standardwebhooks.com/
+// Signed payload: "{webhook-id}.{webhook-timestamp}.{body}"
+// Signature header: "webhook-signature: v1,<base64-hmac-sha256>[,v1,<base64>...]"
+// Timestamp tolerance: ±5 minutes to prevent replay attacks.
+
+async function verifyStandardWebhookSignature(
+  body: string,
+  msgId: string,
+  timestamp: string,
+  sigHeader: string,
+  secret: string,
+): Promise<boolean> {
+  // Reject if timestamp is older than 5 minutes (replay protection)
+  const ts = parseInt(timestamp, 10)
+  if (isNaN(ts)) return false
+  const age = Math.floor(Date.now() / 1000) - ts
+  if (Math.abs(age) > 300) return false
+
+  const signedPayload = `${msgId}.${timestamp}.${body}`
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  )
+  const mac = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(signedPayload))
+  // Standard Webhooks encodes the HMAC as base64 (not hex like Stripe)
+  const expectedB64 = btoa(String.fromCharCode(...new Uint8Array(mac)))
+
+  // The header may contain multiple signatures: "v1,<b64> v1,<b64>"
+  // Accept if any of them match (supports key rotation)
+  const signatures = sigHeader.split(' ')
+  return signatures.some(sig => {
+    const [version, value] = sig.split(',')
+    return version === 'v1' && value === expectedB64
+  })
+}
+
 // --- Stripe webhook handler ---
 
 async function handleStripeWebhook(request: Request, env: Env): Promise<Response> {
@@ -544,7 +646,7 @@ async function handleStripeWebhook(request: Request, env: Env): Promise<Response
       // Store reverse lookup: stripeCustomerId → token
       await env.TOKENS.put(`stripe:${session.customer}`, token)
 
-      console.log(`New user #${userId} for ${session.customer}: ${token}`)
+      console.log(`New user #${userId} for ${session.customer}: ${token.slice(0, 8)}...`)
 
       return jsonResponse({ ok: true, token, userId })
     }
@@ -554,10 +656,19 @@ async function handleStripeWebhook(request: Request, env: Env): Promise<Response
       const sub = event.data.object
       const token = await env.TOKENS.get(`stripe:${sub.customer}`)
       if (token) {
-        const data = await getToken(env, token)
-        if (data) {
-          data.active = false
-          await saveToken(env, token, data)
+        const revokedData = await getToken(env, token)
+        if (revokedData) {
+          revokedData.active = false
+          await saveToken(env, token, revokedData)
+
+          // Force-close the user's WebSocket connections
+          try {
+            const doId = env.USER_SESSION.idFromName(String(revokedData.userId))
+            const stub = env.USER_SESSION.get(doId)
+            await stub.fetch(new Request('https://internal/revoke', { method: 'POST' }))
+          } catch (e) {
+            console.log('[Stripe] Could not notify DO of revocation:', (e as Error).message)
+          }
         }
       }
       return jsonResponse({ ok: true })
@@ -577,6 +688,10 @@ async function handleMessagesProxy(request: Request, env: Env, ctx: ExecutionCon
   if (result instanceof Response) return result
 
   const { token, data } = result
+
+  // Rate limit: 60 API proxy requests/min per token
+  const rateLimitRes = checkRateLimit(token, 'api')
+  if (rateLimitRes) return rateLimitRes
 
   // Reset usage if new billing period (monthly)
   const periodStart = new Date(data.usage.periodStart)
@@ -699,6 +814,14 @@ export class UserSession {
         try { pair[1].send(this.cachedChatHistory) } catch { /* ignore */ }
       }
       return new Response(null, { status: 101, webSocket: pair[0] })
+    }
+
+    // POST /revoke — force-close all WebSocket connections for this user
+    if (request.method === 'POST' && url.pathname === '/revoke') {
+      for (const ws of this.state.getWebSockets()) {
+        try { ws.close(4008, 'Subscription expired') } catch {}
+      }
+      return new Response('OK')
     }
 
     // POST /push — receive a webhook payload and deliver or queue it
@@ -1027,6 +1150,9 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url)
 
+    // Prune stale rate-limit buckets once per minute (memory hygiene)
+    pruneRateBuckets()
+
     // CORS preflight
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: corsHeaders() })
@@ -1043,6 +1169,8 @@ export default {
       const token = request.headers.get('Authorization')?.replace('Bearer ', '') || request.headers.get('x-api-key') || ''
       const authResult = await validateRequest(request, env)
       if (authResult instanceof Response) return authResult
+      const teamRateCheck = checkRateLimit(authResult.token, 'general')
+      if (teamRateCheck) return teamRateCheck
       const tokenData = authResult.data
       const userId = String((tokenData as any).userId)
 
@@ -1052,7 +1180,7 @@ export default {
         const teamId = crypto.randomUUID()
         const inviteCode = generateToken().slice(0, 16)
 
-        const memberUserId = body.userId || String(userId)
+        const memberUserId = String(tokenData.userId)
         const teamMeta = {
           teamId,
           name: body.name || 'My Team',
@@ -1080,7 +1208,7 @@ export default {
         const teamId = await env.TOKENS.get(`team:invite:${body.inviteCode}`)
         if (!teamId) return jsonResponse({ error: 'Invalid invite code' }, 404)
 
-        const memberUserId = body.userId || String(userId)
+        const memberUserId = String(tokenData.userId)
         const membersJson = await env.TOKENS.get(`team:${teamId}:members`)
         const members: { userId: string; name: string; role: string; handles: string; joinedAt: string }[] = membersJson ? JSON.parse(membersJson) : []
 
@@ -1111,6 +1239,9 @@ export default {
 
         const meta = JSON.parse(metaJson)
         const members = membersJson ? JSON.parse(membersJson) : []
+        if (!members.some((m: any) => String(m.userId) === String(tokenData.userId))) {
+          return jsonResponse({ error: 'Not a member of this team' }, 403)
+        }
         return jsonResponse({ team: meta, members })
       }
 
@@ -1129,6 +1260,12 @@ export default {
         const teamId = url.searchParams.get('teamId') || (tokenData as any).teamId
         if (!teamId) return new Response('No team associated with this token', { status: 404 })
 
+        const wsMembersJson = await env.TOKENS.get(`team:${teamId}:members`)
+        const wsMembers = wsMembersJson ? JSON.parse(wsMembersJson) : []
+        if (!wsMembers.some((m: any) => String(m.userId) === String(tokenData.userId))) {
+          return new Response('Not a member of this team', { status: 403 })
+        }
+
         const doId = env.TEAM_CHANNEL.idFromName(teamId)
         const stub = env.TEAM_CHANNEL.get(doId)
         // Forward with the client-supplied userId (RELAY_USER_ID) so the DO
@@ -1145,6 +1282,12 @@ export default {
         const teamId = url.searchParams.get('teamId') || (tokenData as any).teamId
         if (!teamId) return jsonResponse({ error: 'No team associated with this token' }, 404)
 
+        const msgMembersJson = await env.TOKENS.get(`team:${teamId}:members`)
+        const msgMembers = msgMembersJson ? JSON.parse(msgMembersJson) : []
+        if (!msgMembers.some((m: any) => String(m.userId) === String(tokenData.userId))) {
+          return jsonResponse({ error: 'Not a member of this team' }, 403)
+        }
+
         const doId = env.TEAM_CHANNEL.idFromName(teamId)
         const stub = env.TEAM_CHANNEL.get(doId)
         const doUrl = `https://internal/message?teamId=${teamId}`
@@ -1159,6 +1302,12 @@ export default {
       if (request.method === 'GET' && url.pathname === '/team/history') {
         const teamId = url.searchParams.get('teamId') || (tokenData as any).teamId
         if (!teamId) return jsonResponse({ error: 'No team associated with this token' }, 404)
+
+        const histMembersJson = await env.TOKENS.get(`team:${teamId}:members`)
+        const histMembers = histMembersJson ? JSON.parse(histMembersJson) : []
+        if (!histMembers.some((m: any) => String(m.userId) === String(tokenData.userId))) {
+          return jsonResponse({ error: 'Not a member of this team' }, 403)
+        }
 
         const limit = url.searchParams.get('limit') || '50'
         const doId = env.TEAM_CHANNEL.idFromName(teamId)
@@ -1176,6 +1325,12 @@ export default {
         const teamId = url.searchParams.get('teamId') || (tokenData as any).teamId
         if (!teamId) return jsonResponse({ error: 'No team associated with this token' }, 404)
 
+        const getNotesJson = await env.TOKENS.get(`team:${teamId}:members`)
+        const getNotesMbrs = getNotesJson ? JSON.parse(getNotesJson) : []
+        if (!getNotesMbrs.some((m: any) => String(m.userId) === String(tokenData.userId))) {
+          return jsonResponse({ error: 'Not a member of this team' }, 403)
+        }
+
         const doId = env.TEAM_CHANNEL.idFromName(teamId)
         const stub = env.TEAM_CHANNEL.get(doId)
         const res = await stub.fetch(new Request('https://internal/notes'))
@@ -1189,6 +1344,12 @@ export default {
       if (request.method === 'PUT' && url.pathname === '/team/notes') {
         const teamId = url.searchParams.get('teamId') || (tokenData as any).teamId
         if (!teamId) return jsonResponse({ error: 'No team associated with this token' }, 404)
+
+        const putNotesJson = await env.TOKENS.get(`team:${teamId}:members`)
+        const putNotesMbrs = putNotesJson ? JSON.parse(putNotesJson) : []
+        if (!putNotesMbrs.some((m: any) => String(m.userId) === String(tokenData.userId))) {
+          return jsonResponse({ error: 'Not a member of this team' }, 403)
+        }
 
         const doId = env.TEAM_CHANNEL.idFromName(teamId)
         const stub = env.TEAM_CHANNEL.get(doId)
@@ -1223,6 +1384,17 @@ export default {
     // Exa monitor webhook → route to user's DO (userId in URL)
     const exaMatch = url.pathname.match(/^\/webhook\/exa\/(.+)$/)
     if (request.method === 'POST' && exaMatch) {
+      // --- Shared secret check via ?secret= query parameter ---
+      if (env.EXA_WEBHOOK_SECRET) {
+        const providedSecret = url.searchParams.get('secret')
+        if (providedSecret !== env.EXA_WEBHOOK_SECRET) {
+          console.log('[Relay] Exa webhook rejected: invalid or missing secret')
+          return jsonResponse({ error: 'Forbidden' }, 403)
+        }
+      } else {
+        console.warn('[Relay] EXA_WEBHOOK_SECRET not set — Exa webhook auth skipped (dev mode)')
+      }
+
       const userId = exaMatch[1]
       const payload = await request.json() as Record<string, any>
       const doId = env.USER_SESSION.idFromName(userId)
@@ -1239,7 +1411,27 @@ export default {
 
     // Composio webhook → route to user's DO (metadata-based resolution only)
     if (request.method === 'POST' && url.pathname === '/webhook') {
-      const payload = await request.json() as Record<string, any>
+      // --- Standard Webhooks signature verification ---
+      const body = await request.text()
+      if (env.COMPOSIO_WEBHOOK_SECRET) {
+        const msgId    = request.headers.get('webhook-id') ?? ''
+        const msgTs    = request.headers.get('webhook-timestamp') ?? ''
+        const msgSig   = request.headers.get('webhook-signature') ?? ''
+
+        if (!msgId || !msgTs || !msgSig) {
+          return jsonResponse({ error: 'Missing webhook signature headers' }, 400)
+        }
+
+        const valid = await verifyStandardWebhookSignature(body, msgId, msgTs, msgSig, env.COMPOSIO_WEBHOOK_SECRET)
+        if (!valid) {
+          console.log('[Relay] Composio webhook rejected: invalid signature')
+          return jsonResponse({ error: 'Invalid webhook signature' }, 401)
+        }
+      } else {
+        console.warn('[Relay] COMPOSIO_WEBHOOK_SECRET not set — webhook signature verification skipped (dev mode)')
+      }
+
+      const payload = JSON.parse(body) as Record<string, any>
 
       // Resolve userId from Composio payload metadata only
       let userId: string | null = null
@@ -1280,6 +1472,8 @@ export default {
     if (request.method === 'POST' && url.pathname === '/v1/webhook-route') {
       const result = await validateRequest(request, env)
       if (result instanceof Response) return result
+      const rateCheck = checkRateLimit(result.token, 'general')
+      if (rateCheck) return rateCheck
       const body = await request.json() as { composioUserId?: string; connectedAccountId?: string }
       const relayUserId = String(result.data.userId)
       if (body.composioUserId) {
@@ -1313,6 +1507,8 @@ export default {
     if (request.method === 'POST' && url.pathname === '/v1/model') {
       const result = await validateRequest(request, env)
       if (result instanceof Response) return result
+      const rateCheck = checkRateLimit(result.token, 'general')
+      if (rateCheck) return rateCheck
 
       const { model } = (await request.json()) as { model: string }
       if (!MODELS[model]) {
@@ -1328,6 +1524,8 @@ export default {
     if (request.method === 'GET' && url.pathname === '/v1/account') {
       const result = await validateRequest(request, env)
       if (result instanceof Response) return result
+      const rateCheck = checkRateLimit(result.token, 'general')
+      if (rateCheck) return rateCheck
 
       const { data } = result
       return jsonResponse({
@@ -1349,6 +1547,8 @@ export default {
     if (request.method === 'POST' && url.pathname === '/v1/embeddings') {
       const result = await validateRequest(request, env)
       if (result instanceof Response) return result
+      const rateCheck = checkRateLimit(result.token, 'api')
+      if (rateCheck) return rateCheck
       return proxyOpenAIEmbeddings(request, env, result.token, result.data)
     }
 
@@ -1356,6 +1556,8 @@ export default {
     if (request.method === 'POST' && url.pathname === '/v1/audio/speech') {
       const result = await validateRequest(request, env)
       if (result instanceof Response) return result
+      const rateCheck = checkRateLimit(result.token, 'api')
+      if (rateCheck) return rateCheck
       return proxyOpenAITts(request, env, result.token, result.data)
     }
 
@@ -1363,6 +1565,8 @@ export default {
     if (request.method === 'POST' && url.pathname === '/v1/audio/transcriptions') {
       const result = await validateRequest(request, env)
       if (result instanceof Response) return result
+      const rateCheck = checkRateLimit(result.token, 'api')
+      if (rateCheck) return rateCheck
       return proxyOpenAITranscription(request, env, result.token, result.data)
     }
 
@@ -1370,6 +1574,8 @@ export default {
     if (url.pathname === '/admin/create-token' && request.method === 'POST') {
       const result = await validateRequest(request, env)
       if (result instanceof Response) return result
+      const rateCheck = checkRateLimit(result.token, 'admin')
+      if (rateCheck) return rateCheck
       const adminData = result.data
       if (!adminData.admin) return jsonResponse({ error: 'Admin access required' }, 403)
 
@@ -1395,6 +1601,8 @@ export default {
     if (url.pathname === '/admin/list-tokens' && request.method === 'GET') {
       const result = await validateRequest(request, env)
       if (result instanceof Response) return result
+      const rateCheck = checkRateLimit(result.token, 'admin')
+      if (rateCheck) return rateCheck
       if (!result.data.admin) return jsonResponse({ error: 'Admin access required' }, 403)
 
       // List all tokens from KV (scan with prefix)
@@ -1428,6 +1636,8 @@ export default {
     if (url.pathname === '/admin/revoke-token' && request.method === 'POST') {
       const result = await validateRequest(request, env)
       if (result instanceof Response) return result
+      const rateCheck = checkRateLimit(result.token, 'admin')
+      if (rateCheck) return rateCheck
       if (!result.data.admin) return jsonResponse({ error: 'Admin access required' }, 403)
 
       const body = await request.json() as { token: string }
@@ -1442,6 +1652,8 @@ export default {
     if (url.pathname.startsWith('/v1/composio/')) {
       const result = await validateRequest(request, env)
       if (result instanceof Response) return result
+      const rateCheck = checkRateLimit(result.token, 'api')
+      if (rateCheck) return rateCheck
       return proxyComposio(request, env, result.token, result.data)
     }
 

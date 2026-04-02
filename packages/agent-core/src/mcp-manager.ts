@@ -69,7 +69,7 @@ export class MCPManager {
   private stderrBuffers: Map<string, string[]> = new Map()
 
   async connect(configs: MCPServerConfig[]): Promise<void> {
-    for (const config of configs) {
+    const results = await Promise.allSettled(configs.map(async (config) => {
       const transport = new StdioClientTransport({
         command: config.command,
         args: config.args ?? [],
@@ -94,10 +94,18 @@ export class MCPManager {
         { capabilities: {} }
       )
       await client.connect(transport)
-      this.clients.set(config.name, client)
-      this.cacheVersion++
-      this.toolCache = null
+      return { name: config.name, client }
+    }))
+
+    for (const result of results) {
+      if (result.status === 'fulfilled') {
+        this.clients.set(result.value.name, result.value.client)
+      } else {
+        console.error(`[MCP] Failed to connect:`, result.reason?.message ?? result.reason)
+      }
     }
+    this.cacheVersion++
+    this.toolCache = null
   }
 
   /** Get recent stderr output for a server (for debugging custom MCPs) */
@@ -114,20 +122,26 @@ export class MCPManager {
     const tools: Anthropic.Tool[] = []
     const serverMap = new Map<string, string>() // tool name → server name
 
-    for (const [serverName, client] of this.clients) {
-      try {
+    const results = await Promise.allSettled(
+      [...this.clients.entries()].map(async ([serverName, client]) => {
         const result = await client.listTools()
-        for (const tool of result.tools) {
+        return { serverName, tools: result.tools }
+      })
+    )
+
+    for (const result of results) {
+      if (result.status === 'fulfilled') {
+        for (const tool of result.value.tools) {
           const append = TOOL_DESCRIPTION_APPENDS[tool.name]
           tools.push({
             name: tool.name,
             description: append ? `${tool.description ?? ''} ${append}` : (tool.description ?? ''),
             input_schema: sanitizeSchema(tool.inputSchema) as Anthropic.Tool['input_schema']
           })
-          serverMap.set(tool.name, serverName)
+          serverMap.set(tool.name, result.value.serverName)
         }
-      } catch (err) {
-        console.error(`[MCP] Failed to list tools from ${serverName}:`, (err as Error).message)
+      } else {
+        console.error(`[MCP] Failed to list tools:`, (result.reason as Error).message)
       }
     }
 

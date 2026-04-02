@@ -403,6 +403,7 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
                   </div>
                 </div>
               )}
+
             </div>
 
             {/* Footer */}

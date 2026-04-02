@@ -27,10 +27,10 @@ interface CalendarPaneProps {
 }
 
 const TYPE_COLORS = {
-  routine:  { bg: 'bg-sky-100 dark:bg-sky-900/30',    text: 'text-sky-700 dark:text-sky-300',    dot: 'bg-sky-400' },
-  task:     { bg: 'bg-amber-100 dark:bg-amber-900/30', text: 'text-amber-700 dark:text-amber-300', dot: 'bg-amber-400' },
-  followup: { bg: 'bg-purple-100 dark:bg-purple-900/30', text: 'text-purple-700 dark:text-purple-300', dot: 'bg-purple-500' },
-  event:    { bg: 'bg-blue-100 dark:bg-blue-900/30',   text: 'text-blue-700 dark:text-blue-300',   dot: 'bg-blue-800' },
+  routine:  { bg: 'bg-sky-100 dark:bg-sky-900',    text: 'text-sky-700 dark:text-sky-300',    dot: 'bg-sky-400' },
+  task:     { bg: 'bg-amber-100 dark:bg-amber-900', text: 'text-amber-700 dark:text-amber-300', dot: 'bg-amber-400' },
+  followup: { bg: 'bg-purple-100 dark:bg-purple-900', text: 'text-purple-700 dark:text-purple-300', dot: 'bg-purple-500' },
+  event:    { bg: 'bg-blue-100 dark:bg-blue-900',   text: 'text-blue-700 dark:text-blue-300',   dot: 'bg-blue-800' },
 } as const
 
 function typeColors(type: string) {
@@ -368,7 +368,6 @@ function GoogleCalendarModal({
   onDisconnect,
   onToggle,
   onColor,
-  onSync,
   onClose,
 }: {
   status: { connected: boolean; calendars: GoogleCalendarInfo[]; lastSync: string | null }
@@ -438,7 +437,7 @@ function GoogleCalendarModal({
                       />
                       {/* Color picker popover */}
                       {colorPickerFor === cal.id && (
-                        <div className="absolute left-4 top-full mt-1 z-10 bg-white dark:bg-neutral-800 rounded-lg shadow-lg border border-neutral-200 dark:border-neutral-700 p-2 flex flex-wrap gap-1.5 w-[140px]">
+                        <div className="absolute left-4 top-full mt-1 z-10 bg-white dark:bg-neutral-800 rounded-lg shadow-lg border border-neutral-200 dark:border-neutral-800 p-2 flex flex-wrap gap-1.5 w-[140px]">
                           {GOOGLE_COLORS.map(c => (
                             <button
                               key={c.value}
@@ -576,7 +575,8 @@ function AgendaSection({
               </button>
             )}
             {entry.type === 'routine' && <Repeat size={14} className={cn('mt-0.5 flex-shrink-0', colors.text)} />}
-            {entry.type === 'event' && <CalendarDays size={14} className={cn('mt-0.5 flex-shrink-0', colors.text)} />}
+            {entry.type === 'event' && entry.source === 'google' && <img src="https://logos.composio.dev/api/googlecalendar" alt="" className="w-4 h-4 flex-shrink-0 mt-0.5" />}
+            {entry.type === 'event' && entry.source !== 'google' && <CalendarDays size={14} className={cn('mt-0.5 flex-shrink-0', colors.text)} />}
             <div className="flex-1 min-w-0">
               <p className="text-[14px] text-neutral-800 dark:text-neutral-200 leading-relaxed">{entry.label}</p>
               <p className={cn('text-[12px] mt-0.5', colors.text)}>
@@ -651,28 +651,44 @@ function WeekView({
               {format(setHours(new Date(), hour), 'h a')}
             </div>
             {days.map(day => {
-              const dayEntries = getEntriesForHour(entries, day, hour)
+              const dayEntries = getEntriesStartingAtHour(entries, day, hour)
               return (
                 <div key={`${day.toISOString()}-${hour}`}
                   className={cn(
-                    'h-[48px] border-l border-b border-neutral-200 dark:border-neutral-700 relative',
-                    isToday(day) && !isOffHour(hour) && 'bg-blue-50/30 dark:bg-blue-950/10',
+                    'h-[48px] border-l border-b border-neutral-200 dark:border-neutral-800 relative overflow-visible',
+                    isToday(day) && !isOffHour(hour) && 'bg-blue-50/30 dark:bg-blue-950/10 dark:border-l-transparent',
                     isOffHour(hour) && 'bg-neutral-50 dark:bg-neutral-900/50'
                   )}>
-                  {dayEntries.map(entry => (
-                    <div
-                      key={entry.id}
-                      onClick={() => onSelect(entry)}
-                      className={cn(
-                        'absolute inset-x-0.5 top-0.5 rounded px-1 py-0.5 text-[10px] truncate cursor-pointer',
-                        typeColors(entry.type).bg,
-                        typeColors(entry.type).text,
-                        selectedId === entry.id && 'ring-1 ring-current'
-                      )}
-                    >
-                      {entry.label}
-                    </div>
-                  ))}
+                  {dayEntries.map(entry => {
+                    const durationHours = getEntryDurationHours(entry)
+                    const heightPx = Math.max(durationHours * 48, 20)
+                    return (
+                      <div
+                        key={entry.id}
+                        onClick={() => onSelect(entry)}
+                        style={{ height: `${heightPx}px`, zIndex: 20 }}
+                        className={cn(
+                          'absolute inset-x-0.5 top-0 rounded px-1 py-0.5 text-[10px] cursor-pointer overflow-hidden flex items-start gap-1',
+                          typeColors(entry.type).bg,
+                          typeColors(entry.type).text,
+                          selectedId === entry.id && 'ring-1 ring-current'
+                        )}
+                      >
+                        {entry.source === 'google' && <img src="https://logos.composio.dev/api/googlecalendar" alt="" className="w-3 h-3 flex-shrink-0 mt-px" />}
+                        <div className="min-w-0 flex-1">
+                          <span className="truncate block">{entry.label}</span>
+                          {heightPx >= 36 && entry.start && entry.end && (
+                            <span className="truncate block opacity-70 text-[9px]">
+                              {format(parseISO(entry.start), 'h:mm a')} – {format(parseISO(entry.end), 'h:mm a')}
+                            </span>
+                          )}
+                          {heightPx >= 52 && entry.location && (
+                            <span className="truncate block opacity-60 text-[9px]">{entry.location}</span>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })}
                 </div>
               )
             })}
@@ -715,7 +731,7 @@ function MonthView({
           const dayEntries = getEntriesForDay(entries, day)
           return (
             <div key={day.toISOString()} className={cn(
-              'border-b border-r border-neutral-200 dark:border-neutral-700 p-1.5 overflow-hidden',
+              'border-b border-r border-neutral-200 dark:border-neutral-800 p-1.5 overflow-hidden',
               !isSameMonth(day, anchor) && 'opacity-40',
               isToday(day) && 'bg-blue-50/50 dark:bg-blue-950/20'
             )}>
@@ -725,12 +741,13 @@ function MonthView({
                   key={entry.id}
                   onClick={() => onSelect(entry)}
                   className={cn(
-                    'text-[9px] truncate rounded px-1 mb-0.5 cursor-pointer',
+                    'text-[9px] truncate rounded px-1 mb-0.5 cursor-pointer relative',
                     typeColors(entry.type).bg,
                     typeColors(entry.type).text,
                     selectedId === entry.id && 'ring-1 ring-current'
                   )}
                 >
+                  {entry.source === 'google' && <img src="https://logos.composio.dev/api/googlecalendar" alt="" className="w-2.5 h-2.5 absolute bottom-0.5 right-1" />}
                   {entry.label}
                 </div>
               ))}
@@ -773,30 +790,46 @@ function DayView({
     <ScrollArea className="h-full">
       <div ref={scrollRef} className="px-4">
         {hours.map(hour => {
-          const hourEntries = getEntriesForHour(entries, anchor, hour)
+          const hourEntries = getEntriesStartingAtHour(entries, anchor, hour)
           return (
             <div key={hour} className={cn(
-              'flex border-b border-neutral-200 dark:border-neutral-700 min-h-[48px]',
+              'border-b border-neutral-200 dark:border-neutral-800 min-h-[48px] flex relative',
               isOffHour(hour) && 'bg-neutral-50 dark:bg-neutral-900/50'
             )}>
               <div className={cn('w-[50px] text-[11px] text-neutral-400 text-right pr-3 pt-1 flex-shrink-0', isOffHour(hour) && 'opacity-50')}>
                 {format(setHours(new Date(), hour), 'h a')}
               </div>
-              <div className="flex-1 py-0.5">
-                {hourEntries.map(entry => (
-                  <div
-                    key={entry.id}
-                    onClick={() => onSelect(entry)}
-                    className={cn(
-                      'rounded px-2 py-1 mb-0.5 text-[12px] cursor-pointer',
-                      typeColors(entry.type).bg,
-                      typeColors(entry.type).text,
-                      selectedId === entry.id && 'ring-1 ring-current'
-                    )}
-                  >
-                    {entry.label}
-                  </div>
-                ))}
+              <div className="flex-1 relative overflow-visible">
+                {hourEntries.map(entry => {
+                  const durationHours = getEntryDurationHours(entry)
+                  const heightPx = Math.max(durationHours * 48, 24)
+                  return (
+                    <div
+                      key={entry.id}
+                      onClick={() => onSelect(entry)}
+                      style={{ height: `${heightPx}px`, zIndex: 20 }}
+                      className={cn(
+                        'absolute inset-x-0 top-0 rounded px-2 py-1 text-[12px] cursor-pointer overflow-hidden flex items-start gap-1.5',
+                        typeColors(entry.type).bg,
+                        typeColors(entry.type).text,
+                        selectedId === entry.id && 'ring-1 ring-current'
+                      )}
+                    >
+                      {entry.source === 'google' && <img src="https://logos.composio.dev/api/googlecalendar" alt="" className="w-3.5 h-3.5 flex-shrink-0 mt-px" />}
+                      <div className="min-w-0 flex-1">
+                        <span className="truncate block">{entry.label}</span>
+                        {heightPx >= 40 && entry.start && entry.end && (
+                          <span className="truncate block opacity-70 text-[10px]">
+                            {format(parseISO(entry.start), 'h:mm a')} – {format(parseISO(entry.end), 'h:mm a')}
+                          </span>
+                        )}
+                        {heightPx >= 60 && entry.location && (
+                          <span className="truncate block opacity-60 text-[10px]">{entry.location}</span>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
             </div>
           )
@@ -834,6 +867,34 @@ function getEntriesForHour(entries: CalendarEntry[], day: Date, hour: number): C
     }
     return false
   })
+}
+
+function getEntriesStartingAtHour(entries: CalendarEntry[], day: Date, hour: number): CalendarEntry[] {
+  return entries.filter(e => {
+    if (e.completed) return false
+    if (e.start && e.start.includes('T')) {
+      const d = parseISO(e.start)
+      return isSameDay(d, day) && getHours(d) === hour
+    }
+    if (e.due && e.due.includes('T')) {
+      const d = parseISO(e.due)
+      return isSameDay(d, day) && getHours(d) === hour
+    }
+    if (e.cron) {
+      return cronMatchesDay(e.cron, day) && cronMatchesHour(e.cron, hour)
+    }
+    return false
+  })
+}
+
+function getEntryDurationHours(entry: CalendarEntry): number {
+  if (entry.start && entry.end) {
+    const startMs = parseISO(entry.start).getTime()
+    const endMs = parseISO(entry.end).getTime()
+    const hours = (endMs - startMs) / (1000 * 60 * 60)
+    if (hours > 0) return hours
+  }
+  return 1 // default 1 hour for entries without end time
 }
 
 function cronMatchesDay(cron: string, day: Date): boolean {
