@@ -1024,7 +1024,6 @@ function listMemoryFiles(dataDir: string): string[] {
 }
 
 function buildSystemPrompt(connectedServices: string[], agentProfilePath: string, settings: AgentSettings, dataDir: string, teamRoster?: any[], teamName?: string, googleCalendarConnected = false, composioSlugs: string[] = []): string {
-  const isFirstRun = !existsSync(agentProfilePath)
   const memoryFiles = listMemoryFiles(dataDir)
   const exaConnected = connectedServices.includes('exa')
 
@@ -1039,8 +1038,8 @@ function buildSystemPrompt(connectedServices: string[], agentProfilePath: string
 All other tools (memory, files, schedule, skills, send_team_message, etc.) are built-in — call them directly.${composioSection}`
     : 'No external integrations connected. Settings → connect. Built-in tools (memory, files, schedule, skills) are always available.'
 
-  const onboardingSection = !settings.name
-    ? '\n\nONBOARDING (MANDATORY): This is a brand new user who has not been set up. You MUST call memory(action: "read", file: "onboarding.md") as your FIRST action — do NOT greet or respond until you have read it. Then follow the onboarding script exactly. One question per message. Save their info via update_settings as you learn it. When done, delete onboarding.md from memory.'
+  const onboardingSection = !settings.onboarded
+    ? '\n\nONBOARDING (MANDATORY): This is a brand new user who has not been set up. You MUST call memory(action: "read", file: "onboarding.md") as your FIRST action — do NOT greet or respond until you have read it. Then follow the onboarding script exactly. One question per message. Save their info via update_settings as you learn it. When done, set onboarded: true and delete onboarding.md from memory.'
     : ''
 
   const formatHour = (h: number) => h === 24 ? 'midnight' : h === 0 ? '12am' : h < 12 ? `${h}am` : h === 12 ? '12pm' : `${h - 12}pm`

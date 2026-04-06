@@ -1,7 +1,7 @@
 import { config } from 'dotenv'
 import { WebSocketServer, WebSocket } from 'ws'
 import { writeFile, mkdir } from 'fs/promises'
-import { existsSync, writeFileSync, mkdirSync } from 'fs'
+import { existsSync, writeFileSync, readFileSync, mkdirSync } from 'fs'
 import { Agent } from './agent.js'
 import { GoogleCalendarService } from './google-calendar.js'
 import { MCPServerConfig } from './mcp-manager.js'
@@ -413,7 +413,7 @@ End with: "Got it. I'll run in the background and surface anything that needs yo
 
 Tip: type @skill-creator anytime to build custom automations — like a daily briefing, auto follow-ups, or weekly recaps."
 
-Then delete this file (onboarding.md) — onboarding is complete.
+Then: update_settings({ onboarded: true }) and delete this file (onboarding.md) — onboarding is complete.
 `,
 
   'heartbeat.md': `# Heartbeat
@@ -521,7 +521,7 @@ End with: "All set. I'll run in the background and surface anything that needs y
 
 Tip: upload a fillable PDF contract and I can fill it out for you. Type @contract-review to analyze any contract."
 
-Then delete this file (onboarding.md) — onboarding is complete.
+Then: update_settings({ onboarded: true }) and delete this file (onboarding.md) — onboarding is complete.
 `,
   },
 }
@@ -2858,7 +2858,12 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
           // Initialize Google Calendar if relay provides credentials
           if (data.googleClientId && data.googleClientSecret) {
             const envPath = join(DATA_DIR, '.env')
-            writeFileSync(envPath, `GOOGLE_CLIENT_ID=${data.googleClientId}\nGOOGLE_CLIENT_SECRET=${data.googleClientSecret}\n`, { mode: 0o600 })
+            // Read-modify-write to preserve existing keys (e.g. API keys)
+            let existing = ''
+            try { existing = readFileSync(envPath, 'utf-8') } catch {}
+            const lines = existing.split('\n').filter(l => l.trim() && !l.startsWith('GOOGLE_CLIENT_ID=') && !l.startsWith('GOOGLE_CLIENT_SECRET='))
+            lines.push(`GOOGLE_CLIENT_ID=${data.googleClientId}`, `GOOGLE_CLIENT_SECRET=${data.googleClientSecret}`)
+            writeFileSync(envPath, lines.join('\n') + '\n', { mode: 0o600 })
             initGoogleCalendar(data.googleClientId, data.googleClientSecret)
           }
           send(ws, { type: 'relay_status', active: true, model: data.model, usage: data.usage, admin: data.admin ?? false })
