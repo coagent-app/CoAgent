@@ -22,6 +22,9 @@
       "keytar",
       "onnxruntime-node",
       "protobufjs"
-    ]
+    ],
+    "overrides": {
+      "@types/react": "18.3.28"
+    }
   }
 }
