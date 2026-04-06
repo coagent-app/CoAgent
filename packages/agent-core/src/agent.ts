@@ -1164,7 +1164,7 @@ export class Agent {
     this.dataDir = dataDir
     this.historyPath = join(dataDir, 'conversation.json')
     this.teamHistoryPath = join(dataDir, 'team-history.json')
-    this.agentProfilePath = join(dataDir, 'memory', 'agent.md')
+    this.agentProfilePath = join(dataDir, 'memory', 'profile.md')
     this.mcpReady = this.mcpManager.connect(mcpConfigs).catch(err => console.error('[Agent] MCP connect error:', err))
     this.loadHistory().catch(console.error)
     this.loadTeamHistory().catch(console.error)
@@ -2947,7 +2947,7 @@ Rules:
       const todoId = payload?.todoId ?? payload?.id ?? ''
       const context = payload?.context ?? payload?.instruction ?? ''
       const contextSection = context ? `\n\nContext notes:\n${context}` : ''
-      return `[Scheduled task — ${time}] A task is now due. Execute it.\n\nTask: ${task}\nTask ID: ${todoId}${contextSection}\n\n1. Read agent.md and any relevant memory for additional context.\n2. Carry out the task using the correct tools.\n3. When done, mark it complete with the schedule tool (action: complete).\n4. Add a done item describing what you did.\n\nDo not do anything outside the scope of this task.`
+      return `[Scheduled task — ${time}] A task is now due. Execute it.\n\nTask: ${task}\nTask ID: ${todoId}${contextSection}\n\n1. Read profile.md and any relevant memory for additional context.\n2. Carry out the task using the correct tools.\n3. When done, mark it complete with the schedule tool (action: complete).\n4. Add a done item describing what you did.\n\nDo not do anything outside the scope of this task.`
     }
     if (trigger.source === 'meeting_brief') {
       const p = trigger.payload as any

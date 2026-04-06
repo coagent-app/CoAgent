@@ -300,7 +300,7 @@ When multiple independent tool calls are needed, batch them in a single response
 Notes in \`~/.coagent/memory/\` — my brain across conversations.
 
 - **setup.md** — this file (read-only).
-- **agent.md** — user profile: who you are, preferences, how to handle things.
+- **profile.md** — user profile: who you are, preferences, how to handle things.
 - **heartbeat.md** — what to check and how to handle events during heartbeats.
 - **preferences.md** — tone, format, behavior preferences.
 - **contacts.md** — key people and how to handle their messages.
@@ -308,7 +308,7 @@ Notes in \`~/.coagent/memory/\` — my brain across conversations.
 
 Updated as we work together. User can edit directly.
 
-**Off-limits to the 3 AM job:** setup.md, agent.md, heartbeat.md, preferences.md — only the user or main agent edits these.
+**Off-limits to the 3 AM job:** setup.md, profile.md, heartbeat.md, preferences.md — only the user or main agent edits these.
 
 ## Workflows
 
@@ -343,6 +343,11 @@ async function updateSetupMd(connectedSlugs: string[]): Promise<void> {
 
 const MEMORY_FILES: Record<string, string> = {
   'setup.md': buildSetupMd([]),
+
+  'profile.md': `# User Profile
+
+This file is written during onboarding. It contains who the user is, what they do, and how the agent should work for them.
+`,
 
   'onboarding.md': `# Onboarding
 
@@ -386,7 +391,7 @@ Save their choice: update_settings({ autonomy: "ask_first" | "balanced" | "auton
 
 ## Step 5: Write their profile
 
-When you have a clear picture, write their profile to agent.md:
+When you have a clear picture, write their profile to profile.md:
 
 # [their name]
 **About**: [what they do, in their words]
@@ -484,7 +489,7 @@ Save their choice: update_settings({ autonomy: "ask_first" | "balanced" | "auton
 
 ## Step 5: Write their profile
 
-When you have a clear picture, write their profile to agent.md:
+When you have a clear picture, write their profile to profile.md:
 
 # [their name]
 **About**: Real estate agent in [market]. [buyers/sellers/both]. [property types].
