@@ -12,7 +12,18 @@ permissions:
 jobs:
   build:
     runs-on: macos-latest
-    name: Build — macOS (Apple Silicon)
+    strategy:
+      matrix:
+        include:
+          - arch: aarch64
+            rust-target: aarch64-apple-darwin
+            bun-target: bun-darwin-arm64
+            label: Apple Silicon
+          - arch: x86_64
+            rust-target: x86_64-apple-darwin
+            bun-target: bun-darwin-x64
+            label: Intel
+    name: Build — macOS (${{ matrix.label }})
 
     steps:
       - uses: actions/checkout@v4
@@ -32,12 +43,13 @@ jobs:
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin
+          targets: ${{ matrix.rust-target }}
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
           workspaces: apps/desktop/src-tauri
+          key: ${{ matrix.rust-target }}
 
       # macOS: Import signing certificate
       - name: Import Apple certificate
@@ -63,10 +75,10 @@ jobs:
 
       # Compile sidecar binaries
       - name: Compile coagent-server sidecar
-        run: bun build packages/agent-core/dist/server.js --compile --target=bun-darwin-arm64 --outfile apps/desktop/src-tauri/binaries/coagent-server-aarch64-apple-darwin
+        run: bun build packages/agent-core/dist/server.js --compile --target=${{ matrix.bun-target }} --outfile apps/desktop/src-tauri/binaries/coagent-server-${{ matrix.rust-target }}
 
       - name: Compile coagent-memory sidecar
-        run: bun build packages/mcp-memory/dist/index.js --compile --target=bun-darwin-arm64 --outfile apps/desktop/src-tauri/binaries/coagent-memory-aarch64-apple-darwin
+        run: bun build packages/mcp-memory/dist/index.js --compile --target=${{ matrix.bun-target }} --outfile apps/desktop/src-tauri/binaries/coagent-memory-${{ matrix.rust-target }}
 
       - name: chmod sidecars
         run: chmod +x apps/desktop/src-tauri/binaries/*
@@ -78,7 +90,7 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           ENTITLEMENTS="apps/desktop/src-tauri/Entitlements.plist"
-          for bin in apps/desktop/src-tauri/binaries/coagent-*-aarch64-apple-darwin; do
+          for bin in apps/desktop/src-tauri/binaries/coagent-*-${{ matrix.rust-target }}; do
             echo "Signing $bin"
             codesign --force --options runtime --entitlements "$ENTITLEMENTS" \
               --sign "$APPLE_SIGNING_IDENTITY" "$bin"
@@ -105,3 +117,44 @@ jobs:
           releaseBody: 'See the assets below to download for your platform.'
           releaseDraft: true
           prerelease: false
+          args: --target ${{ matrix.rust-target }}
+
+  rename-assets:
+    needs: build
+    runs-on: ubuntu-latest
+    name: Rename release assets
+    steps:
+      - name: Rename DMGs for clarity
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME:-${{ github.ref_name }}}"
+          VERSION="${TAG#v}"
+
+          # Give GitHub a moment to finalize uploads
+          sleep 5
+
+          # List current assets
+          echo "Current assets:"
+          gh release view "$TAG" --repo "${{ github.repository }}" --json assets -q '.assets[].name'
+
+          # Rename aarch64 DMG
+          AARCH64_DMG=$(gh release view "$TAG" --repo "${{ github.repository }}" --json assets -q '.assets[].name' | grep "aarch64.*\.dmg$" | head -1)
+          if [ -n "$AARCH64_DMG" ]; then
+            echo "Renaming $AARCH64_DMG → Co-Agent_${VERSION}_Apple-Silicon.dmg"
+            gh release download "$TAG" --repo "${{ github.repository }}" --pattern "$AARCH64_DMG" --dir /tmp
+            gh release upload "$TAG" --repo "${{ github.repository }}" "/tmp/$AARCH64_DMG#Co-Agent_${VERSION}_Apple-Silicon.dmg"
+            gh release delete-asset "$TAG" --repo "${{ github.repository }}" "$AARCH64_DMG" --yes
+          fi
+
+          # Rename x86_64 DMG
+          X86_DMG=$(gh release view "$TAG" --repo "${{ github.repository }}" --json assets -q '.assets[].name' | grep "x86_64.*\.dmg$" | head -1)
+          if [ -n "$X86_DMG" ]; then
+            echo "Renaming $X86_DMG → Co-Agent_${VERSION}_Intel.dmg"
+            gh release download "$TAG" --repo "${{ github.repository }}" --pattern "$X86_DMG" --dir /tmp
+            gh release upload "$TAG" --repo "${{ github.repository }}" "/tmp/$X86_DMG#Co-Agent_${VERSION}_Intel.dmg"
+            gh release delete-asset "$TAG" --repo "${{ github.repository }}" "$X86_DMG" --yes
+          fi
+
+          echo "Final assets:"
+          gh release view "$TAG" --repo "${{ github.repository }}" --json assets -q '.assets[].name'
