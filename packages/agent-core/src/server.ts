@@ -2813,8 +2813,10 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
           const data = await res.json() as { model: string; usage: any; admin?: boolean }
           writeRelayCredentialsFile()
           send(ws, { type: 'relay_status', active: true, model: data.model, usage: data.usage, admin: data.admin ?? false })
+          send(ws, { type: 'relay_credentials_ready' })
         } else {
           send(ws, { type: 'relay_status', active: false, model: null, usage: null })
+          send(ws, { type: 'error', message: 'Invalid activation code' })
         }
       } catch (err: any) {
         send(ws, { type: 'error', message: `Relay activation failed: ${err.message}` })

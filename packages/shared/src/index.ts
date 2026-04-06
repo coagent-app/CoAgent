@@ -262,6 +262,7 @@ export type WSServerMessage =
   | { type: 'capability_card'; name: string; capabilities: { name: string; description: string; checked: boolean }[]; authFields?: { name: string; displayName: string; description: string; helpUrl?: string; helpText?: string }[] }
   | { type: 'whatsapp_qr'; dataUrl: string }
   | { type: 'relay_credentials'; relayUrl: string; token: string; userId: string }
+  | { type: 'relay_credentials_ready' }
   | { type: 'push_notification'; title: string; body: string }
   | { type: 'notification_prefs'; mode: NotificationMode }
   | { type: 'team_message'; message: TeamMessage }
