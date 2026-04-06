@@ -235,6 +235,59 @@ mkdirSync(DATA_DIR, { recursive: true })
 setUsageDataDir(DATA_DIR)
 initCustomMcpDir(DATA_DIR)
 
+// macOS GUI apps launched from Finder/Dock inherit a stripped PATH
+// (/usr/bin:/bin:/usr/sbin:/sbin) that doesn't include Homebrew, nvm,
+// fnm, volta, or mise install locations. Augment PATH so child_process
+// spawns of node/npm can find them.
+function augmentPathForGuiLaunch(): void {
+  const home = homedir()
+  const candidates = [
+    '/opt/homebrew/bin',           // Apple Silicon Homebrew
+    '/usr/local/bin',              // Intel Homebrew + pkg installer
+    `${home}/.volta/bin`,
+    `${home}/.bun/bin`,
+    `${home}/.local/bin`,
+  ]
+  // nvm / fnm / mise store node under versioned dirs — pick the newest
+  try {
+    const { readdirSync, statSync } = require('fs') as typeof import('fs')
+    const versioned = [
+      `${home}/.nvm/versions/node`,
+      `${home}/.local/share/fnm/node-versions`,
+      `${home}/.fnm/node-versions`,
+      `${home}/.local/share/mise/installs/node`,
+    ]
+    for (const root of versioned) {
+      if (!existsSync(root)) continue
+      const entries = readdirSync(root).filter((n: string) => !n.startsWith('.'))
+      if (!entries.length) continue
+      entries.sort().reverse() // newest-ish first
+      for (const v of entries) {
+        const bin = join(root, v, 'bin')
+        // fnm/mise nest an extra "installation" dir
+        const altBin = join(root, v, 'installation', 'bin')
+        if (existsSync(bin)) candidates.push(bin)
+        if (existsSync(altBin)) candidates.push(altBin)
+      }
+    }
+  } catch { /* ignore */ }
+
+  const existing = (process.env.PATH || '').split(':').filter(Boolean)
+  const seen = new Set(existing)
+  const toPrepend: string[] = []
+  for (const c of candidates) {
+    if (existsSync(c) && !seen.has(c)) {
+      toPrepend.push(c)
+      seen.add(c)
+    }
+  }
+  if (toPrepend.length) {
+    process.env.PATH = [...toPrepend, ...existing].join(':')
+    console.log(`[Server] Augmented PATH with: ${toPrepend.join(', ')}`)
+  }
+}
+augmentPathForGuiLaunch()
+
 function writeRelayCredentialsFile() {
   const relayUrl = process.env.RELAY_URL ?? ''
   const token = process.env.RELAY_TOKEN ?? ''
@@ -997,8 +1050,25 @@ agent.onCustomIntegration = async (action, data) => {
       const { execSync } = await import('child_process')
       const dir = getCustomMcpDir(name)
       console.log(`[Custom MCP] Installing dependencies in ${dir}...`)
-      execSync('npm install --production --ignore-scripts', { cwd: dir, stdio: 'pipe', timeout: 60000 })
-      console.log(`[Custom MCP] Dependencies installed for ${name}`)
+      try {
+        execSync('npm install --production --ignore-scripts', {
+          cwd: dir,
+          stdio: 'pipe',
+          timeout: 60000,
+          env: { ...process.env, PATH: process.env.PATH || '' },
+        })
+        console.log(`[Custom MCP] Dependencies installed for ${name}`)
+      } catch (installErr: any) {
+        const stderr = installErr.stderr?.toString?.() || installErr.message || ''
+        const isMissing = /not found|ENOENT|command not found/i.test(stderr)
+        if (isMissing) {
+          throw new Error(
+            'npm was not found on your system. Co-Agent needs Node.js + npm installed to build custom integrations. ' +
+            'Install from https://nodejs.org (or via Homebrew: `brew install node`), then try again.'
+          )
+        }
+        throw new Error(`npm install failed: ${stderr.slice(0, 500)}`)
+      }
 
       // Send credential form to frontend
       if (authFields.length > 0) {
