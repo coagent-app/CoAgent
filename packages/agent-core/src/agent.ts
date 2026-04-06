@@ -1553,8 +1553,7 @@ export class Agent {
 Your job:
 1. Read heartbeat.md from memory — it tells you what to check.
 2. Follow those instructions: check email, calendar, integrations, whatever it says.
-3. Call set_status_line with a brief status (3-8 words) for their dashboard — e.g. "3 new emails", "All caught up", "Meeting in 30 min".
-4. Escalation:
+3. Escalation:
    - Urgent/time-sensitive (meeting in 5 min, server down, important person) → notify_user (push notification)
    - Actionable but not urgent (new emails to reply to, tasks due, follow-ups needed) → queue_approval with full context so the user can review and approve
 5. Update memories as needed.
@@ -1564,7 +1563,8 @@ ${svcList}
 
 Rules:
 - Be fast. Don't waste tool calls.
-- ALWAYS call set_status_line before finishing.
+- ALWAYS end with a brief text summary (1-3 sentences) of what you checked and found. This is shown to the user in their chat. Example: "Checked email — 2 new messages from clients. No upcoming meetings today. All caught up."
+- If no integrations are connected, just check schedule/memory and summarize.
 - You are READ-ONLY for external integrations. You can search and fetch data, but NEVER send emails, create events, post messages, or modify anything. If something needs action, use queue_approval to surface it for the user.
 - Keep memory updates concise.
 - NEVER fabricate tool results — always call the tool.`

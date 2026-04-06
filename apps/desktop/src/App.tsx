@@ -29,6 +29,8 @@ export default function App() {
   const selectedItem = selectedItemId ? queue.find(i => i.id === selectedItemId) ?? null : null
   const setSelectedItem = useCallback((item: ApprovalItem | null) => setSelectedItemId(item?.id ?? null), [])
   const [modalOpen, setModalOpen] = useState(false)
+  const [tourDone, setTourDone] = useState(() => localStorage.getItem('tourDone') === '1')
+  const markTourDone = useCallback((done: boolean) => { setTourDone(done); if (done) localStorage.setItem('tourDone', '1') }, [])
 
   // ESC to cancel voice/stop agent — always fire both regardless of state
   useEffect(() => {
@@ -230,8 +232,8 @@ export default function App() {
         onChat={chat}
       />
 
-      {/* Onboarding tour — shown on first launch */}
-      {settings && !settings.onboarded && connected && (
+      {/* Onboarding tour — shown on first launch until user finishes the tour walkthrough */}
+      {settings && !settings.onboarded && !tourDone && connected && (
         <OnboardingTour
           settings={settings}
           onUpdate={updateSettings}
@@ -239,6 +241,7 @@ export default function App() {
           onNavigate={(v) => setView(v as View)}
           onActivate={activateRelay}
           hasRelay={!!relayCredentials}
+          setTourDone={markTourDone}
         />
       )}
 

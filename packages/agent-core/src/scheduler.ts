@@ -562,13 +562,14 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
     callbacks?.onHeartbeat?.('started')
     callbacks?.onHeartbeatStream?.('start')
     try {
+      let summary = ''
       await keepAwakeDuring(agent.handleTrigger(
         { source: 'heartbeat' },
-        (chunk) => callbacks?.onHeartbeatStream?.('chunk', { text: chunk }),
+        (chunk) => { summary += chunk; callbacks?.onHeartbeatStream?.('chunk', { text: chunk }) },
         (tool, label) => callbacks?.onHeartbeatStream?.('tool', { tool, label })
       ))
       callbacks?.onHeartbeatStream?.('done')
-      callbacks?.onHeartbeat?.('done')
+      callbacks?.onHeartbeat?.('done', summary.trim() || undefined)
     } catch (err: any) {
       console.error('[Scheduler] Heartbeat error:', err.message)
       callbacks?.onHeartbeat?.('done')

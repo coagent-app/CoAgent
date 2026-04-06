@@ -815,6 +815,10 @@ const scheduler = startScheduler(agent, DATA_DIR, {
     if (nextAt) nextHeartbeatAt = nextAt.toISOString()
     console.log(`[Server] Heartbeat callback: status=${status}, nextAt=${nextAt?.toISOString() ?? 'none'}`)
     broadcast({ type: 'heartbeat', status, summary, nextAt: nextAt?.toISOString() })
+    // Surface heartbeat summary in chat so users see the agent is alive
+    if (status === 'done' && summary) {
+      broadcast({ type: 'chat_response', message: { role: 'assistant', content: summary, timestamp: new Date().toISOString() } })
+    }
   },
   onHeartbeatStream: (() => {
     return (type: 'start' | 'chunk' | 'tool' | 'done', data?: any) => {
@@ -2829,12 +2833,16 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
     if (msg.type === 'trigger_heartbeat') {
       console.log('[Server] Manual heartbeat triggered')
       try {
+        let summary = ''
         await agent.handleTrigger(
           { source: 'heartbeat' },
-          () => {},
+          (chunk) => { summary += chunk },
           () => {}
         )
-        send(ws, { type: 'heartbeat', status: 'done' })
+        send(ws, { type: 'heartbeat', status: 'done', summary: summary.trim() || undefined })
+        if (summary.trim()) {
+          broadcast({ type: 'chat_response', message: { role: 'assistant', content: summary.trim(), timestamp: new Date().toISOString() } })
+        }
         send(ws, { type: 'queue_update', items: agent.queue.getPending() })
         send(ws, { type: 'done_update', items: agent.queue.getDone() })
         send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })

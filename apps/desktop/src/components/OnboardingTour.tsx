@@ -10,6 +10,7 @@ interface OnboardingTourProps {
   onNavigate: (view: string) => void
   onActivate?: (token: string, relayUrl: string) => void
   hasRelay?: boolean
+  setTourDone: (done: boolean) => void
 }
 
 const STEPS = [
@@ -58,7 +59,7 @@ const FEATURE_CONTENT: Record<string, { icon: React.ElementType; title: string; 
   },
 }
 
-export function OnboardingTour({ settings, onUpdate, onOpenIntegrations, onNavigate, onActivate, hasRelay }: OnboardingTourProps) {
+export function OnboardingTour({ settings, onUpdate, onOpenIntegrations, onNavigate, onActivate, hasRelay, setTourDone }: OnboardingTourProps) {
   const [step, setStep] = useState<StepId>('welcome')
   const [activationCode, setActivationCode] = useState('')
   const [activationError, setActivationError] = useState('')
@@ -113,12 +114,12 @@ export function OnboardingTour({ settings, onUpdate, onOpenIntegrations, onNavig
   }
 
   function finish() {
-    onUpdate({ onboarded: true })
+    setTourDone(true)
     onNavigate('chat')
   }
 
   function finishAndGo(action: () => void) {
-    onUpdate({ onboarded: true })
+    setTourDone(true)
     action()
   }
 
