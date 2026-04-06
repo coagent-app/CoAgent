@@ -131,10 +131,8 @@ jobs:
           TAG="${GITHUB_REF_NAME:-${{ github.ref_name }}}"
           VERSION="${TAG#v}"
 
-          # Give GitHub a moment to finalize uploads
           sleep 5
 
-          # List current assets
           echo "Current assets:"
           gh release view "$TAG" --repo "${{ github.repository }}" --json assets -q '.assets[].name'
 
@@ -143,17 +141,19 @@ jobs:
           if [ -n "$AARCH64_DMG" ]; then
             echo "Renaming $AARCH64_DMG → Co-Agent_${VERSION}_Apple-Silicon.dmg"
             gh release download "$TAG" --repo "${{ github.repository }}" --pattern "$AARCH64_DMG" --dir /tmp
-            gh release upload "$TAG" --repo "${{ github.repository }}" "/tmp/$AARCH64_DMG#Co-Agent_${VERSION}_Apple-Silicon.dmg"
+            mv "/tmp/$AARCH64_DMG" "/tmp/Co-Agent_${VERSION}_Apple-Silicon.dmg"
             gh release delete-asset "$TAG" --repo "${{ github.repository }}" "$AARCH64_DMG" --yes
+            gh release upload "$TAG" --repo "${{ github.repository }}" "/tmp/Co-Agent_${VERSION}_Apple-Silicon.dmg"
           fi
 
           # Rename x86_64 DMG
-          X86_DMG=$(gh release view "$TAG" --repo "${{ github.repository }}" --json assets -q '.assets[].name' | grep "x86_64.*\.dmg$" | head -1)
+          X86_DMG=$(gh release view "$TAG" --repo "${{ github.repository }}" --json assets -q '.assets[].name' | grep "x64.*\.dmg$\|x86_64.*\.dmg$" | head -1)
           if [ -n "$X86_DMG" ]; then
             echo "Renaming $X86_DMG → Co-Agent_${VERSION}_Intel.dmg"
             gh release download "$TAG" --repo "${{ github.repository }}" --pattern "$X86_DMG" --dir /tmp
-            gh release upload "$TAG" --repo "${{ github.repository }}" "/tmp/$X86_DMG#Co-Agent_${VERSION}_Intel.dmg"
+            mv "/tmp/$X86_DMG" "/tmp/Co-Agent_${VERSION}_Intel.dmg"
             gh release delete-asset "$TAG" --repo "${{ github.repository }}" "$X86_DMG" --yes
+            gh release upload "$TAG" --repo "${{ github.repository }}" "/tmp/Co-Agent_${VERSION}_Intel.dmg"
           fi
 
           echo "Final assets:"
