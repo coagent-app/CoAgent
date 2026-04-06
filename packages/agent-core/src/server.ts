@@ -2154,7 +2154,7 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
           const response = await agent.chat(
             prompt,
             (chunk) => send(ws, { type: 'chat_chunk', text: chunk }),
-            (tool, label) => send(ws, { type: 'tool_start', tool, label })
+            (tool, label) => { send(ws, { type: 'chat_segment_end' }); send(ws, { type: 'tool_start', tool, label }) }
           )
           // Only mark done after successful execution
           agent.queue.addDone(`${item.title}`)

@@ -136,6 +136,7 @@ export function useAgent() {
         if (msg.type === 'queue_update') setQueue(msg.items)
         if (msg.type === 'done_update') setDone(msg.items)
         if (msg.type === 'agent_thinking') {
+          wasStreamingRef.current = false
           setThinking(true)
           setStreamingText(null)
           setToolLabel(null)
@@ -206,6 +207,8 @@ export function useAgent() {
           }
         }
         if (msg.type === 'agent_stopped') {
+          wasStreamingRef.current = false
+          setStreamingText(null)
           setThinking(false)
           setToolLabel(null)
           setProcessing(false)
@@ -214,7 +217,7 @@ export function useAgent() {
             import('@/lib/voice').then(v => { v.cancelTts(); v.showVoiceSummary('') })
           }
         }
-        if (msg.type === 'chat_history') { setMessages(msg.messages); saveCache({ messages: msg.messages.slice(-50) }) }
+        if (msg.type === 'chat_history') { wasStreamingRef.current = false; setStreamingText(null); setMessages(msg.messages.slice(-100)); saveCache({ messages: msg.messages.slice(-50) }) }
         if (msg.type === 'integrations_update') {
           // Detect newly connected integration with triggers → show prompt
           // Skip first update (initial load) — only detect transitions during this session
