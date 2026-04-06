@@ -110,6 +110,7 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          VITE_RELAY_URL: ${{ secrets.VITE_RELAY_URL }}
         with:
           projectPath: apps/desktop
           tagName: ${{ github.ref_name }}
