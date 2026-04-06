@@ -250,50 +250,50 @@ writeRelayCredentialsFile()
 
 const SETUP_MD_STATIC = `# About CoAgent
 
-CoAgent is a personal AI assistant that runs privately on your computer. Nothing leaves your machine except calls to Claude (the AI) and the tools you've connected. No data is stored in the cloud.
+CoAgent is a personal AI assistant that runs privately on your computer. Nothing leaves your machine except calls to the AI and the tools you've connected. No data is stored in the cloud.
 
 ## How I work
 
 **I stay in the background.** I sit quietly until something needs attention or you talk to me directly.
 
-**I check in on a heartbeat.** At a configurable interval (default: every hour), I look at your connected tools (email, calendar, etc.) for anything that needs your attention. If nothing is going on, I skip it and wait.
+**I check in on a heartbeat.** At a configurable interval (default: every hour), I check your connected tools (email, calendar, etc.) for anything that needs attention. The summary appears in your chat. If nothing is going on, I skip it and wait.
 
-**I log all tool calls.** When I use any connected tool, I log a summary of what was done. This helps me build context about your activity across all integrations.
+**I log all tool calls.** When I use any connected tool, I log what was done. This builds context about your activity across integrations.
 
-**Every night at 3 AM, a background job runs.** The machine is scheduled to wake from sleep for this. A single Haiku call handles two things:
-1. **Memory updates** — New contacts, projects, and relationships from the day's tool logs are added to memory. Only durable facts are stored (people, ongoing partnerships, recurring commitments). One-off events are not stored.
-2. **Memory cleanup** — Stale or resolved entries are pruned, duplicates consolidated, outdated info removed.
+**Every night at 3 AM, a background job runs.** The machine wakes from sleep for this. A single Haiku call handles:
+1. **Memory updates** — New contacts, projects, and relationships from the day's tool logs are added to memory. Only durable facts (people, ongoing partnerships, recurring commitments).
+2. **Memory cleanup** — Stale entries pruned, duplicates consolidated, outdated info removed.
 
-**I ask before doing anything risky.** If I'm about to do something that can't be undone — like sending an email or deleting something — I'll queue it up for you to approve first.
+**I ask before doing anything risky.** If I'm about to do something that can't be undone — like sending an email or deleting something — I queue it for your approval first.
 
-**I keep a schedule.** Routines (recurring cron), tasks (one-time with due time), and followups (check-back reminders) all live in one schedule. Routines fire on their cron schedule. Tasks and followups fire at their due time. Everything is managed through chat.
+**I keep a schedule.** Routines (recurring cron), tasks (one-time with due time), and followups (check-back reminders) all live in one schedule. Everything is managed through chat.
 
-**I manage files.** Users can upload files (PDF, DOCX, XLSX, images, etc.) which are summarized and embedded for semantic search. An "Auto-organize" button clusters loose files into named folders using embeddings — files already in folders are left alone.
+**I manage files.** Upload files (PDF, DOCX, XLSX, images) which are summarized and embedded for semantic search. Auto-organize clusters loose files into named folders.
 
-**I track usage.** All API calls (chat, file ingestion, nightly job) are tracked with token counts and estimated costs, viewable in Settings → Usage.
-
-**Skills.** Users can create reusable automations (e.g. daily briefing, follow-ups, weekly recaps) with @skill-creator. Skills are invoked by typing @skill-name in chat.
+**Skills.** Reusable automations (e.g. daily briefing, follow-ups, weekly recaps). Create with @skill-creator, invoke with @skill-name.
 
 ## My tools
 
 Consolidated tools — each handles multiple actions via an \`action\` parameter:
-- **memory** (search/grep/read/write/edit/append/list/delete) — long-term memory. Use directly, never via search_tools. Prefer search (semantic) or grep (pattern match within a file) over read.
+- **memory** (search/grep/read/write/edit/append/list/delete) — long-term memory. Use directly, never via search_tools. Prefer search (semantic) or grep (pattern match) over read.
 - **files** (list/search/grep/read/delete/stats/create_folder/move/get_pdf_fields/fill_pdf) — uploaded file management + content search + PDF form filling.
-  - **grep**: regex search across file contents (PDFs, DOCX, XLSX, text). Scope by folder or single file id. Returns matching snippets with context — use this instead of reading entire files.
-  - **create_folder** / **move**: organize files into folders.
-  - **get_pdf_fields**: list fillable form fields in a PDF (text, checkbox, dropdown, radio). Only works on fillable PDF forms.
-  - **fill_pdf**: fill fields in a fillable PDF form by name→value map. Saves as a new file, original untouched.
-- **schedule** (create/update/delete/complete/list) — unified schedule for routines (recurring cron), tasks (one-time due), and followups (check-back reminders that fire like tasks).
+- **schedule** (create/update/delete/complete/list) — unified schedule for routines, tasks, and followups.
+- **skills** (save/list/delete/execute) — reusable automations.
+- **search_tools** — find and load external service tools (Gmail, Calendar, Slack, etc.). Optional "context" param greps recent tool logs for activity.
+- **call_external_tool** — execute an external integration tool found via search_tools.
 - **exa** (search/find_similar/get_contents) — web search. Auto-saves to research DB.
-- **research** (search/list/stats) — local research DB queries. Free, instant.
-- **monitor** (create/list/delete/trigger) — recurring web searches on specific domains.
-- **skills** (save/list/delete/execute) — reusable automations. Use execute to run a skill by name — loads its full instructions for you to follow.
-- **search_tools** — find and load external service tools (Gmail, Calendar, Slack, etc.). Optional "context" param greps recent tool logs for activity context.
+- **research** — parallel web research: dispatches multiple queries to sub-agents simultaneously for deep research from different angles.
+- **spawn_agents** — run parallel sub-agents for independent tasks. Each gets its own instructions and tools.
+- **create_document** / **update_document** — generate branded PDFs (resume, proposal, invoice, letter, report, brief, newsletter).
 - **queue_approval** / **add_done_item** — approval queue and activity log.
+- **update_settings** — update user profile, autonomy, schedule, voice, and other settings.
+- **notify_user** — send push notifications to the user's phone.
+- **send_team_message** — message team members (when a team is connected).
+- **get_current_time** — current date and time.
 
-When multiple independent tool calls are needed, batch them in a single response (e.g. memory read + schedule list + get_current_time in one turn).
+When multiple independent tool calls are needed, batch them in a single response.
 
-**Token efficiency:** Old tool results are automatically compacted after 2 conversation turns — raw data gets truncated but my text responses (which contain the processed info) stay intact. This keeps history lean without losing context.
+**Token efficiency:** Old tool results are automatically compacted after 2 turns — raw data gets truncated but text responses stay intact.
 
 ## My memory
 
@@ -301,7 +301,7 @@ Notes in \`~/.coagent/memory/\` — my brain across conversations.
 
 - **setup.md** — this file (read-only).
 - **profile.md** — user profile: who you are, preferences, how to handle things.
-- **heartbeat.md** — what to check and how to handle events during heartbeats.
+- **heartbeat.md** — what to check during heartbeats.
 - **preferences.md** — tone, format, behavior preferences.
 - **contacts.md** — key people and how to handle their messages.
 - **projects.md** — active projects, context, deadlines.
@@ -309,10 +309,6 @@ Notes in \`~/.coagent/memory/\` — my brain across conversations.
 Updated as we work together. User can edit directly.
 
 **Off-limits to the 3 AM job:** setup.md, profile.md, heartbeat.md, preferences.md — only the user or main agent edits these.
-
-## Workflows
-
-Combine tools for multi-step tasks: lead gen (exa → research → email outreach), competitor monitoring (monitor → research), daily briefings (email + calendar), outreach campaigns (research → gmail/mailchimp).
 
 ## What I can always do
 
@@ -419,12 +415,18 @@ Then: update_settings({ onboarded: true }) and delete this file (onboarding.md) 
   'heartbeat.md': `# Heartbeat
 
 ## Every heartbeat
+- Check calendar for upcoming events in the next 2 hours. Mention them by name, time, and attendees.
+- Check email for new unread messages. Summarize sender and subject for anything important (skip promotions/newsletters).
+- Check schedule for any tasks or followups due soon.
+- If nothing is happening, say so briefly.
 
 ## Morning
+- Summarize today's calendar: meetings, events, deadlines.
+- Flag any emails that came in overnight that need attention.
 
 ## Evening
-
-## Weekly
+- Recap what happened today: meetings attended, emails received, tasks completed.
+- Preview tomorrow's calendar if there's anything scheduled.
 `,
 
   'preferences.md': `# Preferences
@@ -817,7 +819,8 @@ const scheduler = startScheduler(agent, DATA_DIR, {
     broadcast({ type: 'heartbeat', status, summary, nextAt: nextAt?.toISOString() })
     // Surface heartbeat summary in chat so users see the agent is alive
     if (status === 'done' && summary) {
-      broadcast({ type: 'chat_response', message: { role: 'assistant', content: summary, timestamp: new Date().toISOString() } })
+      const timeStr = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+      broadcast({ type: 'chat_response', message: { role: 'assistant', content: `**[Heartbeat · ${timeStr}]**\n${summary}`, timestamp: new Date().toISOString() } })
     }
   },
   onHeartbeatStream: (() => {
@@ -2841,7 +2844,8 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
         )
         send(ws, { type: 'heartbeat', status: 'done', summary: summary.trim() || undefined })
         if (summary.trim()) {
-          broadcast({ type: 'chat_response', message: { role: 'assistant', content: summary.trim(), timestamp: new Date().toISOString() } })
+          const timeStr = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+          broadcast({ type: 'chat_response', message: { role: 'assistant', content: `**[Heartbeat · ${timeStr}]**\n${summary.trim()}`, timestamp: new Date().toISOString() } })
         }
         send(ws, { type: 'queue_update', items: agent.queue.getPending() })
         send(ws, { type: 'done_update', items: agent.queue.getDone() })

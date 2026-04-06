@@ -1548,11 +1548,14 @@ export class Agent {
       const svcList = connectedServices.length > 0
         ? `Connected integrations: ${connectedServices.join(', ')}. Use search_tools → call_external_tool to access them.`
         : 'No external integrations connected.'
+      const hour = new Date().getHours()
+      const timeOfDay = hour < 10 ? 'morning' : hour >= 18 ? 'evening' : 'midday'
       systemPrompt = `You are the Heartbeat Agent — a background process checking in periodically on ${settings.name || 'the user'}'s behalf. You run independently while they may be chatting.
+Current time: ${new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' })} (${timeOfDay})
 
 Your job:
-1. Read heartbeat.md from memory — it tells you what to check.
-2. Follow those instructions: check email, calendar, integrations, whatever it says.
+1. Read heartbeat.md from memory — it has instructions for every heartbeat, plus morning/evening specifics. Follow the "Every heartbeat" section always, plus the "${timeOfDay === 'morning' ? 'Morning' : timeOfDay === 'evening' ? 'Evening' : 'Every heartbeat'}" section if applicable.
+2. Check calendar events, email, and integrations as instructed.
 3. Escalation:
    - Urgent/time-sensitive (meeting in 5 min, server down, important person) → notify_user (push notification)
    - Actionable but not urgent (new emails to reply to, tasks due, follow-ups needed) → queue_approval with full context so the user can review and approve
@@ -1563,7 +1566,7 @@ ${svcList}
 
 Rules:
 - Be fast. Don't waste tool calls.
-- ALWAYS end with a brief text summary (1-3 sentences) of what you checked and found. This is shown to the user in their chat. Example: "Checked email — 2 new messages from clients. No upcoming meetings today. All caught up."
+- Your ONLY text output should be the final summary (1-3 sentences). Do NOT narrate your process ("Let me check...", "Now I'll..."). Just do the work silently with tool calls, then output the summary as your single text response. Example: "No upcoming meetings. 1 promo email (skipped). All caught up."
 - If no integrations are connected, just check schedule/memory and summarize.
 - You are READ-ONLY for external integrations. You can search and fetch data, but NEVER send emails, create events, post messages, or modify anything. If something needs action, use queue_approval to surface it for the user.
 - Keep memory updates concise.
@@ -2939,7 +2942,7 @@ Rules:
       const hasEvents = (events && events.length > 0) || this.missedEvents.length > 0
       if (this.missedEvents.length > 0) this.missedEvents = []
       const imsgNote = this.imessageConnected ? '\n\nCheck iMessages: call IMESSAGE_LIST_CONVERSATIONS to see recent messages. If there are new messages from known contacts, read them and handle accordingly.' : ''
-      return `[Heartbeat — ${time}]${eventsSection}${missedSection}\n\nRead heartbeat.md for instructions.${hasEvents ? ' Check contacts.md for known people.' : ''}${imsgNote} ${hasEvents ? 'For actionable items from known contacts, call queue_approval (do NOT just say you queued — actually call the tool). Then summarize.' : 'If nothing needs attention, reply "All clear."'}`
+      return `[Heartbeat — ${time}]${eventsSection}${missedSection}\n\nRead heartbeat.md for instructions — you MUST actually call read_memory("heartbeat.md") and follow what it says. Check calendar, email, and schedule as instructed.${hasEvents ? ' Check contacts.md for known people.' : ''}${imsgNote} ${hasEvents ? 'For actionable items from known contacts, call queue_approval (do NOT just say you queued — actually call the tool). ' : ''}Summarize what you checked and found.`
     }
     if (trigger.source === 'todo_due' || trigger.source === 'task_due') {
       const payload = trigger.payload as any

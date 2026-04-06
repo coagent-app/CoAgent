@@ -180,10 +180,8 @@ export function useAgent() {
           }
         }
         if (msg.type === 'chat_response') {
-          // Server-injected user message (e.g. todo fired) — add directly
-          if (msg.message.role === 'user') {
-            setMessages(prev => [...prev, msg.message].slice(-100))
-          }
+          // Server-injected message (e.g. todo fired, heartbeat summary) — add directly
+          setMessages(prev => [...prev, msg.message].slice(-100))
           // Snapshot any remaining streaming text as a final bubble
           setStreamingText(current => {
             if (current?.trim()) {
