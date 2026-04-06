@@ -31,6 +31,7 @@ export function useAgent() {
   const reconnectDelay = useRef(RECONNECT_BASE)
   const pollIntervals = useRef<ReturnType<typeof setInterval>[]>([])
   const recentIngestedFiles = useRef<{ id: string; filename: string }[]>([])
+  const wasStreamingRef = useRef(false)
   const [queue, setQueue] = useState<ApprovalItem[]>([])
   const [done, setDone] = useState<DoneItem[]>([])
   const [messages, setMessages] = useState<AgentMessage[]>(_cached.messages ?? [])
@@ -170,6 +171,7 @@ export function useAgent() {
           }
         }
         if (msg.type === 'chat_chunk') {
+          wasStreamingRef.current = true
           setThinking(false)
           setToolLabel(null)
           setResearchAgents([])
@@ -180,8 +182,8 @@ export function useAgent() {
           }
         }
         if (msg.type === 'chat_response') {
-          // Server-injected message (e.g. todo fired, heartbeat summary) — add directly
-          setMessages(prev => [...prev, msg.message].slice(-100))
+          const wasStreamed = wasStreamingRef.current
+          wasStreamingRef.current = false
           // Snapshot any remaining streaming text as a final bubble
           setStreamingText(current => {
             if (current?.trim()) {
@@ -189,6 +191,11 @@ export function useAgent() {
             }
             return null
           })
+          // Only add message directly if it wasn't streamed (e.g. heartbeat summary, todo trigger)
+          // Streamed responses are already captured via chat_chunk → streaming text snapshot above
+          if (!wasStreamed) {
+            setMessages(prev => [...prev, msg.message].slice(-100))
+          }
           setThinking(false)
           setToolLabel(null)
           setProcessing(false)
