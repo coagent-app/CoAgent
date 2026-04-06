@@ -1,7 +1,7 @@
 import { config } from 'dotenv'
 import { WebSocketServer, WebSocket } from 'ws'
 import { writeFile, mkdir } from 'fs/promises'
-import { existsSync, writeFileSync } from 'fs'
+import { existsSync, writeFileSync, mkdirSync } from 'fs'
 import { Agent } from './agent.js'
 import { GoogleCalendarService } from './google-calendar.js'
 import { MCPServerConfig } from './mcp-manager.js'
@@ -231,6 +231,7 @@ function buildMcpConfigs(): MCPServerConfig[] {
 }
 
 const DATA_DIR = process.env.COAGENT_DATA_DIR || join(homedir(), '.coagent')
+mkdirSync(DATA_DIR, { recursive: true })
 setUsageDataDir(DATA_DIR)
 initCustomMcpDir(DATA_DIR)
 

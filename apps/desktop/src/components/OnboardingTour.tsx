@@ -8,6 +8,8 @@ interface OnboardingTourProps {
   onUpdate: (patch: Partial<AgentSettings>) => void
   onOpenIntegrations: () => void
   onNavigate: (view: string) => void
+  onActivate?: (token: string, relayUrl: string) => void
+  hasRelay?: boolean
 }
 
 const STEPS = [
@@ -56,8 +58,11 @@ const FEATURE_CONTENT: Record<string, { icon: React.ElementType; title: string; 
   },
 }
 
-export function OnboardingTour({ settings, onUpdate, onOpenIntegrations, onNavigate }: OnboardingTourProps) {
+export function OnboardingTour({ settings, onUpdate, onOpenIntegrations, onNavigate, onActivate, hasRelay }: OnboardingTourProps) {
   const [step, setStep] = useState<StepId>('welcome')
+  const [activationCode, setActivationCode] = useState('')
+  const [activationError, setActivationError] = useState('')
+  const [activating, setActivating] = useState(false)
   const stepIndex = STEPS.findIndex(s => s.id === step)
   const stepDef = STEPS[stepIndex]
 
@@ -159,16 +164,53 @@ export function OnboardingTour({ settings, onUpdate, onOpenIntegrations, onNavig
               <h2 className="text-[22px] font-semibold text-neutral-900 dark:text-neutral-100 mb-2">
                 Welcome to Co-Agent
               </h2>
-              <p className="text-[14px] text-neutral-500 dark:text-neutral-400 leading-relaxed mb-8">
-                Your personal AI assistant that runs privately on your machine. Let's take a quick look around.
+              <p className="text-[13px] text-neutral-400 dark:text-neutral-500 mb-1">
+                Private Beta
               </p>
-              <button
-                onClick={next}
-                className="flex items-center gap-2 py-2.5 px-6 rounded-xl bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900 text-[14px] font-medium hover:opacity-90 transition-opacity mx-auto"
-              >
-                Show me around
-                <ArrowRight className="w-4 h-4" />
-              </button>
+              <p className="text-[14px] text-neutral-500 dark:text-neutral-400 leading-relaxed mb-6">
+                Your personal AI assistant that runs privately on your machine.
+              </p>
+
+              {!hasRelay ? (
+                <div className="text-left">
+                  <input
+                    type="text"
+                    value={activationCode}
+                    onChange={e => { setActivationCode(e.target.value); setActivationError('') }}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter' && activationCode.trim()) {
+                        setActivating(true)
+                        onActivate?.(activationCode.trim(), 'https://coagent-relay.brettponters.workers.dev')
+                        setTimeout(() => setActivating(false), 3000)
+                      }
+                    }}
+                    placeholder="Enter your activation code"
+                    className="w-full px-4 py-3 rounded-xl border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-800 text-[14px] text-neutral-900 dark:text-neutral-100 placeholder:text-neutral-400 dark:placeholder:text-neutral-500 focus:outline-none focus:ring-2 focus:ring-neutral-300 dark:focus:ring-neutral-600 mb-3"
+                    autoFocus
+                  />
+                  {activationError && <p className="text-[12px] text-red-500 mb-3">{activationError}</p>}
+                  <button
+                    onClick={() => {
+                      if (!activationCode.trim()) { setActivationError('Enter your activation code'); return }
+                      setActivating(true)
+                      onActivate?.(activationCode.trim(), 'https://coagent-relay.brettponters.workers.dev')
+                      setTimeout(() => setActivating(false), 3000)
+                    }}
+                    disabled={activating}
+                    className="w-full py-2.5 rounded-xl bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900 text-[14px] font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
+                  >
+                    {activating ? 'Activating...' : 'Activate'}
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={next}
+                  className="flex items-center gap-2 py-2.5 px-6 rounded-xl bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900 text-[14px] font-medium hover:opacity-90 transition-opacity mx-auto"
+                >
+                  Show me around
+                  <ArrowRight className="w-4 h-4" />
+                </button>
+              )}
             </div>
           </div>
         </div>
