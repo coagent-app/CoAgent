@@ -1577,7 +1577,7 @@ Rules:
     const KIMI = 'kimi-k2.5'
     const currentModel = (context === 'heartbeat' || context === 'team') ? KIMI : settings.powerModel
     const isClaudeModel = isAnthropicModel(currentModel)
-    const maxTokens = context === 'heartbeat' ? 4096 : isClaudeModel ? 16000 : 4096
+    const maxTokens = context === 'heartbeat' ? 4096 : 16000
 
     console.log(`[Agent] Starting ${context} on ${currentModel} (max_tokens: ${maxTokens})`)
 
