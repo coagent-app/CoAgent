@@ -64,7 +64,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUxMTIzNzI4RjBGNjNCQUEKUldTcU8vYndLRGNTNFNqN2oxZXkrZ3VmM0JjVWZIaXdwSWFkeUVzWVlWY3pwaWN6UERQYlRvNTAK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDMyQjUwNjY2MkRFRkIyOEEKUldTS3N1OHRaZ2ExTWdzN1Z6ZldzbCtwUDM3MHI3djJWK0psSGsydXFrREpEckxxekEwa3duTkcK",
       "endpoints": [
         "https://github.com/brettponters/CoAgent/releases/latest/download/latest.json"
       ]
