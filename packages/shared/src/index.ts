@@ -36,6 +36,7 @@ export interface AgentSettings {
   auto_brief_meetings: boolean // auto-brief before calendar meetings
   auto_brief_minutes: number   // minutes before meeting to fire brief (default 30)
   agent_name: string           // user-chosen name for their agent (e.g. "Jarvis")
+  autonomy_notes: string       // freeform autonomy rules written during onboarding, injected into system prompt
 }
 
 export type TriggerSource = 'heartbeat' | 'webhook' | 'manual' | 'memory_cleanup' | 'todo_due' | 'routine' | 'task_due' | 'meeting_brief'

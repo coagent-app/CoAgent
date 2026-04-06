@@ -262,6 +262,7 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
         active_hours: { type: 'object', properties: { start: { type: 'number' }, end: { type: 'number' } } },
         active_days: { type: 'array', items: { type: 'string', enum: ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] } },
         autonomy: { type: 'string', enum: ['ask_first', 'balanced', 'agent', 'autonomous'], description: 'How much autonomy the agent has: ask_first (approve everything), balanced (ask for big stuff), autonomous (just handle it)' },
+        autonomy_notes: { type: 'string', description: 'Specific autonomy rules — what to handle freely, what to always ask about, hard no\'s. Written during onboarding, injected into system prompt.' },
         heartbeat_interval: { type: 'number', description: 'Minutes between heartbeats (0=off)' },
       }
     }
@@ -1056,7 +1057,7 @@ IMPORTANT: Every tool call costs real money. Be deliberate — don't make calls 
 ${serviceSection}
 User: ${settings.name || '?'} | ${settings.email || '?'} | ${settings.role || '?'} | ${settings.timezone || '?'}${settings.what_you_do ? `\nWhat they do: ${settings.what_you_do}` : ''}
 Active: ${formatHour(settings.active_hours.start)}–${formatHour(settings.active_hours.end)}, ${settings.active_days.join(', ')}
-Autonomy: ${settings.autonomy} — ${AUTONOMY_DESCRIPTIONS[settings.autonomy]}
+Autonomy: ${settings.autonomy} — ${AUTONOMY_DESCRIPTIONS[settings.autonomy]}${settings.autonomy_notes ? `\nAutonomy rules:\n${settings.autonomy_notes}` : ''}
 ${settings.heartbeat_interval > 0 ? `Heartbeat: every ${settings.heartbeat_interval}min — process triggers, check memory, escalate. After each heartbeat, call set_status_line with a brief status (3-8 words) summarizing what you found — e.g. "3 things in your queue", "All caught up", "2 new emails".` : ''}
 
 Memory: search first (semantic, parallel queries). Write things down immediately. Timestamps are automatic. heartbeat.md defines what to check each heartbeat — read and follow it. Before saving a new person/lead/contact, always search memory first to check if they already exist — update the existing entry instead of creating duplicates.${memoryFiles.length > 0 ? `\nRecent memories: ${memoryFiles.join(', ')} — search to find others.` : ''}

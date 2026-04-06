@@ -34,6 +34,7 @@ function getDefaultSettings(): AgentSettings {
     auto_brief_meetings: false,
     auto_brief_minutes: 30,
     agent_name: '',
+    autonomy_notes: '',
   }
 }
 
@@ -72,6 +73,7 @@ export async function readSettings(dataDir: string): Promise<AgentSettings> {
       auto_brief_meetings: parsed.auto_brief_meetings ?? DEFAULT_SETTINGS.auto_brief_meetings,
       auto_brief_minutes: parsed.auto_brief_minutes ?? DEFAULT_SETTINGS.auto_brief_minutes,
       agent_name: parsed.agent_name ?? DEFAULT_SETTINGS.agent_name,
+      autonomy_notes: parsed.autonomy_notes ?? DEFAULT_SETTINGS.autonomy_notes,
     }
   } catch (err: any) {
     if (err?.code !== 'ENOENT') {
@@ -128,6 +130,7 @@ export async function writeSettings(dataDir: string, patch: Partial<AgentSetting
       ? Math.max(5, Math.min(120, Math.round(patch.auto_brief_minutes)))
       : current.auto_brief_minutes,
     agent_name: patch.agent_name !== undefined ? patch.agent_name : current.agent_name,
+    autonomy_notes: patch.autonomy_notes !== undefined ? patch.autonomy_notes : current.autonomy_notes,
   }
 
   const target = join(dataDir, SETTINGS_FILE)
