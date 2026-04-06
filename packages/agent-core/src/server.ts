@@ -1282,6 +1282,28 @@ try {
   }
 } catch {}
 
+// Sync model from relay on startup — relay is the source of truth
+// This MUST complete before any chat starts to avoid empty-model 403s
+const relaySyncReady = (async () => {
+  const relay = getRelayConfig()
+  if (!relay) return
+  try {
+    const res = await fetch(`${relay.url}/v1/account`, {
+      headers: { 'Authorization': `Bearer ${relay.token}` },
+      signal: AbortSignal.timeout(10000),
+    })
+    if (res.ok) {
+      const data = await res.json() as { model: string }
+      if (data.model) {
+        await writeSettings(DATA_DIR, { powerModel: data.model })
+        console.log(`[Server] Synced model from relay: ${data.model}`)
+      }
+    }
+  } catch (err: any) {
+    console.warn('[Server] Failed to sync model from relay:', err.message)
+  }
+})()
+
 wss = new WebSocketServer({ host: '127.0.0.1', port: PORT })
 
 // Generate WebSocket auth nonce — only Tauri app can read this via IPC
@@ -1787,6 +1809,8 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
       chatInProgress = true
       agentBusy = true
       broadcast({ type: 'agent_thinking' } as any)
+      // Ensure relay model sync is complete before first chat
+      await relaySyncReady
       try {
         let streamed = ''
         const chatTimeout = new Promise<never>((_, reject) =>
@@ -2067,6 +2091,12 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
 
       // Tell the agent to execute the approved item
       if (item) {
+        if (chatInProgress || agentBusy) {
+          send(ws, { type: 'error', message: 'Agent is busy — try again in a moment.' })
+          return
+        }
+        chatInProgress = true
+        agentBusy = true
         const prompt = `The user approved this action: "${item.title}". ${item.description}${item.detail ? `\n\nDetails:\n${item.detail}` : ''}\n\nExecute it now.`
         send(ws, { type: 'agent_thinking' })
         try {
@@ -2089,6 +2119,9 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
           console.error('[Server] approve execution error:', err.message)
           send(ws, { type: 'error', message: err.message ?? 'Something went wrong.' })
           send(ws, { type: 'agent_stopped' })
+        } finally {
+          chatInProgress = false
+          agentBusy = false
         }
       }
     }
@@ -2794,6 +2827,16 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
         agent.reinitClient()
         const settings = await readSettings(DATA_DIR)
         broadcast({ type: 'settings_update', settings })
+        // Sync model choice to relay so it persists across devices/restarts
+        const relay = getRelayConfig()
+        if (relay) {
+          fetch(`${relay.url}/v1/model`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${relay.token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: msg.model }),
+          }).catch(err => console.warn('[Server] Failed to sync model to relay:', err.message))
+        }
+        relayStatusCache = null // invalidate cached status
         console.log('[Server] Model switched to', msg.model)
       } catch (err: any) {
         send(ws, { type: 'error', message: `Failed to switch model: ${err.message}` })

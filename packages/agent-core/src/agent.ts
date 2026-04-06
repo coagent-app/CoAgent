@@ -256,11 +256,12 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
         name: { type: 'string' }, email: { type: 'string' },
         timezone: { type: 'string' }, role: { type: 'string' },
         what_you_do: { type: 'string', description: 'Their work description for system prompt' },
+        agent_name: { type: 'string', description: 'What the user wants to call their agent (e.g. "Jarvis", "Friday")' },
         custom_instructions: { type: 'string', description: 'Custom instructions injected into every system prompt — use this to store user preferences, lead criteria, workflow rules, etc.' },
         onboarded: { type: 'boolean', description: 'True after onboarding done' },
         active_hours: { type: 'object', properties: { start: { type: 'number' }, end: { type: 'number' } } },
         active_days: { type: 'array', items: { type: 'string', enum: ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] } },
-        autonomy: { type: 'string', enum: ['ask_first', 'balanced', 'agent', 'autonomous'] },
+        autonomy: { type: 'string', enum: ['ask_first', 'balanced', 'agent', 'autonomous'], description: 'How much autonomy the agent has: ask_first (approve everything), balanced (ask for big stuff), autonomous (just handle it)' },
         heartbeat_interval: { type: 'number', description: 'Minutes between heartbeats (0=off)' },
       }
     }
@@ -1027,7 +1028,7 @@ function buildSystemPrompt(connectedServices: string[], agentProfilePath: string
   const exaConnected = connectedServices.includes('exa')
 
   const composioSection = composioSlugs.length > 0
-    ? `\nConnected integrations: ${composioSlugs.join(', ')}.`
+    ? `\nThe user has these apps connected: ${composioSlugs.map(s => s.toUpperCase()).join(', ')}. You CAN access their email, calendar, etc. through these. Do NOT tell the user an integration is missing if it's listed here.`
     : '\nNo integrations connected yet. The user can connect apps in the Integrations panel.'
 
   const serviceSection = connectedServices.length > 0
@@ -1037,8 +1038,8 @@ function buildSystemPrompt(connectedServices: string[], agentProfilePath: string
 All other tools (memory, files, schedule, skills, send_team_message, etc.) are built-in — call them directly.${composioSection}`
     : 'No external integrations connected. Settings → connect. Built-in tools (memory, files, schedule, skills) are always available.'
 
-  const onboardingSection = !settings.onboarded
-    ? '\n\nONBOARDING: The user is new. First ask what they want to call you (their agent name), save it via settings update (agent_name field), then read onboarding.md from memory and follow it.'
+  const onboardingSection = !settings.name
+    ? '\n\nONBOARDING (MANDATORY): This is a brand new user who has not been set up. You MUST call memory(action: "read", file: "onboarding.md") as your FIRST action — do NOT greet or respond until you have read it. Then follow the onboarding script exactly. One question per message. Save their info via update_settings as you learn it. When done, delete onboarding.md from memory.'
     : ''
 
   const formatHour = (h: number) => h === 24 ? 'midnight' : h === 0 ? '12am' : h < 12 ? `${h}am` : h === 12 ? '12pm' : `${h - 12}pm`

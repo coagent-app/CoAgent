@@ -276,6 +276,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const to = args?.to as string
       const text = args?.text as string
 
+      // Validate recipient format to prevent AppleScript/shell injection
+      if (!/^[\d+\-() ]+$|^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) {
+        return { content: [{ type: 'text', text: `Invalid recipient format: "${to}". Must be a phone number or email address.` }] }
+      }
+
       const escaped = text.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
 
       const appleScript = [

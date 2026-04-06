@@ -41,6 +41,7 @@ interface TokenData {
   supportAmount: number   // monthly support amount in cents
   usage: UsageData
   createdAt: string
+  expiresAt?: string      // ISO date — token rejected after this date (beta trials, etc.)
   active: boolean
   admin?: boolean
 }
@@ -332,6 +333,9 @@ async function validateRequest(request: Request, env: Env): Promise<{ token: str
   }
   if (!data.active) {
     return jsonResponse({ error: 'Token revoked — subscription cancelled' }, 403)
+  }
+  if (data.expiresAt && new Date(data.expiresAt) < new Date()) {
+    return jsonResponse({ error: 'Token expired — your trial has ended. Visit coagent.ai to subscribe.' }, 403)
   }
 
   return { token, data }
@@ -680,7 +684,7 @@ async function handleStripeWebhook(request: Request, env: Env): Promise<Response
 
       console.log(`New user #${userId} for ${session.customer}: ${token.slice(0, 8)}...`)
 
-      return jsonResponse({ ok: true, token, userId })
+      return jsonResponse({ ok: true })
     }
 
     // Subscription cancelled → revoke token
@@ -1786,23 +1790,27 @@ export default {
       const adminData = result.data
       if (!adminData.admin) return jsonResponse({ error: 'Admin access required' }, 403)
 
-      const body = await request.json() as { label?: string }
+      const body = await request.json() as { label?: string; days?: number }
       const token = generateToken()
       const prevId = parseInt(await env.TOKENS.get('_next_user_id') || '0')
       const userId = prevId + 1
       await env.TOKENS.put('_next_user_id', String(userId))
 
+      const trialDays = body.days ?? 30
+      const expiresAt = new Date(Date.now() + trialDays * 24 * 60 * 60 * 1000).toISOString()
+
       const tokenData: TokenData = {
         userId,
-        stripeCustomerId: body.label || `admin-created-${userId}`,
-        model: 'claude-sonnet-4-6',
+        stripeCustomerId: body.label || `beta-user-${userId}`,
+        model: 'kimi-k2.5',
         supportAmount: 0,
         usage: freshUsage(),
         createdAt: new Date().toISOString(),
+        expiresAt,
         active: true,
       }
       await saveToken(env, token, tokenData)
-      return jsonResponse({ ok: true, token, userId })
+      return jsonResponse({ ok: true, token, userId, expiresAt })
     }
 
     if (url.pathname === '/admin/list-tokens' && request.method === 'GET') {
@@ -1822,12 +1830,13 @@ export default {
           if (data) {
             users.push({
               token: key.name.slice(0, 8) + '...',
-              fullToken: key.name,
               userId: data.userId,
               model: data.model,
               active: data.active,
               admin: data.admin || false,
               createdAt: data.createdAt,
+              expiresAt: data.expiresAt || null,
+              expired: data.expiresAt ? new Date(data.expiresAt) < new Date() : false,
               label: data.stripeCustomerId,
               totalCostUsd: data.usage?.totalCostUsd ?? 0,
             })

@@ -44,7 +44,7 @@ function NavItem({
     <button
       onClick={onClick}
       className={cn(
-        'flex items-center gap-2.5 w-full px-2.5 py-1.5 rounded-md text-[13px] font-medium transition-colors text-left',
+        'sidebar-nav-item flex items-center gap-2.5 w-full px-2.5 py-1.5 rounded-md text-[13px] font-medium transition-colors text-left',
         active
           ? 'bg-neutral-100 text-neutral-900 dark:bg-neutral-800 dark:text-neutral-100'
           : 'text-neutral-500 hover:bg-neutral-100 hover:text-neutral-800 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-200'
@@ -177,6 +177,7 @@ export function Sidebar({ view, onViewChange, queueCount, integrations, onConnec
           ))}
         <button
           onClick={onOpenModal}
+          data-tour-integrations
           className="flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] text-neutral-400 hover:text-neutral-600 dark:text-neutral-500 dark:hover:text-neutral-300 transition-colors"
         >
           <ChevronRight size={12} />
@@ -212,6 +213,12 @@ export function Sidebar({ view, onViewChange, queueCount, integrations, onConnec
         </Avatar>
         <span className="text-[13px] font-medium text-neutral-600 dark:text-neutral-400">{userName || 'Settings'}</span>
       </button>
+
+      <div className="mt-2 px-2.5">
+        <span className="text-[10px] font-medium text-neutral-400 dark:text-neutral-500 tracking-wide">
+          Private Beta
+        </span>
+      </div>
     </div>
   )
 }

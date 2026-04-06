@@ -40,14 +40,11 @@ interface ChatPaneProps {
   className?: string
 }
 
-function getWelcomeMessage(userName?: string, userRole?: string, onboarded?: boolean): string {
-  const name = userName ? `, ${userName}` : ''
-  if (!onboarded) {
-    if (userRole?.toLowerCase().includes('real estate')) {
-      return `Hey${name}! I'm your AI assistant built for real estate. I run privately on your machine and can help with contracts, client follow-ups, listings, and your daily workflow.\n\nFirst things first — what would you like to call me? Then let's get you set up.`
-    }
-    return `Hey${name}! I'm your personal AI assistant. I run privately on your machine and can manage your email, calendar, tasks, and workflows.\n\nFirst things first — what would you like to call me? Then let's get you set up.`
+function getWelcomeMessage(userName?: string, userRole?: string): string {
+  if (!userName) {
+    return "Hey — I'm your personal AI assistant, running right here on your machine. I handle your email, calendar, research, follow-ups, and pretty much anything you throw at me. Send me a message to get started."
   }
+  const name = `, ${userName.split(/\s+/)[0]}`
   const hour = new Date().getHours()
   const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening'
   return `${greeting}${name}. What can I help you with?`
@@ -806,7 +803,7 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
         <div className="px-7 py-5 flex flex-col gap-3">
           {messages.length === 0 && !isActive && (
             <div className="flex justify-start">
-              <AgentBubble content={getWelcomeMessage(userName, userRole, onboarded)} files={files} />
+              <AgentBubble content={getWelcomeMessage(userName, userRole)} files={files} />
             </div>
           )}
 

@@ -228,12 +228,7 @@ export async function streamOpenAI(
   const openaiMessages = translateMessages(params.system, params.messages)
   const openaiTools = params.tools.length > 0 ? translateTools(params.tools) : undefined
 
-  // Kimi K2.5 has thinking enabled by default — disable to save tokens
-  const thinkingParam = params.model.startsWith('kimi')
-    ? { thinking: { type: 'disabled' } }
-    : {}
-
-  const createParams: OpenAI.ChatCompletionCreateParamsStreaming = {
+  const createParams: Record<string, any> = {
     model: params.model,
     max_tokens: params.maxTokens,
     messages: openaiMessages,
@@ -241,9 +236,11 @@ export async function streamOpenAI(
     stream: true,
     stream_options: { include_usage: true },
   }
-  // Kimi K2.5 thinking — pass via extra body to bypass SDK schema stripping
-  const extraBody = thinkingParam.thinking ? { body: { thinking: thinkingParam.thinking } } : {}
-  const stream = await client.chat.completions.create(createParams, { signal, ...extraBody })
+  // Kimi K2.5 has thinking enabled by default — disable to save tokens
+  if (params.model.startsWith('kimi')) {
+    createParams.thinking = { type: 'disabled' }
+  }
+  const stream = await (client.chat.completions as any).create(createParams, { signal })
 
   // Accumulate the full response from stream deltas
   let textContent = ''
