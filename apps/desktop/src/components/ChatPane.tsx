@@ -26,12 +26,17 @@ interface ChatPaneProps {
   files: FileEntry[]
   onNavigateToSettings?: () => void
   lastHeartbeat?: { time: Date; status: string; nextAt?: Date } | null
+  heartbeatLog?: { time: Date; status: string }[]
+  onTriggerHeartbeat?: () => void
+  statusLine?: string | null
   skills?: { name: string; description: string; placeholder?: string }[]
   capabilityCard?: { name: string; capabilities: { name: string; description: string; checked: boolean }[]; authFields?: { name: string; displayName: string; description: string; helpUrl?: string; helpText?: string }[] } | null
   onConfirmCapabilities?: (selected: string[], authValues?: Record<string, string>) => void
   userName?: string
   userRole?: string
   onboarded?: boolean
+  agentName?: string
+  onOpenDocument?: (fileId: string) => void
   className?: string
 }
 
@@ -39,17 +44,132 @@ function getWelcomeMessage(userName?: string, userRole?: string, onboarded?: boo
   const name = userName ? `, ${userName}` : ''
   if (!onboarded) {
     if (userRole?.toLowerCase().includes('real estate')) {
-      return `Hey${name}! I'm CoAgent, your AI assistant built for real estate. I run privately on your machine and can help with contracts, client follow-ups, listings, and your daily workflow.\n\nLet's get you set up — what market are you in, and do you primarily work with buyers, sellers, or both?`
+      return `Hey${name}! I'm your AI assistant built for real estate. I run privately on your machine and can help with contracts, client follow-ups, listings, and your daily workflow.\n\nFirst things first — what would you like to call me? Then let's get you set up.`
     }
-    return `Hey${name}! I'm CoAgent — your personal AI assistant. I run privately on your machine and can manage your email, calendar, tasks, and workflows.\n\nLet's get you set up. What do you do for work, and what would you like help with?`
+    return `Hey${name}! I'm your personal AI assistant. I run privately on your machine and can manage your email, calendar, tasks, and workflows.\n\nFirst things first — what would you like to call me? Then let's get you set up.`
   }
   const hour = new Date().getHours()
   const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening'
   return `${greeting}${name}. What can I help you with?`
 }
 
+// ── Default subtitles (replaced by heartbeat when it runs) ──────────────────
+
+const DEFAULT_SUBTITLES: Record<string, string> = {
+  morning: "Coffee's ready. What's first?",
+  afternoon: "What are we working on?",
+  evening: "Wrapping up or getting ahead?",
+}
+
+function getDefaultSubtitle(): string {
+  const h = new Date().getHours()
+  return h < 12 ? DEFAULT_SUBTITLES.morning : h < 17 ? DEFAULT_SUBTITLES.afternoon : DEFAULT_SUBTITLES.evening
+}
+
+// ── Heartbeat indicator with popover ─────────────────────────────────────────
+
+function HeartbeatIndicator({ lastHeartbeat, heartbeatLog, connected, onTrigger }: {
+  lastHeartbeat?: { time: Date; status: string; nextAt?: Date } | null
+  heartbeatLog: { time: Date; status: string }[]
+  connected: boolean
+  onTrigger?: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [open])
+
+  const statusText = lastHeartbeat
+    ? lastHeartbeat.status === 'started'
+      ? 'Checking...'
+      : lastHeartbeat.nextAt
+        ? `Next ${lastHeartbeat.nextAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
+        : `Checked ${lastHeartbeat.time.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
+    : null
+
+  return (
+    <div className="relative flex items-center gap-2" ref={ref}>
+      <button
+        onClick={() => setOpen(!open)}
+        className="flex items-center gap-2 hover:opacity-70 transition-opacity"
+      >
+        {statusText && (
+          <span className="text-[10px] text-neutral-400 dark:text-neutral-500">
+            {statusText}
+          </span>
+        )}
+        <div
+          title={connected ? 'Connected' : 'Disconnected'}
+          className={cn('w-2 h-2 rounded-full', connected ? 'bg-emerald-400 animate-pulse' : 'bg-red-400')}
+        />
+      </button>
+
+      {open && (
+        <div className="absolute top-full right-0 mt-2 w-64 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg shadow-lg z-50 overflow-hidden">
+          <div className="px-3 py-2.5 border-b border-neutral-100 dark:border-neutral-700 flex items-center justify-between">
+            <span className="text-[11px] font-semibold text-neutral-600 dark:text-neutral-300">Heartbeat Log</span>
+            {onTrigger && (
+              <button
+                onClick={() => { onTrigger(); setOpen(false) }}
+                className="text-[10px] font-medium text-blue-500 hover:text-blue-600 transition-colors"
+              >
+                Run Now
+              </button>
+            )}
+          </div>
+          <div className="max-h-48 overflow-y-auto">
+            {heartbeatLog.length === 0 ? (
+              <p className="px-3 py-4 text-[11px] text-neutral-400 dark:text-neutral-500 text-center">
+                No heartbeats yet this session
+              </p>
+            ) : (
+              <div className="py-1">
+                {[...heartbeatLog].reverse().map((entry, i) => (
+                  <div key={i} className="px-3 py-1.5 flex items-center gap-2 text-[11px]">
+                    <div className={cn(
+                      'w-1.5 h-1.5 rounded-full flex-shrink-0',
+                      entry.status === 'done' ? 'bg-emerald-400' :
+                      entry.status === 'started' ? 'bg-blue-400' :
+                      entry.status === 'skipped' ? 'bg-amber-400' : 'bg-neutral-300'
+                    )} />
+                    <span className="text-neutral-500 dark:text-neutral-400">
+                      {entry.time.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}
+                    </span>
+                    <span className={cn(
+                      'ml-auto font-medium',
+                      entry.status === 'done' ? 'text-emerald-500' :
+                      entry.status === 'started' ? 'text-blue-500' :
+                      entry.status === 'skipped' ? 'text-amber-500' : 'text-neutral-400'
+                    )}>
+                      {entry.status === 'done' ? 'Completed' :
+                       entry.status === 'started' ? 'Running' :
+                       entry.status === 'skipped' ? 'Skipped' : entry.status}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          {lastHeartbeat?.nextAt && (
+            <div className="px-3 py-2 border-t border-neutral-100 dark:border-neutral-700 text-[10px] text-neutral-400 dark:text-neutral-500">
+              Next check at {lastHeartbeat.nextAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Typing placeholder ──────────────────────────────────────────────────────
-const PLACEHOLDER_PREFIX = 'Ask Co-Agent to '
+const DEFAULT_PLACEHOLDER_PREFIX = 'Ask Co-Agent to '
 const DEFAULT_SUFFIXES = [
   'check your calendar…',
   'summarize your emails…',
@@ -71,7 +191,8 @@ function shuffle<T>(arr: T[]): T[] {
   return a
 }
 
-function useTypingPlaceholder(active: boolean, skills: { name: string; description: string; placeholder?: string }[] = []) {
+function useTypingPlaceholder(active: boolean, skills: { name: string; description: string; placeholder?: string }[] = [], agentName?: string) {
+  const prefix = agentName ? `Ask ${agentName} to ` : DEFAULT_PLACEHOLDER_PREFIX
   const suffixes = React.useMemo(() => {
     const skillSuffixes = skills.map(s => s.placeholder).filter((p): p is string => !!p)
     const all = [...DEFAULT_SUFFIXES, ...skillSuffixes, 'do anything… (@ for skills)']
@@ -120,7 +241,7 @@ function useTypingPlaceholder(active: boolean, skills: { name: string; descripti
 
   // Prefix always visible, only suffix animates
   if (active) return ''
-  return PLACEHOLDER_PREFIX + suffix
+  return prefix + suffix
 }
 
 const IMG_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico'])
@@ -474,7 +595,7 @@ function useDictation(onResult: (text: string) => void) {
   return { recording, transcribing, start, stop }
 }
 
-export function ChatPane({ messages, streamingText, thinking, processing, toolLabel, researchAgents = [], connected, onChat, onSteer, onStop, onIngestFile, files, onNavigateToSettings, lastHeartbeat, skills = [], capabilityCard, onConfirmCapabilities, userName, userRole, onboarded, className }: ChatPaneProps) {
+export function ChatPane({ messages, streamingText, thinking, processing, toolLabel, researchAgents = [], connected, onChat, onSteer, onStop, onIngestFile, files, onNavigateToSettings, lastHeartbeat, heartbeatLog = [], onTriggerHeartbeat, statusLine, skills = [], capabilityCard, onConfirmCapabilities, userName, userRole, onboarded, agentName, className }: ChatPaneProps) {
   const [input, setInput] = useState('')
   const [skillQuery, setSkillQuery] = useState<string | null>(null)
   const [selectedSkillIdx, setSelectedSkillIdx] = useState(0)
@@ -609,7 +730,7 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
   }, [onIngestFile])
 
   const isActive = processing || thinking || streamingText !== null
-  const typingPlaceholder = useTypingPlaceholder(isActive || !connected, skills)
+  const typingPlaceholder = useTypingPlaceholder(isActive || !connected, skills, agentName)
 
   const handleSend = useCallback(() => {
     const msg = input.trim()
@@ -660,26 +781,25 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
       )}
       <div className="px-7 py-5 border-b border-neutral-100 dark:border-neutral-800 flex items-center justify-between">
         <div>
-          <p className="text-[10px] font-semibold text-neutral-400 dark:text-neutral-500 uppercase tracking-widest mb-0.5">
-            Ask anything
-          </p>
           <h1 className="text-[19px] font-bold tracking-tight text-neutral-900 dark:text-neutral-100">{(() => {
             const hour = new Date().getHours()
             const greeting = hour < 12 ? 'Good Morning' : hour < 17 ? 'Good Afternoon' : 'Good Evening'
             return userName ? `${greeting}, ${userName.split(/\s+/)[0]}` : greeting
           })()}</h1>
+          <p className="text-[12px] text-neutral-400 dark:text-neutral-500 mt-0.5 transition-opacity duration-400">
+            {lastHeartbeat?.status === 'started'
+              ? 'Checking in...'
+              : statusLine
+                ? statusLine
+                : getDefaultSubtitle()}
+          </p>
         </div>
-        <div className="flex items-center gap-2">
-          {lastHeartbeat && (
-            <span className="text-[10px] text-neutral-400 dark:text-neutral-500" title={`Last check: ${lastHeartbeat.time.toLocaleTimeString()}`}>
-              {lastHeartbeat.status === 'started' ? 'Checking...' : lastHeartbeat.nextAt ? `Next ${lastHeartbeat.nextAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : `Checked ${lastHeartbeat.time.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`}
-            </span>
-          )}
-          <div
-            title={connected ? 'Connected' : 'Disconnected'}
-            className={cn('w-2 h-2 rounded-full', connected ? 'bg-emerald-400 animate-pulse' : 'bg-red-400')}
-          />
-        </div>
+        <HeartbeatIndicator
+          lastHeartbeat={lastHeartbeat}
+          heartbeatLog={heartbeatLog}
+          connected={connected}
+          onTrigger={onTriggerHeartbeat}
+        />
       </div>
 
       <ScrollArea className="flex-1">
@@ -714,18 +834,21 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
                   )}
                 </div>
                 {researchAgents.length > 0 && (
-                  <div className="flex flex-col gap-0.5 mt-1 ml-1">
-                    {researchAgents.map((agent, i) => (
-                      <div key={i} className="flex items-center gap-2 text-[11px] text-neutral-500 dark:text-neutral-400">
-                        <span className={`w-3 text-center ${agent.status === 'done' ? 'text-green-500' : agent.status === 'error' ? 'text-red-400' : 'animate-spin'}`}>
-                          {agent.status === 'done' ? '✓' : agent.status === 'error' ? '✗' : '⟳'}
-                        </span>
-                        <span className="truncate max-w-[200px] opacity-70">"{agent.query}"</span>
-                        <span className={agent.status === 'done' ? 'text-green-500' : agent.status === 'error' ? 'text-red-400' : 'shimmer-text'}>
-                          {agent.status === 'done' ? 'done' : agent.status === 'error' ? 'error' : agent.status === 'branching' ? 'branching out' : agent.status === 'enriching' ? 'enriching' : 'searching'}
-                        </span>
-                      </div>
-                    ))}
+                  <div className="flex flex-col gap-1.5 mt-2 ml-0.5">
+                    {researchAgents.map((agent, i) => {
+                      const isDone = agent.status === 'done'
+                      const isError = agent.status === 'error'
+                      const statusText = isDone ? 'Done' : isError ? 'Error' : agent.status === 'branching' ? 'Branching' : agent.status === 'enriching' ? 'Enriching' : 'Searching'
+                      return (
+                        <div key={i} className="flex items-center gap-2.5 text-[12px]">
+                          <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${isDone ? 'bg-green-500' : isError ? 'bg-red-400' : 'bg-blue-400 animate-pulse'}`} />
+                          <span className="truncate max-w-[260px] text-neutral-600 dark:text-neutral-300">{agent.query}</span>
+                          <span className={`ml-auto text-[11px] flex-shrink-0 ${isDone ? 'text-green-500' : isError ? 'text-red-400' : 'text-neutral-400 dark:text-neutral-500'}`}>
+                            {statusText}
+                          </span>
+                        </div>
+                      )
+                    })}
                   </div>
                 )}
               </div>
@@ -808,7 +931,7 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
             <Input
               ref={inputRef}
               className="flex-1 w-full text-[13.5px] dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500"
-              placeholder={isActive ? 'Type to steer the agent…' : !connected ? 'Starting up…' : ''}
+              placeholder={isActive ? 'Type to steer the agent…' : !connected ? 'Connecting…' : ''}
               value={input}
               onChange={e => handleInputChange(e.target.value)}
               onKeyDown={handleKeyDown}

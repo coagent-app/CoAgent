@@ -12,7 +12,7 @@
     "withGlobalTauri": false,
     "macOSPrivateApi": true,
     "security": {
-      "csp": "default-src 'self' tauri: ipc: http://localhost:1420 asset: http://asset.localhost; connect-src 'self' ws://localhost:7830 http://localhost:7830 https://backend.composio.dev https://api.openai.com https://api.voyageai.com; img-src 'self' asset: http://asset.localhost blob: data: https://logos.composio.dev; media-src 'self' asset: http://asset.localhost blob: mediastream:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'",
+      "csp": "default-src 'self' tauri: ipc: http://localhost:1420 asset: http://asset.localhost; connect-src 'self' ws://localhost:7830 http://localhost:7830 https://backend.composio.dev https://api.openai.com https://api.voyageai.com https://*.workers.dev; img-src 'self' asset: http://asset.localhost blob: data: https://logos.composio.dev https://t3.gstatic.com; media-src 'self' asset: http://asset.localhost blob: mediastream:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
       "assetProtocol": {
         "enable": true
       }
@@ -50,9 +50,24 @@
     "active": true,
     "targets": "all",
     "icon": ["icons/icon.icns", "icons/icon.ico", "icons/icon.png"],
+    "createUpdaterArtifacts": "v1Compatible",
     "externalBin": [
       "binaries/coagent-server",
       "binaries/coagent-memory"
-    ]
+    ],
+    "macOS": {
+      "entitlements": "Entitlements.plist",
+      "signingIdentity": null,
+      "minimumSystemVersion": "12.0",
+      "infoPlist": "Info.plist"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUxMTIzNzI4RjBGNjNCQUEKUldTcU8vYndLRGNTNFNqN2oxZXkrZ3VmM0JjVWZIaXdwSWFkeUVzWVlWY3pwaWN6UERQYlRvNTAK",
+      "endpoints": [
+        "https://github.com/brettponters/CoAgent/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

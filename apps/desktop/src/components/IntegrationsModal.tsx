@@ -210,7 +210,7 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
                       onError={e => { (e.target as HTMLImageElement).style.opacity = '0' }}
                     />
                   ) : detailIntegration.icon ? (
-                    <div className="w-6 h-6" dangerouslySetInnerHTML={{ __html: detailIntegration.icon.replace(/viewBox/, 'class="w-6 h-6" viewBox') }} />
+                    <img src={`data:image/svg+xml;utf8,${encodeURIComponent(detailIntegration.icon)}`} className="w-6 h-6 flex-shrink-0" alt={detailIntegration.name} />
                   ) : detailIntegration.custom ? (
                     <div className="w-6 h-6 rounded bg-neutral-200 dark:bg-neutral-700 flex items-center justify-center">
                       <span className="text-[10px] font-bold text-neutral-500 dark:text-neutral-400">+</span>
@@ -490,7 +490,7 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
                                 onError={e => { (e.target as HTMLImageElement).style.opacity = '0' }}
                               />
                             ) : integration.icon ? (
-                              <div className="w-5 h-5 flex-shrink-0" dangerouslySetInnerHTML={{ __html: integration.icon.replace(/viewBox/, 'class="w-5 h-5" viewBox') }} />
+                              <img src={`data:image/svg+xml;utf8,${encodeURIComponent(integration.icon)}`} className="w-5 h-5 flex-shrink-0" alt={integration.name} />
                             ) : integration.custom ? (
                               <div className="w-5 h-5 rounded bg-neutral-200 dark:bg-neutral-700 flex items-center justify-center flex-shrink-0">
                                 <span className="text-[10px] font-bold text-neutral-500 dark:text-neutral-400">+</span>
@@ -559,7 +559,7 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
                                   onError={e => { (e.target as HTMLImageElement).style.opacity = '0' }}
                                 />
                               ) : integration.icon ? (
-                                <div className="w-5 h-5 flex-shrink-0" dangerouslySetInnerHTML={{ __html: integration.icon.replace(/viewBox/, 'class="w-5 h-5" viewBox') }} />
+                                <img src={`data:image/svg+xml;utf8,${encodeURIComponent(integration.icon)}`} className="w-5 h-5 flex-shrink-0" alt={integration.name} />
                               ) : integration.custom ? (
                                 <div className="w-5 h-5 rounded bg-neutral-200 dark:bg-neutral-700 flex items-center justify-center flex-shrink-0">
                                   <span className="text-[10px] font-bold text-neutral-500 dark:text-neutral-400">+</span>

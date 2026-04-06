@@ -24,6 +24,11 @@ function createAnthropicClient(): Anthropic {
 interface FileIndexEntry extends FileEntry {
   embedding: number[]
   dirty?: boolean
+  documentMeta?: {
+    template: string        // e.g. 'resume', 'proposal'
+    templateData: any       // the full data object passed to renderTemplatedDocument
+    lastRenderedAt: string  // ISO timestamp
+  }
 }
 
 // ── Index I/O ────────────────────────────────────────────────────────────────
@@ -40,9 +45,29 @@ async function readIndex(dataDir: string): Promise<FileIndexEntry[]> {
   } catch { return [] }
 }
 
+// Mutex for read-modify-write cycles on the index — prevents concurrent operations
+// from reading stale data and overwriting each other's changes
+let indexMutex: Promise<void> = Promise.resolve()
+
+async function withIndexLock<T>(fn: () => Promise<T>): Promise<T> {
+  let resolve: () => void
+  const next = new Promise<void>(r => { resolve = r })
+  const prev = indexMutex
+  indexMutex = next
+  await prev
+  try {
+    return await fn()
+  } finally {
+    resolve!()
+  }
+}
+
 async function writeIndex(dataDir: string, entries: FileIndexEntry[]): Promise<void> {
   await mkdir(dataDir, { recursive: true })
-  await writeFile(join(dataDir, INDEX_FILE), JSON.stringify(entries, null, 2), 'utf-8')
+  const tmpPath = join(dataDir, INDEX_FILE + '.tmp')
+  const finalPath = join(dataDir, INDEX_FILE)
+  await writeFile(tmpPath, JSON.stringify(entries, null, 2), 'utf-8')
+  await rename(tmpPath, finalPath)
 }
 
 // ── Folder management ────────────────────────────────────────────────────────
@@ -107,49 +132,53 @@ export async function deleteFolder(dataDir: string, name: string): Promise<void>
   const folderPath = join(dataDir, FILES_DIR, ...safeName.split('/'))
   const rootFilesDir = join(dataDir, FILES_DIR)
 
-  const index = await readIndex(dataDir)
-  const filesInFolder = index.filter(e => e.group === safeName || e.group.startsWith(`${safeName}/`))
+  await withIndexLock(async () => {
+    const index = await readIndex(dataDir)
+    const filesInFolder = index.filter(e => e.group === safeName || e.group.startsWith(`${safeName}/`))
 
-  // Compute resolved destination paths ONCE, before any renames happen
-  const resolvedPaths = new Map<string, { path: string; filename: string }>()
-  for (const entry of filesInFolder) {
-    let destPath = join(rootFilesDir, entry.filename)
-    let destFilename = entry.filename
-    // Only deduplicate against files NOT in this folder (those will be moved away)
-    if (existsSync(destPath) && destPath !== entry.path) {
-      const ext = entry.filename.includes('.')
-        ? entry.filename.slice(entry.filename.lastIndexOf('.'))
-        : ''
-      const base = entry.filename.slice(0, entry.filename.length - ext.length)
-      destFilename = `${base}_${entry.id.slice(0, 8)}${ext}`
-      destPath = join(rootFilesDir, destFilename)
+    // Compute resolved destination paths ONCE, before any renames happen
+    const resolvedPaths = new Map<string, { path: string; filename: string }>()
+    for (const entry of filesInFolder) {
+      let destPath = join(rootFilesDir, entry.filename)
+      let destFilename = entry.filename
+      // Only deduplicate against files NOT in this folder (those will be moved away)
+      if (existsSync(destPath) && destPath !== entry.path) {
+        const ext = entry.filename.includes('.')
+          ? entry.filename.slice(entry.filename.lastIndexOf('.'))
+          : ''
+        const base = entry.filename.slice(0, entry.filename.length - ext.length)
+        destFilename = `${base}_${entry.id.slice(0, 8)}${ext}`
+        destPath = join(rootFilesDir, destFilename)
+      }
+      resolvedPaths.set(entry.id, { path: destPath, filename: destFilename })
     }
-    resolvedPaths.set(entry.id, { path: destPath, filename: destFilename })
-  }
 
-  // Now do the physical renames using the precomputed paths
-  for (const entry of filesInFolder) {
-    const resolved = resolvedPaths.get(entry.id)!
-    if (existsSync(entry.path)) {
-      try {
-        await rename(entry.path, resolved.path)
-      } catch (err) {
-        console.warn(`[FileStore] Could not move ${entry.filename} to root during folder delete: ${(err as Error).message}`)
+    // Now do the physical renames using the precomputed paths
+    for (const entry of filesInFolder) {
+      const resolved = resolvedPaths.get(entry.id)!
+      if (existsSync(entry.path)) {
+        try {
+          await rename(entry.path, resolved.path)
+        } catch (err) {
+          console.warn(`[FileStore] Could not move ${entry.filename} to root during folder delete: ${(err as Error).message}`)
+        }
       }
     }
-  }
 
-  // Update index using the precomputed paths (no existsSync re-evaluation)
-  const updated = index.map(e => {
-    const resolved = resolvedPaths.get(e.id)
-    if (resolved) {
-      return { ...e, group: '', path: resolved.path, filename: resolved.filename }
-    }
-    return e
+    // Update index using the precomputed paths (no existsSync re-evaluation)
+    const updated = index.map(e => {
+      const resolved = resolvedPaths.get(e.id)
+      if (resolved) {
+        return { ...e, group: '', path: resolved.path, filename: resolved.filename }
+      }
+      return e
+    })
+    await writeIndex(dataDir, updated)
+
+    console.log(`[FileStore] Deleted folder: ${safeName} (${filesInFolder.length} files moved to root)`)
   })
-  await writeIndex(dataDir, updated)
 
-  // Clean up folder-order.json
+  // Clean up folder-order.json (outside lock — separate file)
   const savedOrder = await loadFolderOrder(dataDir)
   const cleanedOrder = savedOrder.filter(p => p !== safeName && !p.startsWith(`${safeName}/`))
   await saveFolderOrder(dataDir, cleanedOrder)
@@ -162,8 +191,6 @@ export async function deleteFolder(dataDir: string, name: string): Promise<void>
       console.warn(`[FileStore] rm failed for ${folderPath}: ${(err as Error).message}`)
     }
   }
-
-  console.log(`[FileStore] Deleted folder: ${safeName} (${filesInFolder.length} files moved to root)`)
 }
 
 export async function moveFolder(dataDir: string, folderPath: string, newParentPath: string): Promise<void> {
@@ -171,13 +198,11 @@ export async function moveFolder(dataDir: string, folderPath: string, newParentP
   const safeNewParentPath = newParentPath.replace(/\.\./g, '').replace(/^\/+|\/+$/g, '').replace(/\/+/g, '/').trim()
   if (!safefolderPath) throw new Error('Invalid folder path')
 
-  // e.g. safefolderPath="Reports", safeNewParentPath="Work" → moves to "Work/Reports"
   const folderName = safefolderPath.split('/').pop()!
   const newPath = safeNewParentPath ? `${safeNewParentPath}/${folderName}` : folderName
 
-  if (newPath === safefolderPath) return  // no-op
+  if (newPath === safefolderPath) return
 
-  // Check that newPath is not a descendant of safefolderPath (can't move a folder into itself)
   if (newPath.startsWith(`${safefolderPath}/`)) {
     throw new Error('Cannot move a folder into one of its own subfolders')
   }
@@ -196,17 +221,18 @@ export async function moveFolder(dataDir: string, folderPath: string, newParentP
     throw new Error(`Failed to move folder: ${(err as Error).message}`)
   }
 
-  // Update all files whose group starts with safefolderPath
-  const index = await readIndex(dataDir)
-  const updated = index.map(e => {
-    if (e.group === safefolderPath || e.group.startsWith(`${safefolderPath}/`)) {
-      const newGroup = newPath + e.group.slice(safefolderPath.length)
-      const newFilePath = join(dataDir, FILES_DIR, ...newGroup.split('/'), e.filename)
-      return { ...e, group: newGroup, path: newFilePath }
-    }
-    return e
+  await withIndexLock(async () => {
+    const index = await readIndex(dataDir)
+    const updated = index.map(e => {
+      if (e.group === safefolderPath || e.group.startsWith(`${safefolderPath}/`)) {
+        const newGroup = newPath + e.group.slice(safefolderPath.length)
+        const newFilePath = join(dataDir, FILES_DIR, ...newGroup.split('/'), e.filename)
+        return { ...e, group: newGroup, path: newFilePath }
+      }
+      return e
+    })
+    await writeIndex(dataDir, updated)
   })
-  await writeIndex(dataDir, updated)
 
   const savedOrder = await loadFolderOrder(dataDir)
   const updatedOrder = savedOrder.map(p =>
@@ -220,33 +246,34 @@ export async function moveFolder(dataDir: string, folderPath: string, newParentP
 }
 
 export async function moveFile(dataDir: string, id: string, targetGroup: string): Promise<void> {
-  const index = await readIndex(dataDir)
-  const entry = index.find(e => e.id === id)
-  if (!entry) throw new Error(`File ${id} not found`)
+  return withIndexLock(async () => {
+    const index = await readIndex(dataDir)
+    const entry = index.find(e => e.id === id)
+    if (!entry) throw new Error(`File ${id} not found`)
 
-  // Sanitize the group path: allow slashes for nesting, but block traversal
-  const safeGroup = targetGroup
-    ? targetGroup.replace(/\.\./g, '').replace(/^\/+|\/+$/g, '').replace(/\/+/g, '/')
-    : ''
+    const safeGroup = targetGroup
+      ? targetGroup.replace(/\.\./g, '').replace(/^\/+|\/+$/g, '').replace(/\/+/g, '/')
+      : ''
 
-  const targetDir = safeGroup
-    ? join(dataDir, FILES_DIR, ...safeGroup.split('/'))
-    : join(dataDir, FILES_DIR)
-  await mkdir(targetDir, { recursive: true })
-  const newPath = join(targetDir, entry.filename)
+    const targetDir = safeGroup
+      ? join(dataDir, FILES_DIR, ...safeGroup.split('/'))
+      : join(dataDir, FILES_DIR)
+    await mkdir(targetDir, { recursive: true })
+    const newPath = join(targetDir, entry.filename)
 
-  if (entry.path !== newPath && existsSync(entry.path)) {
-    try {
-      await rename(entry.path, newPath)
-    } catch (err) {
-      throw new Error(`Failed to move file: ${(err as Error).message}`)
+    if (entry.path !== newPath && existsSync(entry.path)) {
+      try {
+        await rename(entry.path, newPath)
+      } catch (err) {
+        throw new Error(`Failed to move file: ${(err as Error).message}`)
+      }
     }
-  }
 
-  const updated = index.map(e =>
-    e.id === id ? { ...e, path: newPath, group: safeGroup } : e
-  )
-  await writeIndex(dataDir, updated)
+    const updated = index.map(e =>
+      e.id === id ? { ...e, path: newPath, group: safeGroup } : e
+    )
+    await writeIndex(dataDir, updated)
+  })
 }
 
 // ── OpenAI embedding ──────────────────────────────────────────────────────────
@@ -541,8 +568,10 @@ export async function autoOrganizeFiles(
     }
   }
 
-  // Write updated index
-  await writeIndex(dataDir, index)
+  // Write updated index under lock
+  await withIndexLock(async () => {
+    await writeIndex(dataDir, index)
+  })
 
   // Save folder order
   const existingOrder = await loadFolderOrder(dataDir)
@@ -608,22 +637,39 @@ export async function ingestFile(
     embedding
   }
 
-  const index = await readIndex(dataDir)
-  index.push(entry)
-  await writeIndex(dataDir, index)
-
-  console.log(`[FileStore] Ingested: ${safeFilename} (${buffer.length} bytes)`)
-
-  const { embedding: _, ...fileEntry } = entry
-  return fileEntry
+  return withIndexLock(async () => {
+    const index = await readIndex(dataDir)
+    index.push(entry)
+    await writeIndex(dataDir, index)
+    console.log(`[FileStore] Ingested: ${safeFilename} (${buffer.length} bytes)`)
+    const { embedding: _, ...fileEntry } = entry
+    return fileEntry
+  })
 }
 
 
 
 
+let lastPruneTime = 0
+
 export async function listFiles(dataDir: string): Promise<FileEntry[]> {
+  const now = Date.now()
+  if (now - lastPruneTime > 60_000) {
+    return withIndexLock(async () => {
+      const index = await readIndex(dataDir)
+      const alive = index.filter(e => existsSync(e.path))
+      if (alive.length < index.length) {
+        const removed = index.length - alive.length
+        console.log(`[FileStore] Pruned ${removed} stale file(s) from index`)
+        await writeIndex(dataDir, alive)
+        lastPruneTime = now
+        return alive.map(({ embedding: _, dirty: __, ...entry }) => entry)
+      }
+      lastPruneTime = now
+      return index.map(({ embedding: _, dirty: __, ...entry }) => entry)
+    })
+  }
   const index = await readIndex(dataDir)
-  // Strip internal-only fields (embedding, dirty) before sending to frontend
   return index.map(({ embedding: _, dirty: __, ...entry }) => entry)
 }
 
@@ -657,24 +703,25 @@ export async function searchFiles(dataDir: string, query: string, limit = 5): Pr
       .slice(0, limit)
       .map(({ embedding: _, dirty: __, ...entry }) => entry)
   }
-  const index = await readIndex(dataDir)
-  const q = query.toLowerCase()
 
-  const scored = index.map(e => {
-    const embScore = e.embedding.length > 0 ? cosine(queryEmb, e.embedding) : 0
-    // Hybrid: boost entries with keyword matches in filename/folder/summary
-    const kwBoost = keywordMatch(e, q) ? 0.3 : 0
-    return { entry: e, score: embScore + kwBoost }
+  return withIndexLock(async () => {
+    const index = await readIndex(dataDir)
+    const q = query.toLowerCase()
+
+    const scored = index.map(e => {
+      const embScore = e.embedding.length > 0 ? cosine(queryEmb, e.embedding) : 0
+      const kwBoost = keywordMatch(e, q) ? 0.3 : 0
+      return { entry: e, score: embScore + kwBoost }
+    })
+    scored.sort((a, b) => b.score - a.score)
+
+    const top = scored.filter(s => s.score > 0.15).slice(0, limit)
+    const topIds = new Set(top.map(s => s.entry.id))
+    const updated = index.map(e => topIds.has(e.id) ? { ...e, lastAccessed: new Date().toISOString() } : e)
+    await writeIndex(dataDir, updated)
+
+    return top.map(({ entry: { embedding: _, dirty: __, ...entry } }) => entry)
   })
-  scored.sort((a, b) => b.score - a.score)
-
-  // Filter out low-relevance results — only return files with meaningful similarity
-  const top = scored.filter(s => s.score > 0.15).slice(0, limit)
-  const topIds = new Set(top.map(s => s.entry.id))
-  const updated = index.map(e => topIds.has(e.id) ? { ...e, lastAccessed: new Date().toISOString() } : e)
-  await writeIndex(dataDir, updated)
-
-  return top.map(({ entry: { embedding: _, dirty: __, ...entry } }) => entry)
 }
 
 export async function readFileBase64(dataDir: string, id: string): Promise<{ base64: string; filename: string; mimeType: string }> {
@@ -701,15 +748,22 @@ export async function readFileBase64(dataDir: string, id: string): Promise<{ bas
 }
 
 export async function readFileContent(dataDir: string, id: string): Promise<string> {
-  const index = await readIndex(dataDir)
-  const entry = index.find(e => e.id === id)
-  if (!entry) throw new Error(`File ${id} not found`)
+  let filePath: string
+  let filename: string
 
-  const updated = index.map(e => e.id === id ? { ...e, lastAccessed: new Date().toISOString() } : e)
-  await writeIndex(dataDir, updated)
+  await withIndexLock(async () => {
+    const index = await readIndex(dataDir)
+    const entry = index.find(e => e.id === id)
+    if (!entry) throw new Error(`File ${id} not found`)
+    filePath = entry.path
+    filename = entry.filename
 
-  const buffer = await readFile(entry.path)
-  const ext = extname(entry.filename).toLowerCase()
+    const updated = index.map(e => e.id === id ? { ...e, lastAccessed: new Date().toISOString() } : e)
+    await writeIndex(dataDir, updated)
+  })
+
+  const buffer = await readFile(filePath!)
+  const ext = extname(filename!).toLowerCase()
 
   if (ext === '.pdf') {
     try {
@@ -920,31 +974,32 @@ export async function fillPdfForm(
 }
 
 export async function renameFile(dataDir: string, id: string, newName: string): Promise<void> {
-  const index = await readIndex(dataDir)
-  const entry = index.find(e => e.id === id)
-  if (!entry) throw new Error(`File ${id} not found`)
+  return withIndexLock(async () => {
+    const index = await readIndex(dataDir)
+    const entry = index.find(e => e.id === id)
+    if (!entry) throw new Error(`File ${id} not found`)
 
-  const safeNewName = basename(newName).trim()
-  if (!safeNewName) throw new Error('Invalid filename')
+    const safeNewName = basename(newName).trim()
+    if (!safeNewName) throw new Error('Invalid filename')
 
-  const newPath = join(dirname(entry.path), safeNewName)
-  if (existsSync(entry.path)) {
-    try {
-      await rename(entry.path, newPath)
-    } catch (err) {
-      throw new Error(`Failed to rename file: ${(err as Error).message}`)
+    const newPath = join(dirname(entry.path), safeNewName)
+    if (existsSync(entry.path)) {
+      try {
+        await rename(entry.path, newPath)
+      } catch (err) {
+        throw new Error(`Failed to rename file: ${(err as Error).message}`)
+      }
     }
-  }
 
-  const updated = index.map(e => e.id === id ? { ...e, filename: safeNewName, path: newPath } : e)
-  await writeIndex(dataDir, updated)
+    const updated = index.map(e => e.id === id ? { ...e, filename: safeNewName, path: newPath } : e)
+    await writeIndex(dataDir, updated)
+  })
 }
 
 export async function renameFolder(dataDir: string, oldName: string, newName: string): Promise<void> {
   const safeOldName = oldName.replace(/\.\./g, '').replace(/^\/+|\/+$/g, '').replace(/\/+/g, '/').trim()
   if (!safeOldName) throw new Error('Invalid folder name')
 
-  // Preserve parent path — only rename the leaf segment
   const parentDir = safeOldName.includes('/') ? safeOldName.split('/').slice(0, -1).join('/') : ''
   const safeLeaf = basename(newName).trim()
   if (!safeLeaf || safeLeaf === '.' || safeLeaf === '..') throw new Error('Invalid folder name')
@@ -960,16 +1015,18 @@ export async function renameFolder(dataDir: string, oldName: string, newName: st
     }
   }
 
-  const index = await readIndex(dataDir)
-  const updated = index.map(e => {
-    if (e.group === safeOldName || e.group.startsWith(`${safeOldName}/`)) {
-      const newGroup = safeName + e.group.slice(safeOldName.length)
-      const newFilePath = join(dataDir, FILES_DIR, ...newGroup.split('/'), e.filename)
-      return { ...e, group: newGroup, path: newFilePath }
-    }
-    return e
+  await withIndexLock(async () => {
+    const index = await readIndex(dataDir)
+    const updated = index.map(e => {
+      if (e.group === safeOldName || e.group.startsWith(`${safeOldName}/`)) {
+        const newGroup = safeName + e.group.slice(safeOldName.length)
+        const newFilePath = join(dataDir, FILES_DIR, ...newGroup.split('/'), e.filename)
+        return { ...e, group: newGroup, path: newFilePath }
+      }
+      return e
+    })
+    await writeIndex(dataDir, updated)
   })
-  await writeIndex(dataDir, updated)
 
   const savedOrder = await loadFolderOrder(dataDir)
   const updatedOrder = savedOrder.map(p =>
@@ -981,26 +1038,28 @@ export async function renameFolder(dataDir: string, oldName: string, newName: st
 }
 
 export async function deleteFileEntry(dataDir: string, id: string): Promise<void> {
-  const index = await readIndex(dataDir)
-  const entry = index.find(e => e.id === id)
-  if (!entry) return
+  return withIndexLock(async () => {
+    const index = await readIndex(dataDir)
+    const entry = index.find(e => e.id === id)
+    if (!entry) return
 
-  if (existsSync(entry.path)) {
-    await unlink(entry.path).catch(() => {})
-    // Clean up empty parent directories
-    const filesDir = join(dataDir, FILES_DIR)
-    let dir = dirname(entry.path)
-    while (dir !== filesDir && dir.startsWith(filesDir)) {
-      try {
-        const contents = await readdir(dir)
-        if (contents.length === 0) { await rmdir(dir).catch(() => {}); dir = dirname(dir) }
-        else break
-      } catch { break }
+    if (existsSync(entry.path)) {
+      await unlink(entry.path).catch(() => {})
+      // Clean up empty parent directories
+      const filesDir = join(dataDir, FILES_DIR)
+      let dir = dirname(entry.path)
+      while (dir !== filesDir && dir.startsWith(filesDir)) {
+        try {
+          const contents = await readdir(dir)
+          if (contents.length === 0) { await rmdir(dir).catch(() => {}); dir = dirname(dir) }
+          else break
+        } catch { break }
+      }
     }
-  }
 
-  await writeIndex(dataDir, index.filter(e => e.id !== id))
-  console.log(`[FileStore] Deleted: ${entry.filename}`)
+    await writeIndex(dataDir, index.filter(e => e.id !== id))
+    console.log(`[FileStore] Deleted: ${entry.filename}`)
+  })
 }
 
 export async function getStorageStats(dataDir: string): Promise<{
@@ -1016,4 +1075,49 @@ export async function getStorageStats(dataDir: string): Promise<{
     .map(e => ({ filename: e.filename, sizeBytes: e.sizeBytes }))
 
   return { totalFiles: index.length, totalBytes, largestFiles }
+}
+
+// ── In-place file update (overwrite content, keep same ID/path) ──────────
+
+export async function updateFileContent(
+  dataDir: string,
+  fileId: string,
+  buffer: Buffer
+): Promise<void> {
+  return withIndexLock(async () => {
+    const index = await readIndex(dataDir)
+    const entry = index.find(e => e.id === fileId)
+    if (!entry) throw new Error(`File ${fileId} not found`)
+    await writeFile(entry.path, buffer)
+    const updated = index.map(e =>
+      e.id === fileId ? { ...e, sizeBytes: buffer.length, lastAccessed: new Date().toISOString() } : e
+    )
+    await writeIndex(dataDir, updated)
+  })
+}
+
+// ── Document metadata (template re-rendering support) ────────────────────────
+
+export async function updateDocumentMeta(
+  dataDir: string,
+  fileId: string,
+  meta: { template: string; templateData: any; lastRenderedAt: string }
+): Promise<void> {
+  return withIndexLock(async () => {
+    const index = await readIndex(dataDir)
+    const entry = index.find(e => e.id === fileId)
+    if (!entry) throw new Error(`File ${fileId} not found`)
+    const updated = index.map(e => e.id === fileId ? { ...e, documentMeta: meta } : e)
+    await writeIndex(dataDir, updated)
+  })
+}
+
+export async function getDocumentMeta(
+  dataDir: string,
+  fileId: string
+): Promise<{ template: string; templateData: any; lastRenderedAt: string } | null> {
+  const index = await readIndex(dataDir)
+  const entry = index.find(e => e.id === fileId)
+  if (!entry) return null
+  return entry.documentMeta ?? null
 }

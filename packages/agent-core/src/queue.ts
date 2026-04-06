@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid'
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs'
+import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from 'fs'
 import { join } from 'path'
 import type { ApprovalItem, DoneItem } from '@coagent/shared'
 
@@ -58,8 +58,13 @@ export class ApprovalQueue {
   }
 
   private save(): void {
-    writeFileSync(this.queuePath, JSON.stringify(this.items, null, 2))
-    writeFileSync(this.donePath, JSON.stringify(this.done, null, 2))
+    const tmpQ = this.queuePath + '.tmp'
+    writeFileSync(tmpQ, JSON.stringify(this.items, null, 2))
+    renameSync(tmpQ, this.queuePath)
+
+    const tmpD = this.donePath + '.tmp'
+    writeFileSync(tmpD, JSON.stringify(this.done, null, 2))
+    renameSync(tmpD, this.donePath)
   }
 
   add(item: NewItem): ApprovalItem {

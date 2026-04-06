@@ -62,8 +62,14 @@ export interface MCPServerConfig {
 
 const MAX_STDERR_LINES = 50
 
+export interface LocalHandler {
+  tools: Anthropic.Tool[]
+  handler: (toolName: string, args: Record<string, unknown>) => Promise<string>
+}
+
 export class MCPManager {
   private clients: Map<string, Client> = new Map()
+  private localHandlers: Map<string, LocalHandler> = new Map()
   private toolCache: { tools: Anthropic.Tool[]; serverMap: Map<string, string> } | null = null
   private cacheVersion = 0
   private stderrBuffers: Map<string, string[]> = new Map()
@@ -73,7 +79,17 @@ export class MCPManager {
       const transport = new StdioClientTransport({
         command: config.command,
         args: config.args ?? [],
-        env: { ...process.env, ...config.env } as Record<string, string>,
+        env: (config.name.startsWith('custom:')
+          ? {
+              PATH: process.env.PATH ?? '',
+              HOME: process.env.HOME ?? '',
+              NODE_ENV: process.env.NODE_ENV ?? 'production',
+              LANG: process.env.LANG ?? '',
+              COAGENT_DATA_DIR: process.env.COAGENT_DATA_DIR ?? '',
+              ...config.env,
+            }
+          : { ...process.env, ...config.env }
+        ) as Record<string, string>,
         stderr: 'pipe'
       })
 
@@ -106,6 +122,21 @@ export class MCPManager {
     }
     this.cacheVersion++
     this.toolCache = null
+  }
+
+  /** Register an in-process local tool handler (no subprocess needed) */
+  registerLocal(name: string, tools: Anthropic.Tool[], handler: (toolName: string, args: Record<string, unknown>) => Promise<string>): void {
+    this.localHandlers.set(name, { tools, handler })
+    this.cacheVersion++
+    this.toolCache = null
+  }
+
+  /** Unregister a local tool handler */
+  unregisterLocal(name: string): void {
+    if (this.localHandlers.delete(name)) {
+      this.cacheVersion++
+      this.toolCache = null
+    }
   }
 
   /** Get recent stderr output for a server (for debugging custom MCPs) */
@@ -145,6 +176,14 @@ export class MCPManager {
       }
     }
 
+    // Include local handlers (synchronous — no async needed)
+    for (const [serverName, local] of this.localHandlers) {
+      for (const tool of local.tools) {
+        tools.push(tool)
+        serverMap.set(tool.name, serverName)
+      }
+    }
+
     // Only cache if no connections changed while we were listing
     if (this.cacheVersion === versionAtStart) {
       this.toolCache = { tools, serverMap }
@@ -158,10 +197,16 @@ export class MCPManager {
   }
 
   isConnected(name: string): boolean {
-    return this.clients.has(name)
+    return this.clients.has(name) || this.localHandlers.has(name)
   }
 
   async callTool(serverName: string, toolName: string, args: Record<string, unknown>): Promise<string> {
+    // Check local handlers first — these run in-process, no subprocess needed
+    const local = this.localHandlers.get(serverName)
+    if (local) {
+      return local.handler(toolName, args)
+    }
+
     const client = this.clients.get(serverName)
     if (!client) throw new Error(`MCP server not found: ${serverName}`)
     try {
@@ -213,10 +258,16 @@ export class MCPManager {
   }
 
   async disconnect(name: string): Promise<void> {
+    // Remove local handler if present
+    const hadLocal = this.localHandlers.delete(name)
+
     const client = this.clients.get(name)
     if (client) {
       await client.close().catch(err => console.warn(`[MCP] Error closing ${name}:`, (err as Error).message))
       this.clients.delete(name)
+      this.cacheVersion++
+      this.toolCache = null
+    } else if (hadLocal) {
       this.cacheVersion++
       this.toolCache = null
     }
@@ -227,6 +278,7 @@ export class MCPManager {
       await client.close().catch(err => console.warn(`[MCP] Error closing ${name}:`, (err as Error).message))
     }
     this.clients.clear()
+    this.localHandlers.clear()
     this.cacheVersion++
     this.toolCache = null
   }

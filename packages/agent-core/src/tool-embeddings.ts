@@ -309,7 +309,7 @@ export async function searchToolsAndSchema(
   schema: string,
   tools: Anthropic.Tool[],
   toolLimit = 5,
-  schemaLimit = 2
+  schemaLimit = 3
 ): Promise<{
   matches: Anthropic.Tool[];
   schemas: { tool: string; params: string[]; score: number }[];

@@ -1,4 +1,4 @@
-export type Autonomy = 'ask_first' | 'balanced' | 'autonomous'
+export type Autonomy = 'ask_first' | 'balanced' | 'agent' | 'autonomous'
 
 export type NotificationMode = 'always' | 'away_only' | 'never'
 
@@ -27,11 +27,18 @@ export interface AgentSettings {
   voice_response: boolean  // TTS read-back of summary
   voice_hotkey: string     // shortcut string e.g. "Control+Space"
   voice_voice: string      // OpenAI TTS voice: alloy, echo, fable, onyx, nova, shimmer
+  voice_volume: number     // TTS playback volume 0.0–1.0
   onboarded: boolean       // false until onboarding completes — triggers onboarding flow in system prompt
   custom_instructions: string  // freeform text injected into every system prompt — user or agent can edit
+  brand_company: string        // company name for document branding
+  brand_color: string          // accent color hex for documents, e.g. '#1a2744'
+  brand_logo: string           // base64 data URI of logo PNG/JPEG for documents
+  auto_brief_meetings: boolean // auto-brief before calendar meetings
+  auto_brief_minutes: number   // minutes before meeting to fire brief (default 30)
+  agent_name: string           // user-chosen name for their agent (e.g. "Jarvis")
 }
 
-export type TriggerSource = 'heartbeat' | 'webhook' | 'manual' | 'memory_cleanup' | 'todo_due' | 'routine' | 'task_due'
+export type TriggerSource = 'heartbeat' | 'webhook' | 'manual' | 'memory_cleanup' | 'todo_due' | 'routine' | 'task_due' | 'meeting_brief'
 
 export interface AgentTrigger {
   source: TriggerSource
@@ -128,6 +135,11 @@ export interface FileEntry {
   summary: string       // AI-written 2-3 sentence description
   group: string         // agent-assigned folder name e.g. "Contracts"
   sizeBytes: number
+  documentMeta?: {
+    template: string        // e.g. 'resume', 'proposal'
+    templateData: any       // the full data object passed to renderTemplatedDocument
+    lastRenderedAt: string  // ISO timestamp
+  }
 }
 
 export type WSClientMessage =
@@ -202,6 +214,7 @@ export type WSClientMessage =
   | { type: 'team_join'; inviteCode: string; memberName: string; memberRole: string; memberHandles: string }
   | { type: 'team_leave' }
   | { type: 'team_invite' }
+  | { type: 'update_document_fields'; fileId: string; data: Record<string, any> }
 
 export type WSServerMessage =
   | { type: 'queue_update'; items: ApprovalItem[] }
@@ -258,6 +271,7 @@ export type WSServerMessage =
   | { type: 'team_joined'; team: TeamInfo }
   | { type: 'team_invite_code'; code: string }
   | { type: 'team_error'; error: string }
+  | { type: 'status_line'; message: string }
   | { type: 'subscription_expired' }
 
 export interface AdminUser {

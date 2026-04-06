@@ -156,18 +156,28 @@ export function playTtsAudio(base64Mp3: string) {
   // Stop any existing playback
   if (ttsAudio) { ttsAudio.pause(); ttsAudio = null }
   const audio = new Audio(`data:audio/mp3;base64,${base64Mp3}`)
+  audio.volume = ttsVolume
   ttsAudio = audio
   audio.onended = () => { ttsAudio = null }
   audio.play().catch(err => console.error('[Voice] TTS playback failed:', err))
 }
 
-// ── Streaming TTS — queue segments, play each as it completes ─────────────
+// ── Streaming TTS — queue MP3 segments, play each as it completes ─────────
+let ttsVolume = 0.5 // 0.0–1.0, default 50%
+
+export function setTtsVolume(v: number) {
+  ttsVolume = Math.max(0, Math.min(1, v))
+  if (ttsAudio) ttsAudio.volume = ttsVolume
+}
+
+export function getTtsVolume(): number { return ttsVolume }
+
 let ttsChunks: Uint8Array[] = []
 let ttsQueue: Blob[] = []
 let ttsPlaying = false
 let ttsOnAllDone: (() => void) | null = null
 
-export function handleTtsChunk(base64Chunk: string, _seq: number) {
+export function handleTtsChunk(base64Chunk: string, _seq: number, _format?: string) {
   const bytes = Uint8Array.from(atob(base64Chunk), c => c.charCodeAt(0))
   ttsChunks.push(bytes)
 }
@@ -191,6 +201,7 @@ function playNextTtsSegment() {
   const url = URL.createObjectURL(blob)
   if (ttsAudio) { ttsAudio.pause(); ttsAudio = null }
   const audio = new Audio(url)
+  audio.volume = ttsVolume
   ttsAudio = audio
   audio.onended = () => {
     ttsAudio = null
@@ -208,15 +219,13 @@ function playNextTtsSegment() {
   })
 }
 
-export function handleTtsDone() {
-  // Called per segment — server sends voice_tts_done after each streamTts() call
+export function handleTtsDone(_format?: string) {
   if (ttsChunks.length === 0) return
   const segmentBlob = new Blob(ttsChunks as BlobPart[], { type: 'audio/mpeg' })
   ttsChunks = []
   ttsQueue.push(segmentBlob)
   console.log('[Voice] TTS segment ready (%d bytes), queue: %d', segmentBlob.size, ttsQueue.length)
 
-  // Start playing immediately if not already playing
   if (!ttsPlaying) {
     playNextTtsSegment()
   }

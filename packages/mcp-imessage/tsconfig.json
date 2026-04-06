@@ -9,7 +9,8 @@
     "declaration": true,
     "esModuleInterop": true,
     "resolveJsonModule": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "types": ["bun"]
   },
   "include": ["src"],
   "exclude": ["src/**/*.test.ts"]

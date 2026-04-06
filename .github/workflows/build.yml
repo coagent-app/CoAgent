@@ -52,13 +52,30 @@ jobs:
         with:
           workspaces: apps/desktop/src-tauri
 
-      # Windows: install WebView2 (already on Win 11, needed for Win 10 CI)
+      # Windows: install WebView2
       - name: Install WebView2 (Windows)
         if: matrix.platform == 'windows-latest'
         shell: pwsh
         run: |
           Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile "$env:TEMP\MicrosoftEdgeWebview2Setup.exe"
           Start-Process -FilePath "$env:TEMP\MicrosoftEdgeWebview2Setup.exe" -Args "/silent /install" -Wait
+
+      # macOS: Import signing certificate
+      - name: Import Apple certificate
+        if: matrix.platform == 'macos-latest'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ]; then
+            echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+            security create-keychain -p actions build.keychain
+            security default-keychain -s build.keychain
+            security unlock-keychain -p actions build.keychain
+            security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+            security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k actions build.keychain
+            rm certificate.p12
+          fi
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -75,16 +92,37 @@ jobs:
         shell: bash
         run: bun build packages/mcp-memory/dist/index.js --compile --target=${{ matrix.bun-target }} --outfile apps/desktop/src-tauri/binaries/coagent-memory-${{ matrix.rust-target }}
 
-      # Make sidecars executable (Unix only)
       - name: chmod sidecars
         if: matrix.platform != 'windows-latest'
         run: chmod +x apps/desktop/src-tauri/binaries/*
 
-      # Build Tauri (auto-bundles sidecars via externalBin)
+      # macOS: Pre-sign sidecars with hardened runtime before Tauri bundles them
+      - name: Sign sidecars (macOS)
+        if: matrix.platform == 'macos-latest' && env.APPLE_SIGNING_IDENTITY != ''
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          ENTITLEMENTS="apps/desktop/src-tauri/Entitlements.plist"
+          for bin in apps/desktop/src-tauri/binaries/coagent-*-${{ matrix.rust-target }}; do
+            echo "Signing $bin"
+            codesign --force --options runtime --entitlements "$ENTITLEMENTS" \
+              --sign "$APPLE_SIGNING_IDENTITY" "$bin"
+            codesign --verify --strict "$bin"
+          done
+
+      # Build Tauri app (signs main bundle + notarizes)
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           projectPath: apps/desktop
           tagName: ${{ github.ref_name }}

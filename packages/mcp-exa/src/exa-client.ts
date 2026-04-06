@@ -276,7 +276,7 @@ export class ExaClient {
   // ── Search Monitors ──────────────────────────────────────────────────────
 
   async createMonitor(params: ExaMonitorCreateParams): Promise<ExaMonitor & { webhookSecret?: string }> {
-    const res = await fetch(`${EXA_BASE}/search-monitors`, {
+    const res = await fetch(`${EXA_BASE}/monitors`, {
       method: 'POST',
       headers: this.headers(),
       body: JSON.stringify(params),
@@ -289,17 +289,19 @@ export class ExaClient {
   }
 
   async listMonitors(status?: string): Promise<{ monitors: ExaMonitor[] }> {
-    const url = status ? `${EXA_BASE}/search-monitors?status=${status}` : `${EXA_BASE}/search-monitors`
+    const url = status ? `${EXA_BASE}/monitors?status=${status}` : `${EXA_BASE}/monitors`
     const res = await fetch(url, { headers: this.headers() })
     if (!res.ok) {
       const err = await res.text()
       throw new Error(`Exa listMonitors failed (${res.status}): ${err}`)
     }
-    return res.json() as Promise<{ monitors: ExaMonitor[] }>
+    const json = await res.json() as any
+    // Exa returns { data: [...] } but we normalize to { monitors: [...] }
+    return { monitors: json.data ?? json.monitors ?? [] }
   }
 
   async deleteMonitor(id: string): Promise<void> {
-    const res = await fetch(`${EXA_BASE}/search-monitors/${id}`, {
+    const res = await fetch(`${EXA_BASE}/monitors/${id}`, {
       method: 'DELETE',
       headers: this.headers(),
     })
@@ -310,7 +312,7 @@ export class ExaClient {
   }
 
   async triggerMonitor(id: string): Promise<ExaMonitorRun> {
-    const res = await fetch(`${EXA_BASE}/search-monitors/${id}/trigger`, {
+    const res = await fetch(`${EXA_BASE}/monitors/${id}/trigger`, {
       method: 'POST',
       headers: this.headers(),
     })

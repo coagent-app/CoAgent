@@ -208,7 +208,7 @@ export function TeamPane({ team, messages, teamStatus, onSendMessage, relayUrl, 
       const targets = Array.isArray(to) ? to : [to]
       const fromMe = m.from.userId === 'default'
       const fromThem = m.from.userId === dmBase || m.from.userId === dmId
-      const toMe = targets.some(t => t === 'default' || t === 'default-agent' || t.toLowerCase().includes('brett'))
+      const toMe = targets.some(t => t === 'default' || t === 'default-agent' || t === dmBase || t === dmId)
       const toThem = targets.some(t => t === dmId || t === dmBase || t.toLowerCase().includes(dmBase))
       return (fromMe && toThem) || (fromThem && toMe)
     })

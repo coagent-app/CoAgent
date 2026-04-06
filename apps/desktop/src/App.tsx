@@ -11,21 +11,38 @@ import { SettingsPane } from '@/components/SettingsPane'
 import { FilesPane } from '@/components/FilesPane'
 import { SkillsPane } from '@/components/SkillsPane'
 import { TeamPane } from '@/components/TeamPane'
+import { DocumentEditor } from '@/components/DocumentEditor'
+import { OnboardingTour } from '@/components/OnboardingTour'
 import { useAgent } from '@/hooks/useAgent'
+import { useUpdater } from '@/hooks/useUpdater'
 import { useTheme } from '@/hooks/useTheme'
 import { cn } from '@/lib/utils'
-import { registerVoiceHotkey, unregisterVoiceHotkey, cancelVoice } from '@/lib/voice'
+import { registerVoiceHotkey, unregisterVoiceHotkey, cancelVoice, setTtsVolume } from '@/lib/voice'
 import { emit } from '@tauri-apps/api/event'
 import type { ApprovalItem } from '@coagent/shared'
 
 export default function App() {
-  const { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, error, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, settings, updateSettings, authStatus, updateAuth, verifyAuth, files, folders, searchResults, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, relayActive, relayModel, setRelayModel, relayUsage, activateRelay, refreshRelayStatus, pendingFields, setPendingFields, setModel, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, triggerPrompt, setTriggerPrompt } = useAgent()
+  const { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, error, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, settings, updateSettings, authStatus, updateAuth, verifyAuth, files, folders, searchResults, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, relayActive, relayModel, setRelayModel, relayUsage, activateRelay, refreshRelayStatus, pendingFields, setPendingFields, setModel, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, triggerPrompt, setTriggerPrompt, editingDocument, saveDocumentEdits, closeDocumentEditor } = useAgent()
   const { dark, toggle: toggleTheme } = useTheme()
+  const updater = useUpdater()
   const [view, setView] = useState<View>('chat')
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null)
   const selectedItem = selectedItemId ? queue.find(i => i.id === selectedItemId) ?? null : null
   const setSelectedItem = useCallback((item: ApprovalItem | null) => setSelectedItemId(item?.id ?? null), [])
   const [modalOpen, setModalOpen] = useState(false)
+
+  // ESC to cancel voice/stop agent — always fire both regardless of state
+  useEffect(() => {
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (editingDocument) { closeDocumentEditor(); return }
+        cancelVoice()
+        stopAgent()
+      }
+    }
+    window.addEventListener('keydown', handleEsc)
+    return () => window.removeEventListener('keydown', handleEsc)
+  }, [stopAgent, editingDocument, closeDocumentEditor])
 
   // Voice: register/unregister based on voice_enabled setting
   const voiceEnabled = settings?.voice_enabled ?? false
@@ -34,6 +51,7 @@ export default function App() {
     emit('set-voice-mode', { enabled: voiceEnabled }).catch(() => {})
 
     if (voiceEnabled) {
+      setTtsVolume(settings?.voice_volume ?? 0.5)
       registerVoiceHotkey('fn', (base64) => {
         ;(window as any).__voiceActive = true
         window.dispatchEvent(new CustomEvent('coagent-ws-send', {
@@ -66,6 +84,20 @@ export default function App() {
         </div>
       )}
 
+      {updater.available && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900 text-[12.5px] px-4 py-2.5 rounded-xl shadow-lg flex items-center gap-3">
+          {updater.downloading ? (
+            <span>Updating... {updater.progress}%</span>
+          ) : (
+            <>
+              <span>v{updater.version} available</span>
+              <button onClick={updater.install} className="px-2.5 py-0.5 rounded-md bg-white/20 dark:bg-black/10 hover:bg-white/30 dark:hover:bg-black/20 font-medium transition-colors">Update</button>
+              <button onClick={updater.dismiss} className="text-white/50 dark:text-neutral-400 hover:text-white dark:hover:text-neutral-900 transition-colors">&times;</button>
+            </>
+          )}
+        </div>
+      )}
+
       <div className="app-body">
         <Sidebar
           view={view}
@@ -83,7 +115,14 @@ export default function App() {
 
         {view === 'chat' && (
           <div className="relative flex-1 flex overflow-hidden">
-            <ChatPane messages={messages} streamingText={streamingText} thinking={thinking} processing={processing} toolLabel={toolLabel} researchAgents={researchAgents} connected={connected} onChat={chat} onSteer={steer} onStop={stopAgent} onIngestFile={ingestFile} files={files} onNavigateToSettings={() => setView('settings')} lastHeartbeat={lastHeartbeat} skills={skills} capabilityCard={capabilityCard} onConfirmCapabilities={confirmCapabilities} userName={settings?.name} userRole={settings?.role} onboarded={settings?.onboarded} className="flex-1" />
+            <ChatPane messages={messages} streamingText={streamingText} thinking={thinking} processing={processing} toolLabel={toolLabel} researchAgents={researchAgents} connected={connected} onChat={chat} onSteer={steer} onStop={stopAgent} onIngestFile={ingestFile} files={files} onNavigateToSettings={() => setView('settings')} lastHeartbeat={lastHeartbeat} heartbeatLog={heartbeatLog} onTriggerHeartbeat={triggerHeartbeat} statusLine={statusLine} skills={skills} capabilityCard={capabilityCard} onConfirmCapabilities={confirmCapabilities} userName={settings?.name} userRole={settings?.role} onboarded={settings?.onboarded} agentName={settings?.agent_name} className="flex-1" />
+            {editingDocument && (
+              <DocumentEditor
+                document={editingDocument}
+                onSave={saveDocumentEdits}
+                onClose={closeDocumentEditor}
+              />
+            )}
           </div>
         )}
 
@@ -99,6 +138,9 @@ export default function App() {
             onGoogleToggle={googleCalendarToggle}
             onGoogleColor={googleCalendarColor}
             onGoogleSync={googleCalendarSync}
+            autoBriefMeetings={settings?.auto_brief_meetings}
+            autoBriefMinutes={settings?.auto_brief_minutes}
+            onUpdateSettings={updateSettings}
           />
         )}
 
@@ -188,6 +230,16 @@ export default function App() {
         onToggleTrigger={toggleTrigger}
         onChat={chat}
       />
+
+      {/* Onboarding tour — shown on first launch */}
+      {settings && !settings.onboarded && connected && (
+        <OnboardingTour
+          settings={settings}
+          onUpdate={updateSettings}
+          onOpenIntegrations={() => setModalOpen(true)}
+          onNavigate={(v) => setView(v as View)}
+        />
+      )}
 
       {/* Trigger prompt — shown after first connection of an integration with triggers */}
       {triggerPrompt && triggerPrompt.triggers && (

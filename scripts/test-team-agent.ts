@@ -2,20 +2,21 @@
  * Simulates a team agent for testing.
  *
  * Usage:
- *   RELAY_URL=https://coagent-relay.brettponters.workers.dev \
+ *   RELAY_URL=https://your-relay.example.com \
  *   RELAY_TOKEN=<token> \
- *   USER_ID=brian \
- *   USER_NAME=Brian \
+ *   USER_ID=agent2 \
+ *   USER_NAME=Agent2 \
  *   USER_ROLE=Sales \
  *   npx tsx scripts/test-team-agent.ts
  */
 
 import type { TeamMessage } from '../packages/shared/src/index.js'
 
-const RELAY_URL = (process.env.RELAY_URL || 'https://coagent-relay.brettponters.workers.dev').replace(/\/$/, '')
+const RELAY_URL = (process.env.RELAY_URL || '').replace(/\/$/, '')
 const RELAY_TOKEN = process.env.RELAY_TOKEN
-const USER_ID = process.env.USER_ID || 'brian'
-const USER_NAME = process.env.USER_NAME || 'Brian'
+if (!RELAY_URL || !RELAY_TOKEN) { console.error('Set RELAY_URL and RELAY_TOKEN env vars'); process.exit(1) }
+const USER_ID = process.env.USER_ID || 'agent2'
+const USER_NAME = process.env.USER_NAME || 'Agent2'
 const USER_ROLE = process.env.USER_ROLE || 'Sales'
 
 if (!RELAY_TOKEN) {

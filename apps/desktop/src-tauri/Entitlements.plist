@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+
+    <!-- Bun sidecars use JIT compilation -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+
+    <!-- Bun sidecars need unsigned executable memory for V8/JSC -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- Sidecar binaries bundle their own libraries -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- Bun sidecars need executable page protection disabled -->
+    <key>com.apple.security.cs.disable-executable-page-protection</key>
+    <true/>
+
+    <!-- Bun sidecars need dyld environment variable access -->
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+
+    <!-- Network: API calls (Anthropic, OpenAI, Moonshot, relay) -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+
+    <!-- Network: local agent server (port 7830) -->
+    <key>com.apple.security.network.server</key>
+    <true/>
+
+    <!-- Microphone: voice dictation and voice chat -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+
+    <!-- File access: user uploads, ~/.coagent data directory -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+</dict>
+</plist>

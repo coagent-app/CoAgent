@@ -1,11 +1,11 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
-import Database from 'better-sqlite3'
+import { Database } from 'bun:sqlite'
 import { homedir } from 'os'
 import { join } from 'path'
 import { execSync } from 'child_process'
@@ -17,8 +17,8 @@ function coreDataToISO(ts: number | null): string | null {
   return new Date((ts / 1000000000 + 978307200) * 1000).toISOString()
 }
 
-function openDb(): Database.Database {
-  return new Database(CHAT_DB, { readonly: true, fileMustExist: true })
+function openDb(): Database {
+  return new Database(CHAT_DB, { readonly: true })
 }
 
 process.stdout.on('error', (err: any) => {
@@ -121,8 +121,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const db = openDb()
 
       try {
-        // Get the latest message per chat, joining to handle for contact info
-        const rows = db.prepare(`
+        const rows = db.query(`
           SELECT
             c.ROWID          AS chat_id,
             c.chat_identifier,
@@ -162,12 +161,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }))
 
         return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(conversations, null, 2),
-            },
-          ],
+          content: [{ type: 'text', text: JSON.stringify(conversations, null, 2) }],
         }
       } finally {
         db.close()
@@ -180,7 +174,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const db = openDb()
 
       try {
-        const rows = db.prepare(`
+        const rows = db.query(`
           SELECT
             m.ROWID,
             m.text,
@@ -202,7 +196,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           sender_handle: string | null
         }>
 
-        // Reverse to get chronological order
         const messages = rows.reverse().map((row) => ({
           id: row.ROWID,
           text: row.text,
@@ -212,12 +205,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }))
 
         return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(messages, null, 2),
-            },
-          ],
+          content: [{ type: 'text', text: JSON.stringify(messages, null, 2) }],
         }
       } finally {
         db.close()
@@ -232,48 +220,33 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       try {
         let sql: string
-        let params: unknown[]
+        let params: (string | number)[]
 
         if (contact) {
           sql = `
-            SELECT
-              m.ROWID,
-              m.text,
-              m.date,
-              m.is_from_me,
-              c.chat_identifier,
-              h.id AS sender_handle
+            SELECT m.ROWID, m.text, m.date, m.is_from_me, c.chat_identifier, h.id AS sender_handle
             FROM message m
             JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
             JOIN chat c ON c.ROWID = cmj.chat_id
             LEFT JOIN handle h ON h.ROWID = m.handle_id
-            WHERE m.text LIKE ?
-              AND c.chat_identifier LIKE ?
-            ORDER BY m.date DESC
-            LIMIT ?
+            WHERE m.text LIKE ? AND c.chat_identifier LIKE ?
+            ORDER BY m.date DESC LIMIT ?
           `
           params = [`%${query}%`, `%${contact}%`, limit]
         } else {
           sql = `
-            SELECT
-              m.ROWID,
-              m.text,
-              m.date,
-              m.is_from_me,
-              c.chat_identifier,
-              h.id AS sender_handle
+            SELECT m.ROWID, m.text, m.date, m.is_from_me, c.chat_identifier, h.id AS sender_handle
             FROM message m
             JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
             JOIN chat c ON c.ROWID = cmj.chat_id
             LEFT JOIN handle h ON h.ROWID = m.handle_id
             WHERE m.text LIKE ?
-            ORDER BY m.date DESC
-            LIMIT ?
+            ORDER BY m.date DESC LIMIT ?
           `
           params = [`%${query}%`, limit]
         }
 
-        const rows = db.prepare(sql).all(...params) as Array<{
+        const rows = db.query(sql).all(...params) as Array<{
           ROWID: number
           text: string | null
           date: number | null
@@ -292,12 +265,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }))
 
         return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(results, null, 2),
-            },
-          ],
+          content: [{ type: 'text', text: JSON.stringify(results, null, 2) }],
         }
       } finally {
         db.close()
@@ -308,7 +276,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const to = args?.to as string
       const text = args?.text as string
 
-      // Escape backslashes first, then double-quotes, for safe AppleScript string embedding
       const escaped = text.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
 
       const appleScript = [
@@ -322,36 +289,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       execSync(`osascript -e '${appleScript.replace(/'/g, "'\"'\"'")}'`)
 
       return {
-        content: [
-          {
-            type: 'text',
-            text: `Message sent to ${to}`,
-          },
-        ],
+        content: [{ type: 'text', text: `Message sent to ${to}` }],
       }
     }
 
     throw new Error(`Unknown tool: ${name}`)
   } catch (error: any) {
-    if (error?.code === 'SQLITE_CANTOPEN') {
+    if (error?.code === 'SQLITE_CANTOPEN' || error?.message?.includes('unable to open')) {
       return {
-        content: [
-          {
-            type: 'text',
-            text: 'Cannot open chat.db. Please grant Full Disk Access to this application in System Settings > Privacy & Security > Full Disk Access.',
-          },
-        ],
+        content: [{
+          type: 'text',
+          text: 'Cannot open chat.db. Please grant Full Disk Access to this application in System Settings > Privacy & Security > Full Disk Access.',
+        }],
         isError: true,
       }
     }
 
     return {
-      content: [
-        {
-          type: 'text',
-          text: `Error: ${error?.message ?? String(error)}`,
-        },
-      ],
+      content: [{ type: 'text', text: `Error: ${error?.message ?? String(error)}` }],
       isError: true,
     }
   }

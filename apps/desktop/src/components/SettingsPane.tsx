@@ -1,12 +1,40 @@
 // apps/desktop/src/components/SettingsPane.tsx
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Input } from '@/components/ui/input'
 import { Separator } from '@/components/ui/separator'
 import { cn } from '@/lib/utils'
 import type { AgentSettings, DayName, Autonomy, RelayUsage, UsageSummary, AdminUser } from '@coagent/shared'
 
-type SettingsTab = 'general' | 'model' | 'usage' | 'admin'
+type SettingsTab = 'general' | 'model' | 'brand' | 'usage' | 'admin'
+
+/** Controlled input that syncs with server value and auto-saves on change with debounce */
+function useDebouncedField(serverValue: string, onSave: (val: string) => void, delay = 600) {
+  const [local, setLocal] = useState(serverValue)
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const savedRef = useRef(serverValue)
+  // Sync from server when it changes (e.g. on initial load or external update)
+  useEffect(() => { savedRef.current = serverValue; setLocal(serverValue) }, [serverValue])
+  const onChange = useCallback((val: string) => {
+    setLocal(val)
+    if (timer.current) clearTimeout(timer.current)
+    timer.current = setTimeout(() => {
+      if (val !== savedRef.current) {
+        savedRef.current = val
+        onSave(val)
+      }
+    }, delay)
+  }, [onSave, delay])
+  // Also save immediately on blur
+  const onBlur = useCallback(() => {
+    if (timer.current) clearTimeout(timer.current)
+    if (local !== savedRef.current) {
+      savedRef.current = local
+      onSave(local)
+    }
+  }, [local, onSave])
+  return { value: local, onChange, onBlur }
+}
 
 interface SettingsPaneProps {
   settings: AgentSettings | null
@@ -87,6 +115,7 @@ const DETECTED_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone
 const AUTONOMY_OPTIONS: { value: Autonomy; label: string; description: string }[] = [
   { value: 'ask_first', label: 'Ask first', description: 'Queue almost everything for approval before acting' },
   { value: 'balanced', label: 'Balanced', description: 'Act on routine tasks automatically, queue anything that sends or edits' },
+  { value: 'agent', label: 'Agent', description: 'Reads and researches freely — queues all actions unless you specifically ask' },
   { value: 'autonomous', label: 'Autonomous', description: 'May send emails and make changes without asking' },
 ]
 
@@ -97,13 +126,14 @@ interface ModelOption {
   provider: string
   label: string
   description: string
+  price: string
   badge?: string
 }
 
 const MODEL_OPTIONS: ModelOption[] = [
-  { id: 'claude-opus-4-6', provider: 'Anthropic', label: 'Claude Opus 4.6', description: 'Most powerful — deep reasoning' },
-  { id: 'claude-sonnet-4-6', provider: 'Anthropic', label: 'Claude Sonnet 4.6', description: 'Best balance of quality and cost', badge: 'Recommended' },
-  { id: 'claude-haiku-4-5', provider: 'Anthropic', label: 'Claude Haiku 4.5', description: 'Fast and affordable — may skip approval steps' },
+  { id: 'kimi-k2.5', provider: 'Kimi', label: 'Kimi K2.5', description: '8x cheaper — strong reasoning, 256K context', price: '$0.60 / $2.50 per M tokens', badge: 'Default' },
+  { id: 'claude-sonnet-4-6', provider: 'Anthropic', label: 'Claude Sonnet 4.6', description: 'Best quality — prompt caching saves ~60%', price: '$3 / $15 per M tokens' },
+  { id: 'claude-opus-4-6', provider: 'Anthropic', label: 'Claude Opus 4.6', description: 'Most powerful — deep reasoning', price: '$15 / $75 per M tokens' },
 ]
 
 function ProviderLogo({ provider, className = '' }: { provider: string; className?: string }) {
@@ -117,6 +147,13 @@ function ProviderLogo({ provider, className = '' }: { provider: string; classNam
           <path d="m3.127 10.604 3.135-1.76.053-.153-.053-.085H6.11l-.525-.032-1.791-.048-1.554-.065-1.505-.08-.38-.081L0 7.832l.036-.234.32-.214.455.04 1.009.069 1.513.105 1.097.064 1.626.17h.259l.036-.105-.089-.065-.068-.064-1.566-1.062-1.695-1.121-.887-.646-.48-.327-.243-.306-.104-.67.435-.48.585.04.15.04.593.456 1.267.981 1.654 1.218.242.202.097-.068.012-.049-.109-.181-.9-1.626-.96-1.655-.428-.686-.113-.411a2 2 0 0 1-.068-.484l.496-.674L4.446 0l.662.089.279.242.411.94.666 1.48 1.033 2.014.302.597.162.553.06.17h.105v-.097l.085-1.134.157-1.392.154-1.792.052-.504.25-.605.497-.327.387.186.319.456-.045.294-.19 1.23-.37 1.93-.243 1.29h.142l.161-.16.654-.868 1.097-1.372.484-.545.565-.601.363-.287h.686l.505.751-.226.775-.707.895-.585.759-.839 1.13-.524.904.048.072.125-.012 1.897-.403 1.024-.186 1.223-.21.553.258.06.263-.218.536-1.307.323-1.533.307-2.284.54-.028.02.032.04 1.029.098.44.024h1.077l2.005.15.525.346.315.424-.053.323-.807.411-3.631-.863-.872-.218h-.12v.073l.726.71 1.331 1.202 1.667 1.55.084.383-.214.302-.226-.032-1.464-1.101-.565-.497-1.28-1.077h-.084v.113l.295.432 1.557 2.34.08.718-.112.234-.404.141-.444-.08-.911-1.28-.94-1.44-.759-1.291-.093.053-.448 4.821-.21.246-.484.186-.403-.307-.214-.496.214-.98.258-1.28.21-1.016.19-1.263.112-.42-.008-.028-.092.012-.953 1.307-1.448 1.957-1.146 1.227-.274.109-.477-.247.045-.44.266-.39 1.586-2.018.956-1.25.617-.723-.004-.105h-.036l-4.212 2.736-.75.096-.324-.302.04-.496.154-.162 1.267-.871z" />
         </svg>
       )
+    case 'Kimi':
+      return (
+        <svg className={cls} viewBox="0 0 24 24" fill="currentColor">
+          <path d="M21.846 0a1.923 1.923 0 110 3.846H20.15a.226.226 0 01-.227-.226V1.923C19.923.861 20.784 0 21.846 0z" fill="#1783FF" />
+          <path d="M11.065 11.199l7.257-7.2c.137-.136.06-.41-.116-.41H14.3a.164.164 0 00-.117.051l-7.82 7.756c-.122.12-.302.013-.302-.179V3.82c0-.127-.083-.23-.185-.23H3.186c-.103 0-.186.103-.186.23V19.77c0 .128.083.23.186.23h2.69c.103 0 .186-.102.186-.23v-3.25c0-.069.025-.135.069-.178l2.424-2.406a.158.158 0 01.205-.023l6.484 4.772a7.677 7.677 0 003.453 1.283c.108.012.2-.095.2-.23v-3.06c0-.117-.07-.212-.164-.227a5.028 5.028 0 01-2.027-.807l-5.613-4.064c-.117-.078-.132-.279-.028-.381z" />
+        </svg>
+      )
     default:
       return null
   }
@@ -124,10 +161,13 @@ function ProviderLogo({ provider, className = '' }: { provider: string; classNam
 
 // --- Tab: General ---
 
-const DEFAULT_RELAY_URL = 'https://coagent-relay.brettponters.workers.dev'
-
-function GeneralTab({ settings, onUpdate, relayActive, onActivateRelay }: { settings: AgentSettings; onUpdate: (patch: Partial<AgentSettings>) => void; relayActive?: boolean; onActivateRelay?: (token: string, relayUrl: string) => void }) {
+function GeneralTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate: (patch: Partial<AgentSettings>) => void }) {
   const s = settings
+  const nameField = useDebouncedField(s.name, useCallback((v: string) => onUpdate({ name: v }), [onUpdate]))
+  const emailField = useDebouncedField(s.email, useCallback((v: string) => onUpdate({ email: v }), [onUpdate]))
+  const roleField = useDebouncedField(s.role, useCallback((v: string) => onUpdate({ role: v }), [onUpdate]))
+  const agentNameField = useDebouncedField(s.agent_name || '', useCallback((v: string) => onUpdate({ agent_name: v }), [onUpdate]))
+  const instructionsField = useDebouncedField(s.custom_instructions || '', useCallback((v: string) => onUpdate({ custom_instructions: v }), [onUpdate]))
   const tzValue = TIMEZONES.find(t => t.value === s.timezone) ? s.timezone : '__detect__'
 
   function handleTimezoneChange(value: string) {
@@ -150,13 +190,13 @@ function GeneralTab({ settings, onUpdate, relayActive, onActivateRelay }: { sett
     <>
       <SectionHeader eyebrow="Profile" title="About you" />
       <FieldRow label="Name">
-        <Input key={s.name} className="text-[13.5px] dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500" placeholder="Your name" defaultValue={s.name} onBlur={e => onUpdate({ name: e.target.value })} />
+        <Input className="text-[13.5px] dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500" placeholder="Your name" value={nameField.value} onChange={e => nameField.onChange(e.target.value)} onBlur={nameField.onBlur} />
       </FieldRow>
       <FieldRow label="Email">
-        <Input key={s.email} className="text-[13.5px] dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500" placeholder="your@email.com" defaultValue={s.email} onBlur={e => onUpdate({ email: e.target.value })} />
+        <Input className="text-[13.5px] dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500" placeholder="your@email.com" value={emailField.value} onChange={e => emailField.onChange(e.target.value)} onBlur={emailField.onBlur} />
       </FieldRow>
       <FieldRow label="What you do">
-        <Input key={s.role} className="text-[13.5px] dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500" placeholder="e.g. real estate agent, sales manager" defaultValue={s.role} onBlur={e => onUpdate({ role: e.target.value })} />
+        <Input className="text-[13.5px] dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500" placeholder="e.g. real estate agent, sales manager" value={roleField.value} onChange={e => roleField.onChange(e.target.value)} onBlur={roleField.onBlur} />
       </FieldRow>
       <FieldRow label="Timezone">
         <select value={tzValue} onChange={e => handleTimezoneChange(e.target.value)} className="w-full h-9 rounded-md border border-input bg-background px-3 py-1 text-[13.5px] text-neutral-800 dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-ring">
@@ -166,14 +206,21 @@ function GeneralTab({ settings, onUpdate, relayActive, onActivateRelay }: { sett
 
       <Separator className="my-6 dark:bg-neutral-800" />
 
+      <SectionHeader eyebrow="Agent" title="Your agent" />
+      <FieldRow label="Agent name">
+        <Input className="text-[13.5px] dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500" placeholder="e.g. Jarvis, Friday, Atlas" value={agentNameField.value} onChange={e => agentNameField.onChange(e.target.value)} onBlur={agentNameField.onBlur} />
+      </FieldRow>
+
+      <Separator className="my-6 dark:bg-neutral-800" />
+
       <SectionHeader eyebrow="Instructions" title="Custom instructions" />
       <FieldRow label="Tell your agent how to behave, what to prioritize, or any context it should always have">
         <textarea
-          key={s.custom_instructions}
           className="w-full min-h-[120px] rounded-md border border-input bg-background px-3 py-2 text-[13.5px] text-neutral-800 dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500 focus:outline-none focus:ring-1 focus:ring-ring resize-y"
           placeholder="e.g. A good lead has $1M+ revenue and runs paid ads. Always follow up within 24 hours. Prefer email over Slack for client communication."
-          defaultValue={s.custom_instructions || ''}
-          onBlur={e => onUpdate({ custom_instructions: e.target.value })}
+          value={instructionsField.value}
+          onChange={e => instructionsField.onChange(e.target.value)}
+          onBlur={instructionsField.onBlur}
         />
       </FieldRow>
 
@@ -300,7 +347,7 @@ function GeneralTab({ settings, onUpdate, relayActive, onActivateRelay }: { sett
             </span>
           </div>
         </FieldRow>
-        {s.voice_response && (
+        {s.voice_response && (<>
           <FieldRow label="Voice">
             <select
               value={s.voice_voice || 'alloy'}
@@ -318,77 +365,44 @@ function GeneralTab({ settings, onUpdate, relayActive, onActivateRelay }: { sett
               <option value="shimmer">Shimmer</option>
             </select>
           </FieldRow>
-        )}
+          <FieldRow label="Volume">
+            <div className="flex items-center gap-3">
+              <input
+                type="range"
+                min={0}
+                max={100}
+                value={Math.round((s.voice_volume ?? 0.5) * 100)}
+                onChange={e => {
+                  const v = parseInt(e.target.value) / 100
+                  onUpdate({ voice_volume: v })
+                  import('@/lib/voice').then(m => m.setTtsVolume(v))
+                }}
+                className="w-32 accent-neutral-500"
+              />
+              <span className="text-[12px] text-neutral-500 w-8">{Math.round((s.voice_volume ?? 0.5) * 100)}%</span>
+            </div>
+          </FieldRow>
+        </>)}
         </>
       )}
 
-      <Separator className="my-6 dark:bg-neutral-800" />
-
-      <SectionHeader eyebrow="Connection" title="Relay" />
-      {relayActive ? (
-        <div className="flex items-center gap-2">
-          <div className="w-2 h-2 rounded-full bg-emerald-500" />
-          <span className="text-[13px] text-neutral-600 dark:text-neutral-400">Connected to relay</span>
-        </div>
-      ) : (
-        <RelayActivation onActivate={onActivateRelay} />
-      )}
     </>
   )
 }
 
-function RelayActivation({ onActivate }: { onActivate?: (token: string, relayUrl: string) => void }) {
-  const [token, setToken] = useState('')
-  const [submitting, setSubmitting] = useState(false)
-
-  function handleActivate() {
-    const t = token.trim()
-    if (!t || !onActivate) return
-    setSubmitting(true)
-    onActivate(t, DEFAULT_RELAY_URL)
-    setTimeout(() => setSubmitting(false), 3000)
-  }
-
-  return (
-    <div className="space-y-3">
-      <p className="text-[12.5px] text-neutral-500 dark:text-neutral-400">
-        Paste the token you received to connect your agent.
-      </p>
-      <Input
-        className="text-[13.5px] font-mono dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500"
-        placeholder="Paste your relay token"
-        value={token}
-        onChange={e => setToken(e.target.value)}
-        onKeyDown={e => { if (e.key === 'Enter') handleActivate() }}
-      />
-      <button
-        type="button"
-        disabled={!token.trim() || submitting}
-        onClick={handleActivate}
-        className={cn(
-          'px-4 py-2 rounded-lg text-[13px] font-medium transition-colors',
-          token.trim() && !submitting
-            ? 'bg-neutral-900 text-white hover:bg-neutral-800 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-200'
-            : 'bg-neutral-200 text-neutral-400 dark:bg-neutral-800 dark:text-neutral-600 cursor-not-allowed'
-        )}
-      >
-        {submitting ? 'Connecting...' : 'Connect'}
-      </button>
-    </div>
-  )
-}
 
 // --- Tab: Model ---
 
 function ModelTab({ settings, onSetModel }: { settings: AgentSettings; onSetModel: (id: string) => void }) {
-  const selectedModel = settings.powerModel || 'claude-sonnet-4-6'
+  const selectedModel = settings.powerModel || 'kimi-k2.5'
 
   return (
     <>
       <SectionHeader eyebrow="AI Model" title="Choose your model" />
       <p className="text-[13px] text-neutral-500 dark:text-neutral-400 mb-5">
-        This model powers all of your agent's actions. You're billed at the exact provider rate — no markup.
+        This model powers all of your agent's thinking and actions.
       </p>
+
       <div className="flex flex-col gap-2.5">
         {MODEL_OPTIONS.map(model => {
           const selected = selectedModel === model.id
@@ -397,7 +411,6 @@ function ModelTab({ settings, onSetModel }: { settings: AgentSettings; onSetMode
               type="button"
               key={model.id}
               onClick={() => onSetModel(model.id)}
-              disabled={false}
               className={cn(
                 'w-full text-left px-4 py-3.5 rounded-xl border transition-colors',
                 selected
@@ -412,16 +425,25 @@ function ModelTab({ settings, onSetModel }: { settings: AgentSettings; onSetMode
                   {model.label}
                 </span>
                 {model.badge && (
-                  <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+                  <span className={cn(
+                    'text-[10px] font-semibold px-1.5 py-0.5 rounded-full',
+                    model.badge === 'Default'
+                      ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400'
+                      : 'bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-400'
+                  )}>
                     {model.badge}
                   </span>
                 )}
               </div>
-              <p className="text-[12.5px] text-neutral-500 dark:text-neutral-400 ml-6">{model.description}</p>
+              <div className="ml-6 flex items-center gap-3">
+                <p className="text-[12.5px] text-neutral-500 dark:text-neutral-400">{model.description}</p>
+                <span className="text-[11px] text-neutral-400 dark:text-neutral-500 whitespace-nowrap">{model.price}</span>
+              </div>
             </button>
           )
         })}
       </div>
+
     </>
   )
 }
@@ -642,11 +664,197 @@ function AdminTab({
   )
 }
 
+// --- Brand tab ---
+
+function BrandTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate: (patch: Partial<AgentSettings>) => void }) {
+  const [dragOver, setDragOver] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  // Optimistic local preview so logo appears immediately (before server roundtrip)
+  const [localLogo, setLocalLogo] = useState<string | null>(null)
+  const logoSrc = localLogo ?? settings.brand_logo
+  // Clear local preview once server confirms (settings.brand_logo matches)
+  useEffect(() => {
+    if (localLogo && settings.brand_logo === localLogo) setLocalLogo(null)
+  }, [settings.brand_logo, localLogo])
+
+  const handleLogoFile = (file: File) => {
+    if (!file.type.startsWith('image/')) return
+    if (file.size > 2 * 1024 * 1024) return // 2MB limit
+    setUploading(true)
+    const reader = new FileReader()
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        setLocalLogo(reader.result)
+        onUpdate({ brand_logo: reader.result })
+      }
+      setUploading(false)
+    }
+    reader.onerror = () => setUploading(false)
+    reader.readAsDataURL(file)
+  }
+
+  return (
+    <>
+      <SectionHeader eyebrow="Branding" title="Brand Kit" />
+      <p className="text-[12px] text-neutral-500 dark:text-neutral-400 mb-5 -mt-2">
+        Applied automatically to all generated documents.
+      </p>
+
+      <FieldRow label="Company Name">
+        <Input
+          value={settings.brand_company}
+          onChange={e => onUpdate({ brand_company: e.target.value })}
+          placeholder="Acme Corp"
+          className="text-[13px] h-9"
+        />
+      </FieldRow>
+
+      <FieldRow label="Accent Color">
+        <div className="flex items-center gap-3">
+          <input
+            type="color"
+            value={settings.brand_color || '#1a2744'}
+            onChange={e => onUpdate({ brand_color: e.target.value })}
+            className="w-9 h-9 rounded-lg border border-neutral-200 dark:border-neutral-700 cursor-pointer p-0.5 bg-transparent"
+          />
+          <Input
+            value={settings.brand_color}
+            onChange={e => {
+              const v = e.target.value
+              if (/^#[0-9a-fA-F]{0,6}$/.test(v) || v === '') onUpdate({ brand_color: v })
+            }}
+            placeholder="#1a2744"
+            className="text-[13px] h-9 w-32 font-mono"
+          />
+          {settings.brand_color && (
+            <button
+              type="button"
+              onClick={() => onUpdate({ brand_color: '' })}
+              className="text-[11px] text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300"
+            >
+              Reset
+            </button>
+          )}
+        </div>
+      </FieldRow>
+
+      <FieldRow label="Logo">
+        {logoSrc ? (
+          <div className="flex items-center gap-4">
+            <div className="w-20 h-20 rounded-lg border border-neutral-200 dark:border-neutral-700 flex items-center justify-center bg-neutral-50 dark:bg-neutral-900 overflow-hidden p-2">
+              <img src={logoSrc} alt="Logo" className="max-w-full max-h-full object-contain" />
+            </div>
+            <div className="flex flex-col gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  const input = document.createElement('input')
+                  input.type = 'file'
+                  input.accept = 'image/png,image/jpeg,image/svg+xml'
+                  input.onchange = () => {
+                    const file = input.files?.[0]
+                    if (file) handleLogoFile(file)
+                  }
+                  input.click()
+                }}
+                className="px-3 py-1.5 rounded-lg text-[12px] font-medium border border-neutral-200 dark:border-neutral-700 text-neutral-600 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800 transition-colors"
+              >
+                Change
+              </button>
+              <button
+                type="button"
+                onClick={() => { setLocalLogo(null); onUpdate({ brand_logo: '' }) }}
+                className="px-3 py-1.5 rounded-lg text-[12px] font-medium text-red-500 hover:text-red-600 dark:text-red-400 dark:hover:text-red-300 transition-colors"
+              >
+                Remove
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div
+            onDragOver={e => { e.preventDefault(); setDragOver(true) }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={e => {
+              e.preventDefault()
+              setDragOver(false)
+              const file = e.dataTransfer.files?.[0]
+              if (file) handleLogoFile(file)
+            }}
+            onClick={() => {
+              const input = document.createElement('input')
+              input.type = 'file'
+              input.accept = 'image/png,image/jpeg,image/svg+xml'
+              input.onchange = () => {
+                const file = input.files?.[0]
+                if (file) handleLogoFile(file)
+              }
+              input.click()
+            }}
+            className={cn(
+              'w-full h-24 rounded-lg border-2 border-dashed flex flex-col items-center justify-center cursor-pointer transition-colors',
+              uploading
+                ? 'border-blue-400 bg-blue-50 dark:bg-blue-950/20'
+                : dragOver
+                  ? 'border-blue-400 bg-blue-50 dark:bg-blue-950/20'
+                  : 'border-neutral-200 dark:border-neutral-700 hover:border-neutral-300 dark:hover:border-neutral-600'
+            )}
+          >
+            {uploading ? (
+              <span className="text-[12px] text-blue-500">Uploading…</span>
+            ) : (
+              <>
+                <span className="text-[12px] text-neutral-400 dark:text-neutral-500">
+                  Drop logo here or click to upload
+                </span>
+                <span className="text-[10px] text-neutral-300 dark:text-neutral-600 mt-1">
+                  PNG, JPEG, or SVG — max 2MB
+                </span>
+              </>
+            )}
+          </div>
+        )}
+      </FieldRow>
+
+      {/* Preview */}
+      {(settings.brand_company || settings.brand_color || logoSrc) && (
+        <>
+          <Separator className="my-5" />
+          <p className="text-[11px] font-semibold text-neutral-400 dark:text-neutral-500 uppercase tracking-widest mb-3">Preview</p>
+          <div className="rounded-lg border border-neutral-200 dark:border-neutral-700 p-5 bg-white dark:bg-neutral-900">
+            {logoSrc && (
+              <img src={logoSrc} alt="" className="h-8 mb-3 object-contain" />
+            )}
+            <div
+              className="h-1 rounded-full mb-3"
+              style={{ backgroundColor: settings.brand_color || '#1a2744', width: '100%' }}
+            />
+            <h3
+              className="text-[16px] font-bold mb-1"
+              style={{ color: settings.brand_color || '#1a2744' }}
+            >
+              Sample Document Title
+            </h3>
+            <p className="text-[11px] text-neutral-500">
+              This is how your branded documents will look.
+            </p>
+            {settings.brand_company && (
+              <p className="text-[10px] text-neutral-400 mt-4 pt-2 border-t border-neutral-100 dark:border-neutral-800">
+                {settings.brand_company}
+              </p>
+            )}
+          </div>
+        </>
+      )}
+    </>
+  )
+}
+
 // --- Main ---
 
 const BASE_TABS: { id: SettingsTab; label: string }[] = [
   { id: 'general', label: 'General' },
   { id: 'model', label: 'Model' },
+  { id: 'brand', label: 'Brand' },
   { id: 'usage', label: 'Usage' },
 ]
 
@@ -688,8 +896,9 @@ export function SettingsPane({ settings, onUpdate, onSetModel, usage, onRefreshU
       {/* Tab content */}
       <ScrollArea className="flex-1">
         <div className="px-8 py-6 max-w-xl">
-          {tab === 'general' && <GeneralTab settings={settings} onUpdate={onUpdate} relayActive={relayActive} onActivateRelay={onActivateRelay} />}
+          {tab === 'general' && <GeneralTab settings={settings} onUpdate={onUpdate} />}
           {tab === 'model' && <ModelTab settings={settings} onSetModel={onSetModel} />}
+          {tab === 'brand' && <BrandTab settings={settings} onUpdate={onUpdate} />}
           {tab === 'usage' && <UsageTab usage={usage ?? null} onRefresh={onRefreshUsage} />}
           {tab === 'admin' && isAdmin && (
             <AdminTab

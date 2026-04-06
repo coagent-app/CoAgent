@@ -1,7 +1,6 @@
 import { readFile, writeFile, mkdir, rm } from 'fs/promises'
 import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
-import { homedir } from 'os'
 import { parse as dotenvParse } from 'dotenv'
 import type { MCPServerConfig } from './mcp-manager.js'
 
@@ -17,8 +16,13 @@ export interface CustomMCPEntry {
   domain?: string        // website domain for favicon (e.g. "rentcast.io")
 }
 
-const CUSTOM_MCP_DIR = join(homedir(), '.coagent', 'custom-mcps')
-const REGISTRY_PATH = join(CUSTOM_MCP_DIR, 'registry.json')
+let CUSTOM_MCP_DIR = ''
+let REGISTRY_PATH = ''
+
+export function initCustomMcpDir(dataDir: string): void {
+  CUSTOM_MCP_DIR = join(dataDir, 'custom-mcps')
+  REGISTRY_PATH = join(CUSTOM_MCP_DIR, 'registry.json')
+}
 
 export async function ensureCustomMcpDir(): Promise<void> {
   await mkdir(CUSTOM_MCP_DIR, { recursive: true })

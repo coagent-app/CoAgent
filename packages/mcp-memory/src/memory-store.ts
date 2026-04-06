@@ -104,6 +104,7 @@ export class MemoryStore {
   private db: Awaited<ReturnType<typeof connect>> | null = null
   private table: Table | null = null
   private indexedAt: Map<string, number> = new Map() // path → mtime ms when last indexed
+  private indexedAtPath: string  // persisted to disk so restarts don't re-index everything
   private scheduleHashes: Map<string, string> = new Map() // id → content hash
   private scheduleSyncTimer: ReturnType<typeof setTimeout> | null = null
   private syncInProgress = false
@@ -115,6 +116,7 @@ export class MemoryStore {
     this.memoryDir = join(baseDir, 'memory')
     this.dbDir = join(baseDir, 'embeddings')
     this.scheduleIndexPath = join(baseDir, 'schedule-index.json')
+    this.indexedAtPath = join(baseDir, 'embeddings', 'indexed-at.json')
   }
 
   async init(): Promise<void> {
@@ -153,6 +155,9 @@ export class MemoryStore {
     // Clean up seed row (required for table creation but pollutes search)
     try { await this.table.delete("path = ''") } catch { /* may not exist */ }
 
+    // Load persisted indexedAt timestamps so we don't re-index unchanged files on restart
+    this.loadIndexedAt()
+
     // Incrementally index any .md files that have no chunks in the DB yet
     await this.indexAllFiles()
 
@@ -168,16 +173,31 @@ export class MemoryStore {
   // Public API — signatures unchanged for MCP index.ts compatibility
   // -------------------------------------------------------------------------
 
-  async writeMemory(relativePath: string, content: string): Promise<void> {
+  private assertSafePath(relativePath: string): string {
     const fullPath = join(this.memoryDir, relativePath)
+    if (!fullPath.startsWith(this.memoryDir + '/')) {
+      throw new Error(`Path traversal blocked: ${relativePath}`)
+    }
+    return fullPath
+  }
+
+  async writeMemory(relativePath: string, content: string): Promise<void> {
+    const fullPath = this.assertSafePath(relativePath)
     await mkdir(dirname(fullPath), { recursive: true })
-    await writeFile(fullPath, content, 'utf-8')
-    await this.indexFile(relativePath, content)
+    // Auto-stamp created/updated time so the agent can see when memories were made
+    const now = new Date().toISOString().replace('T', ' ').slice(0, 19)
+    const hasTimestamp = /^<!-- (created|updated):/.test(content)
+    const stamped = hasTimestamp
+      ? content.replace(/<!-- updated: .* -->/, `<!-- updated: ${now} -->`)
+      : `<!-- created: ${now} -->\n${content}`
+    await writeFile(fullPath, stamped, 'utf-8')
+    await this.indexFile(relativePath, stamped)
     this.indexedAt.set(relativePath, Date.now())
+    this.saveIndexedAt()
   }
 
   async readMemory(relativePath: string): Promise<string> {
-    const fullPath = join(this.memoryDir, relativePath)
+    const fullPath = this.assertSafePath(relativePath)
     return readFile(fullPath, 'utf-8')
   }
 
@@ -215,7 +235,7 @@ export class MemoryStore {
     const isVirtual = relativePath.startsWith('_schedule/')
 
     if (!isVirtual) {
-      const fullPath = join(this.memoryDir, relativePath)
+      const fullPath = this.assertSafePath(relativePath)
       if (!existsSync(fullPath)) throw new Error(`File not found: ${relativePath}`)
       await unlink(fullPath)
 
@@ -246,10 +266,25 @@ export class MemoryStore {
   }
 
   async appendMemory(relativePath: string, content: string): Promise<void> {
-    const fullPath = join(this.memoryDir, relativePath)
+    const fullPath = this.assertSafePath(relativePath)
     await mkdir(dirname(fullPath), { recursive: true })
     const existing = existsSync(fullPath) ? await readFile(fullPath, 'utf-8') : ''
-    const updated = existing ? existing.trimEnd() + '\n\n' + content : content
+    const now = new Date().toISOString().replace('T', ' ').slice(0, 19)
+    const timestampedContent = `<!-- appended: ${now} -->\n${content}`
+    let updated: string
+    if (existing) {
+      // Update the top-level updated timestamp if present
+      let base = existing.trimEnd()
+      if (/<!-- updated: .* -->/.test(base)) {
+        base = base.replace(/<!-- updated: .* -->/, `<!-- updated: ${now} -->`)
+      } else if (/<!-- created: .* -->/.test(base)) {
+        // Add updated timestamp after created
+        base = base.replace(/(<!-- created: .* -->)/, `$1\n<!-- updated: ${now} -->`)
+      }
+      updated = base + '\n\n' + timestampedContent
+    } else {
+      updated = `<!-- created: ${now} -->\n${timestampedContent}`
+    }
     await writeFile(fullPath, updated, 'utf-8')
 
     if (!this.table) return
@@ -278,6 +313,7 @@ export class MemoryStore {
     }
     await this.table.add(rows)
     this.indexedAt.set(relativePath, Date.now())
+    this.saveIndexedAt()
   }
 
   async editSection(relativePath: string, oldContent: string, newContent: string): Promise<boolean> {
@@ -326,6 +362,7 @@ export class MemoryStore {
     const updated = file.slice(0, idx) + newContent + file.slice(idx + oldContent.length)
     await writeFile(fullPath, updated, 'utf-8')
     this.indexedAt.set(relativePath, Date.now())
+    this.saveIndexedAt()
     return true
   }
 
@@ -436,6 +473,22 @@ export class MemoryStore {
   // Indexing helpers
   // -------------------------------------------------------------------------
 
+  private loadIndexedAt(): void {
+    try {
+      if (existsSync(this.indexedAtPath)) {
+        const raw = readFileSync(this.indexedAtPath, 'utf-8')
+        const entries: [string, number][] = JSON.parse(raw)
+        this.indexedAt = new Map(entries)
+      }
+    } catch { /* start fresh if corrupt */ }
+  }
+
+  private saveIndexedAt(): void {
+    try {
+      writeFile(this.indexedAtPath, JSON.stringify([...this.indexedAt]), 'utf-8').catch(() => {})
+    } catch { /* best effort */ }
+  }
+
   /**
    * Index all .md files that are new or changed since last indexed.
    * Checks file mtime against last indexed time to catch external edits.
@@ -476,6 +529,7 @@ export class MemoryStore {
         console.warn(`[Memory] Failed to index ${relativePath}:`, err)
       }
     }
+    this.saveIndexedAt()
   }
 
   // -------------------------------------------------------------------------

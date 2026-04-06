@@ -7,19 +7,9 @@ import { join } from 'path'
 import { exec } from 'child_process'
 import type { CalendarEntry, GoogleCalendarInfo } from '@coagent/shared'
 
-// Dynamic import for keytar — native module, may not be available in all environments
-let keytarModule: typeof import('keytar') | null | undefined = undefined
-async function getKeytar() {
-  if (keytarModule !== undefined) return keytarModule
-  try { keytarModule = await import('keytar') } catch { keytarModule = null }
-  return keytarModule
-}
-
 const SCOPES = ['https://www.googleapis.com/auth/calendar.readonly']
 const REDIRECT_PORT = 7831
 const REDIRECT_URI = `http://localhost:${REDIRECT_PORT}/oauth/callback`
-const KEYTAR_SERVICE = 'CoAgent'
-const KEYTAR_ACCOUNT = 'google_refresh_token'
 
 const DEFAULT_COLORS = ['#1e3a5f', '#16a34a', '#dc2626', '#ec4899', '#0d9488', '#ea580c', '#4f46e5']
 
@@ -418,14 +408,6 @@ export class GoogleCalendarService {
   // ── Token Storage ─────────────────────────────────────────────
 
   private async getRefreshToken(): Promise<string | null> {
-    // Try keytar first (OS keychain)
-    const keytar = await getKeytar()
-    if (keytar) {
-      try {
-        return await keytar.getPassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT)
-      } catch { /* fall through to file */ }
-    }
-    // Fallback: file-based (less secure, but works everywhere)
     const tokenPath = join(this.dataDir, 'google-token.json')
     try {
       if (existsSync(tokenPath)) {
@@ -437,22 +419,11 @@ export class GoogleCalendarService {
   }
 
   private async setRefreshToken(token: string): Promise<void> {
-    const keytar = await getKeytar()
-    if (keytar) {
-      try {
-        await keytar.setPassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT, token)
-        return
-      } catch { /* fall through */ }
-    }
     const tokenPath = join(this.dataDir, 'google-token.json')
     writeFileSync(tokenPath, JSON.stringify({ refresh_token: token }))
   }
 
   private async clearRefreshToken(): Promise<void> {
-    const keytar = await getKeytar()
-    if (keytar) {
-      try { await keytar.deletePassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT) } catch { /* ok */ }
-    }
     const tokenPath = join(this.dataDir, 'google-token.json')
     try { if (existsSync(tokenPath)) writeFileSync(tokenPath, '{}') } catch { /* ok */ }
   }

@@ -2,10 +2,13 @@ export interface Env {
   TUNNEL_SECRET: string
   ANTHROPIC_API_KEY: string
   OPENAI_API_KEY: string
+  OPENROUTER_API_KEY: string  // legacy — kept for backward compat
+  MOONSHOT_API_KEY: string
   COMPOSIO_API_KEY: string
   STRIPE_WEBHOOK_SECRET: string
   COMPOSIO_WEBHOOK_SECRET?: string  // Standard Webhooks HMAC secret — optional, warns if unset
   EXA_WEBHOOK_SECRET?: string       // Shared secret for Exa monitor webhooks — optional, warns if unset
+  GOOGLE_TTS_API_KEY?: string       // Google Cloud TTS — cheaper than OpenAI ($4/1M vs $15/1M)
   TOKENS: KVNamespace
   USER_SESSION: DurableObjectNamespace
   TEAM_CHANNEL: DurableObjectNamespace
@@ -54,14 +57,14 @@ interface ChatRequest {
 }
 
 interface ModelConfig {
-  provider: 'anthropic'
+  provider: 'anthropic' | 'moonshot' | 'openrouter'
   apiModel: string
   label: string
   description: string
   inputPer1k: number
   outputPer1k: number
-  cacheWritePer1k: number   // cache creation: 1.25x input
-  cacheReadPer1k: number    // cache read: 0.1x input
+  cacheWritePer1k: number   // cache creation: 1.25x input (anthropic only)
+  cacheReadPer1k: number    // cache read: 0.1x input (anthropic only)
 }
 
 const MODELS: Record<string, ModelConfig> = {
@@ -93,6 +96,16 @@ const MODELS: Record<string, ModelConfig> = {
     inputPer1k: 0.001,
     outputPer1k: 0.005,
     cacheWritePer1k: 0.00125,
+    cacheReadPer1k: 0.0001,
+  },
+  'kimi-k2.5': {
+    provider: 'moonshot',
+    apiModel: 'kimi-k2.5',
+    label: 'Kimi K2.5',
+    description: '8x cheaper — strong reasoning, 256K context',
+    inputPer1k: 0.0006,
+    outputPer1k: 0.0025,
+    cacheWritePer1k: 0,
     cacheReadPer1k: 0.0001,
   },
 }
@@ -141,9 +154,10 @@ function generateToken(): string {
 // use Cloudflare Rate Limiting rules on the zone.
 
 const RATE_LIMITS = {
-  api: { windowMs: 60_000, max: 60 },      // 60 API proxy requests/min (Claude, OpenAI, Composio)
-  admin: { windowMs: 60_000, max: 10 },     // 10 admin requests/min
-  general: { windowMs: 60_000, max: 120 },  // 120 general requests/min
+  api: { windowMs: 60_000, max: 120 },       // 120 chat/completion requests/min
+  embedding: { windowMs: 60_000, max: 200 }, // 200 embedding requests/min (bulk indexing on startup)
+  admin: { windowMs: 60_000, max: 10 },      // 10 admin requests/min
+  general: { windowMs: 60_000, max: 120 },   // 120 general requests/min
 } as const
 
 const rateBuckets = new Map<string, number[]>()  // token → timestamps
@@ -198,7 +212,9 @@ function pruneRateBuckets() {
 // OpenAI embeddings pricing: $0.02 per 1M tokens (text-embedding-3-small)
 const OPENAI_EMBED_COST_PER_TOKEN = 0.00000002
 // OpenAI TTS-1 pricing: $15 per 1M characters
-const TTS_COST_PER_CHAR = 0.000015
+const OPENAI_TTS_COST_PER_CHAR = 0.000015
+// Google Cloud TTS Neural2 pricing: $4 per 1M characters (1M free/month)
+const GOOGLE_TTS_COST_PER_CHAR = 0.000004
 // OpenAI Whisper pricing: $0.006 per minute
 const WHISPER_COST_PER_SECOND = 0.0001
 // Composio pricing: $0.02 per 1,000 actions
@@ -386,12 +402,28 @@ async function proxyOpenAIEmbeddings(request: Request, env: Env, token: string, 
   })
 }
 
-// --- OpenAI audio proxy (TTS + transcription) ---
+// --- TTS proxy (Google Cloud preferred, OpenAI fallback) ---
 
-async function proxyOpenAITts(request: Request, env: Env, token: string, data: TokenData): Promise<Response> {
-  const body = await request.clone().json() as { input?: string }
-  const chars = (body.input || '').length
+// Map OpenAI voice names → Google Cloud voices (Journey = most natural conversational)
+const GOOGLE_VOICE_MAP: Record<string, string> = {
+  alloy:   'en-US-Journey-D',   // male, warm
+  ash:     'en-US-Journey-D',   // male
+  coral:   'en-US-Journey-F',   // female, natural
+  echo:    'en-US-Studio-Q',    // male, deep
+  fable:   'en-US-Journey-O',   // female, bright
+  onyx:    'en-US-Studio-M',    // male, authoritative
+  nova:    'en-US-Journey-F',   // female, natural
+  sage:    'en-US-Journey-O',   // female, bright
+  shimmer: 'en-US-Journey-O',   // female, bright
+}
+const DEFAULT_GOOGLE_VOICE = 'en-US-Journey-D'
 
+async function proxyTts(request: Request, env: Env, token: string, data: TokenData): Promise<Response> {
+  const body = await request.clone().json() as { input?: string; voice?: string }
+  const text = body.input || ''
+  const chars = text.length
+
+  // OpenAI TTS — best quality per dollar ($15/1M chars)
   const headers = new Headers(request.headers)
   headers.set('Authorization', `Bearer ${env.OPENAI_API_KEY}`)
   headers.delete('host')
@@ -402,7 +434,7 @@ async function proxyOpenAITts(request: Request, env: Env, token: string, data: T
   })
 
   if (res.ok && chars > 0) {
-    const cost = chars * TTS_COST_PER_CHAR
+    const cost = chars * OPENAI_TTS_COST_PER_CHAR
     data.usage.ttsCharacters += chars
     data.usage.ttsCostUsd += cost
     data.usage.totalCostUsd += cost
@@ -689,8 +721,8 @@ async function handleMessagesProxy(request: Request, env: Env, ctx: ExecutionCon
 
   const { token, data } = result
 
-  // Rate limit: 60 API proxy requests/min per token
-  const rateLimitRes = checkRateLimit(token, 'api')
+  // Rate limit embeddings separately — bulk indexing can spike on startup
+  const rateLimitRes = checkRateLimit(token, 'embedding')
   if (rateLimitRes) return rateLimitRes
 
   // Reset usage if new billing period (monthly)
@@ -766,6 +798,176 @@ async function handleMessagesProxy(request: Request, env: Env, ctx: ExecutionCon
       ...corsHeaders(),
     },
   })
+}
+
+// --- OpenRouter chat completions proxy ---
+
+/** Calculate cost for OpenRouter models (simple input/output, no cache) */
+function calcOpenRouterCost(
+  usage: { prompt_tokens?: number; completion_tokens?: number },
+  config: ModelConfig,
+): number {
+  const input = (usage.prompt_tokens || 0) / 1000
+  const output = (usage.completion_tokens || 0) / 1000
+  return input * config.inputPer1k + output * config.outputPer1k
+}
+
+/** Models allowed through the Moonshot proxy — prevents abuse of our API key on expensive models */
+const ALLOWED_MOONSHOT_MODELS = new Set(
+  Object.entries(MODELS)
+    .filter(([, cfg]) => cfg.provider === 'moonshot')
+    .map(([id]) => id)
+)
+
+async function handleMoonshotProxy(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const result = await validateRequest(request, env)
+  if (result instanceof Response) return result
+
+  const { token, data } = result
+
+  const rateLimitRes = checkRateLimit(token, 'api')
+  if (rateLimitRes) return rateLimitRes
+
+  // Reset usage if new billing period
+  const periodStart = new Date(data.usage.periodStart)
+  const now = new Date()
+  if (now.getMonth() !== periodStart.getMonth() || now.getFullYear() !== periodStart.getFullYear()) {
+    data.usage = freshUsage()
+    await saveToken(env, token, data)
+  }
+
+  let body = await request.text()
+
+  // Reject oversized requests (1MB max)
+  if (body.length > 1_048_576) {
+    return jsonResponse({ error: 'Request body too large' }, 413)
+  }
+
+  // Validate model is in our allowed list — prevent abuse on expensive models
+  let parsedBody: { model?: string; stream?: boolean }
+  try {
+    parsedBody = JSON.parse(body)
+  } catch {
+    return jsonResponse({ error: 'Invalid JSON body' }, 400)
+  }
+
+  const requestedModel = parsedBody.model || ''
+  // Accept both old OpenRouter-style IDs and new direct IDs
+  const normalizedModel = requestedModel === 'moonshotai/kimi-k2.5' ? 'kimi-k2.5' : requestedModel
+  if (!ALLOWED_MOONSHOT_MODELS.has(normalizedModel)) {
+    return jsonResponse({ error: `Model "${requestedModel}" is not allowed. Allowed: ${[...ALLOWED_MOONSHOT_MODELS].join(', ')}` }, 403)
+  }
+
+  // Rewrite model ID in the request body if it was the old OpenRouter format
+  if (requestedModel !== normalizedModel) {
+    parsedBody.model = normalizedModel
+    body = JSON.stringify(parsedBody)
+  }
+
+  const isStream = parsedBody.stream === true
+
+  // Forward to Moonshot AI directly
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${env.MOONSHOT_API_KEY}`,
+  }
+
+  const res = await fetch('https://api.moonshot.ai/v1/chat/completions', {
+    method: 'POST',
+    headers,
+    body,
+  })
+
+  // Track usage for streaming responses
+  if (isStream && res.status === 200 && res.body) {
+    const [clientStream, usageStream] = res.body.tee()
+    ctx.waitUntil(scanMoonshotStreamForUsage(usageStream, body, token, data, env))
+    return new Response(clientStream, {
+      status: res.status,
+      headers: {
+        'Content-Type': res.headers.get('Content-Type') || 'text/event-stream',
+        ...corsHeaders(),
+      },
+    })
+  }
+
+  // Track usage for non-streaming responses
+  if (!isStream && res.status === 200) {
+    try {
+      const clone = res.clone()
+      const resBody = await clone.json() as Record<string, unknown>
+      const usage = resBody.usage as { prompt_tokens?: number; completion_tokens?: number } | undefined
+      const modelId = (JSON.parse(body) as { model?: string }).model || ''
+      const normalized = modelId === 'moonshotai/kimi-k2.5' ? 'kimi-k2.5' : modelId
+      const modelConfig = MODELS[normalized] || MODELS['kimi-k2.5']
+      if (usage && modelConfig) {
+        data.usage.inputTokens += usage.prompt_tokens || 0
+        data.usage.outputTokens += usage.completion_tokens || 0
+        const callCost = calcOpenRouterCost(usage, modelConfig)
+        data.usage.llmCostUsd += callCost
+        data.usage.totalCostUsd += callCost
+        await saveToken(env, token, data)
+      }
+    } catch {
+      // Usage tracking is best-effort
+    }
+  }
+
+  return new Response(res.body, {
+    status: res.status,
+    headers: {
+      'Content-Type': res.headers.get('Content-Type') || 'application/json',
+      ...corsHeaders(),
+    },
+  })
+}
+
+/** Scan Moonshot SSE stream for usage data in the final chunk */
+async function scanMoonshotStreamForUsage(
+  stream: ReadableStream,
+  requestBody: string,
+  token: string,
+  data: TokenData,
+  env: Env,
+): Promise<void> {
+  try {
+    const reader = stream.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+    }
+
+    // Find the last data line with usage info (OpenAI format: usage in final chunk when stream_options.include_usage is true)
+    const lines = buffer.split('\n')
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i].trim()
+      if (!line.startsWith('data: ') || line === 'data: [DONE]') continue
+      try {
+        const chunk = JSON.parse(line.slice(6))
+        if (chunk.usage) {
+          const modelId = (JSON.parse(requestBody) as { model?: string }).model || ''
+          const normalized2 = modelId === 'moonshotai/kimi-k2.5' ? 'kimi-k2.5' : modelId
+          const modelConfig = MODELS[normalized2] || MODELS['kimi-k2.5']
+
+          // Re-read token data to avoid stale overwrites (stream may take seconds)
+          const freshData = await getToken(env, token) || data
+          freshData.usage.inputTokens += chunk.usage.prompt_tokens || 0
+          freshData.usage.outputTokens += chunk.usage.completion_tokens || 0
+          const callCost = calcOpenRouterCost(chunk.usage, modelConfig)
+          freshData.usage.llmCostUsd += callCost
+          freshData.usage.totalCostUsd += callCost
+          await saveToken(env, token, freshData)
+          break
+        }
+      } catch { /* skip malformed lines */ }
+    }
+  } catch {
+    // Best-effort usage tracking
+  }
 }
 
 // --- UserSession Durable Object ---
@@ -1543,6 +1745,11 @@ export default {
       return handleMessagesProxy(request, env, ctx)
     }
 
+    // --- Moonshot chat completions proxy ---
+    if (request.method === 'POST' && url.pathname === '/v1/chat/completions') {
+      return handleMoonshotProxy(request, env, ctx)
+    }
+
     // --- OpenAI embedding proxy ---
     if (request.method === 'POST' && url.pathname === '/v1/embeddings') {
       const result = await validateRequest(request, env)
@@ -1558,7 +1765,7 @@ export default {
       if (result instanceof Response) return result
       const rateCheck = checkRateLimit(result.token, 'api')
       if (rateCheck) return rateCheck
-      return proxyOpenAITts(request, env, result.token, result.data)
+      return proxyTts(request, env, result.token, result.data)
     }
 
     // --- OpenAI transcription proxy ---

@@ -103,7 +103,7 @@ function IntegrationItem({
           onError={e => { (e.target as HTMLImageElement).style.opacity = '0' }}
         />
       ) : (integration as any).icon ? (
-        <div className="w-4 h-4 flex-shrink-0" dangerouslySetInnerHTML={{ __html: (integration as any).icon.replace(/viewBox/, 'class="w-4 h-4" viewBox') }} />
+        <img src={`data:image/svg+xml;utf8,${encodeURIComponent((integration as any).icon)}`} className="w-4 h-4 flex-shrink-0" alt={integration.name} />
       ) : (integration as any).builtin ? (
         <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 32 32" fill="none">
           <rect width="32" height="32" rx="7" fill="#34C759"/>
@@ -154,7 +154,7 @@ export function Sidebar({ view, onViewChange, queueCount, integrations, onConnec
       </p>
       <div className="flex flex-col gap-0.5 overflow-y-auto" style={{ maxHeight: 'calc(100vh - 340px)' }}>
         {integrations
-          .filter(i => i.connected)
+          .filter(i => i.connected && i.slug !== 'coagent:imessage' && i.slug !== 'coagent:contacts')
           .slice(0, MAX_SIDEBAR_INTEGRATIONS)
           .map(integration => (
             <IntegrationItem
@@ -165,8 +165,8 @@ export function Sidebar({ view, onViewChange, queueCount, integrations, onConnec
             />
           ))}
         {integrations
-          .filter(i => !i.connected && i.suggested)
-          .slice(0, MAX_SIDEBAR_INTEGRATIONS - integrations.filter(i => i.connected).length)
+          .filter(i => !i.connected && i.suggested && i.slug !== 'coagent:imessage' && i.slug !== 'coagent:contacts')
+          .slice(0, MAX_SIDEBAR_INTEGRATIONS - integrations.filter(i => i.connected && i.slug !== 'coagent:imessage' && i.slug !== 'coagent:contacts').length)
           .map(integration => (
             <IntegrationItem
               key={integration.slug}

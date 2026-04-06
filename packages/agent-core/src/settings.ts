@@ -1,5 +1,5 @@
 // packages/agent-core/src/settings.ts
-import { readFile, writeFile, mkdir } from 'fs/promises'
+import { readFile, writeFile, rename, mkdir } from 'fs/promises'
 import { join } from 'path'
 import type { AgentSettings, Autonomy, DayName } from '@coagent/shared'
 import { getEdition } from './edition.js'
@@ -20,20 +20,27 @@ function getDefaultSettings(): AgentSettings {
     active_days: [...preset.activeDays],
     autonomy: preset.defaultAutonomy,
     heartbeat_interval: 60,
-    powerModel: 'claude-sonnet-4-6',
+    powerModel: 'kimi-k2.5',
     voice_enabled: false,
     voice_response: false,
     voice_hotkey: 'Control+Alt+Space',
     voice_voice: 'alloy',
+    voice_volume: 0.5,
     onboarded: false,
     custom_instructions: '',
+    brand_company: '',
+    brand_color: '',
+    brand_logo: '',
+    auto_brief_meetings: false,
+    auto_brief_minutes: 30,
+    agent_name: '',
   }
 }
 
 export const DEFAULT_SETTINGS: AgentSettings = getDefaultSettings()
 
 const VALID_DAYS: DayName[] = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
-const VALID_AUTONOMY: Autonomy[] = ['ask_first', 'balanced', 'autonomous']
+const VALID_AUTONOMY: Autonomy[] = ['ask_first', 'balanced', 'agent', 'autonomous']
 
 const SETTINGS_FILE = 'settings.json'
 
@@ -51,13 +58,20 @@ export async function readSettings(dataDir: string): Promise<AgentSettings> {
       active_days: parsed.active_days ?? DEFAULT_SETTINGS.active_days,
       autonomy: parsed.autonomy ?? DEFAULT_SETTINGS.autonomy,
       heartbeat_interval: parsed.heartbeat_interval ?? DEFAULT_SETTINGS.heartbeat_interval,
-      powerModel: parsed.powerModel ?? DEFAULT_SETTINGS.powerModel,
+      powerModel: (parsed.powerModel === 'moonshotai/kimi-k2.5' ? 'kimi-k2.5' : parsed.powerModel) ?? DEFAULT_SETTINGS.powerModel,
       voice_enabled: parsed.voice_enabled ?? DEFAULT_SETTINGS.voice_enabled,
       voice_response: parsed.voice_response ?? DEFAULT_SETTINGS.voice_response,
       voice_hotkey: parsed.voice_hotkey ?? DEFAULT_SETTINGS.voice_hotkey,
       voice_voice: parsed.voice_voice ?? DEFAULT_SETTINGS.voice_voice,
+      voice_volume: parsed.voice_volume ?? DEFAULT_SETTINGS.voice_volume,
       onboarded: parsed.onboarded ?? DEFAULT_SETTINGS.onboarded,
       custom_instructions: parsed.custom_instructions ?? DEFAULT_SETTINGS.custom_instructions,
+      brand_company: parsed.brand_company ?? DEFAULT_SETTINGS.brand_company,
+      brand_color: parsed.brand_color ?? DEFAULT_SETTINGS.brand_color,
+      brand_logo: parsed.brand_logo ?? DEFAULT_SETTINGS.brand_logo,
+      auto_brief_meetings: parsed.auto_brief_meetings ?? DEFAULT_SETTINGS.auto_brief_meetings,
+      auto_brief_minutes: parsed.auto_brief_minutes ?? DEFAULT_SETTINGS.auto_brief_minutes,
+      agent_name: parsed.agent_name ?? DEFAULT_SETTINGS.agent_name,
     }
   } catch (err: any) {
     if (err?.code !== 'ENOENT') {
@@ -103,11 +117,23 @@ export async function writeSettings(dataDir: string, patch: Partial<AgentSetting
     voice_response: patch.voice_response !== undefined ? patch.voice_response : current.voice_response,
     voice_hotkey: patch.voice_hotkey !== undefined ? patch.voice_hotkey : current.voice_hotkey,
     voice_voice: patch.voice_voice !== undefined ? patch.voice_voice : current.voice_voice,
+    voice_volume: patch.voice_volume !== undefined ? Math.max(0, Math.min(1, patch.voice_volume)) : current.voice_volume,
     onboarded: patch.onboarded !== undefined ? patch.onboarded : current.onboarded,
     custom_instructions: patch.custom_instructions !== undefined ? patch.custom_instructions : current.custom_instructions,
+    brand_company: patch.brand_company !== undefined ? patch.brand_company : current.brand_company,
+    brand_color: patch.brand_color !== undefined ? patch.brand_color : current.brand_color,
+    brand_logo: patch.brand_logo !== undefined ? patch.brand_logo : current.brand_logo,
+    auto_brief_meetings: patch.auto_brief_meetings !== undefined ? patch.auto_brief_meetings : current.auto_brief_meetings,
+    auto_brief_minutes: patch.auto_brief_minutes !== undefined
+      ? Math.max(5, Math.min(120, Math.round(patch.auto_brief_minutes)))
+      : current.auto_brief_minutes,
+    agent_name: patch.agent_name !== undefined ? patch.agent_name : current.agent_name,
   }
 
-  await writeFile(join(dataDir, SETTINGS_FILE), JSON.stringify(updated, null, 2), 'utf-8')
+  const target = join(dataDir, SETTINGS_FILE)
+  const tmp = target + '.tmp'
+  await writeFile(tmp, JSON.stringify(updated, null, 2), 'utf-8')
+  await rename(tmp, target)
   return updated
 }
 

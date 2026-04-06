@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
-import { readFile, writeFile, mkdir } from 'fs/promises'
+import OpenAI from 'openai'
+import { readFile, writeFile, rename, mkdir } from 'fs/promises'
 import { existsSync } from 'fs'
 import { join } from 'path'
 import { createHash } from 'crypto'
@@ -11,12 +12,21 @@ import { searchEventStore, markEventsDone, getUnprocessedEvents } from './relay-
 import { readSettings, writeSettings } from './settings.js'
 import type { AgentSettings } from './settings.js'
 import type { AgentTrigger } from '@coagent/shared'
-import { searchFiles, readFileContent, readFileBase64, deleteFileEntry, getStorageStats, listFiles, ingestFile, createFolder, moveFile, grepFiles, getPdfFormFields, fillPdfForm } from './file-store.js'
+import { searchFiles, readFileContent, readFileBase64, deleteFileEntry, getStorageStats, listFiles, ingestFile, createFolder, moveFile, grepFiles, getPdfFormFields, fillPdfForm, updateDocumentMeta, getDocumentMeta, updateFileContent } from './file-store.js'
 import { embedTools, searchToolsAndSchema, setToolEmbeddingsDir } from './tool-embeddings.js'
 import { logToolCall, extractIntegration, searchToolLogs } from './service-logger.js'
 import { recordUsage } from './usage-tracker.js'
 import { getRelayConfig } from './auth.js'
 import { runResearch } from './research.js'
+import { runSubAgents, type SubAgentTask } from './sub-agent.js'
+import { streamOpenAI } from './openai-provider.js'
+
+/** Returns true if the model should use the Anthropic SDK */
+function isAnthropicModel(model: string): boolean {
+  return model.startsWith('claude-')
+}
+
+const MOONSHOT_BASE_URL = 'https://api.moonshot.ai/v1'
 
 const HISTORY_WINDOW = 50        // total pool — recent messages
 const HISTORY_CAP = 200          // hard in-memory cap — trim from front when exceeded
@@ -131,7 +141,7 @@ async function resolveSkillMentions(dataDir: string, message: string): Promise<s
   }
   return resolved
 }
-const RECENT_KEEP = 10           // always keep this many recent messages (protects tool chains)
+const RECENT_KEEP = 20           // always keep this many recent messages (protects tool chains)
 
 /** Format a tool's schema as readable text, filtered to only the specified params.
  *  If no paramNames provided, includes all params (fallback).
@@ -152,7 +162,7 @@ function formatSchemaForResult(tool: Anthropic.Tool, paramNames?: string[]): str
     const required = new Set(schema.required || [])
     const req = required.has(k) ? ' (required)' : ''
     const rawDesc = v.description || ''
-    const desc = rawDesc ? ` — ${rawDesc.length > 120 ? rawDesc.slice(0, 120) + '…' : rawDesc}` : ''
+    const desc = rawDesc ? ` — ${rawDesc.length > 300 ? rawDesc.slice(0, 300) + '…' : rawDesc}` : ''
     const enumVals = v.enum ? ` [${v.enum.slice(0, 8).join(', ')}]` : ''
     params.push(`  ${k} (${type}${req})${desc}${enumVals}`)
   }
@@ -187,11 +197,11 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'search_tools',
-    description: 'Find external integration tools and get schemas. ONLY for external services (Gmail, Slack, etc.) — built-in tools are called directly.',
+    description: 'Discover external integration tools. ONLY for external services (Gmail, Slack, etc.) — built-in tools are called directly. Schema is provided when you call the tool.',
     input_schema: {
       type: 'object' as const,
       properties: {
-        query: { type: 'string', description: 'What to do: "send email", "create calendar event"' },
+        query: { type: 'string', description: 'Always start with the integration name: "gmail send email", "slack post message", "calendly list events". Not just "send email".' },
         context: { type: 'string', description: 'Topic context for tool log lookup: "Nathan slack", "south florida leads"' },
         schema: { type: 'string', description: 'Describe full action with all fields: "send email to recipient with subject, body, CC, and attachment"' }
       },
@@ -250,7 +260,7 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
         onboarded: { type: 'boolean', description: 'True after onboarding done' },
         active_hours: { type: 'object', properties: { start: { type: 'number' }, end: { type: 'number' } } },
         active_days: { type: 'array', items: { type: 'string', enum: ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] } },
-        autonomy: { type: 'string', enum: ['ask_first', 'balanced', 'autonomous'] },
+        autonomy: { type: 'string', enum: ['ask_first', 'balanced', 'agent', 'autonomous'] },
         heartbeat_interval: { type: 'number', description: 'Minutes between heartbeats (0=off)' },
       }
     }
@@ -283,7 +293,7 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
         type: { type: 'string', enum: ['routine', 'task', 'followup'] },
         id: { type: 'string' },
         label: { type: 'string' },
-        cron: { type: 'string', description: 'Cron for routines: "0 9 * * 1-5"' },
+        cron: { type: 'string', description: 'REQUIRED for routines. Standard 5-field cron: min hour dom month dow. Examples: "0 9 * * *" (daily 9am), "0 9 * * 1-5" (weekdays 9am), "0 14 * * 1,3,5" (Mon/Wed/Fri 2pm), "0 10 * * 1" (Mondays 10am)' },
         due: { type: 'string', description: 'ISO datetime for tasks/followups' },
         instruction: { type: 'string', description: 'What agent executes when entry fires. Be specific: who/what/where/outcome.' },
         notes: { type: 'string' },
@@ -349,6 +359,17 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
     }
   },
   {
+    name: 'set_status_line',
+    description: 'Update the status line shown below the greeting. Use after heartbeat or when context changes. A few words max.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        message: { type: 'string', description: 'Brief status, 3-8 words. e.g. "3 things in your queue", "All caught up", "2 new emails"' }
+      },
+      required: ['message']
+    }
+  },
+  {
     name: 'notify_user',
     description: 'Push notification to user\'s phone. Keep brief.',
     input_schema: {
@@ -362,15 +383,382 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'create_document',
-    description: 'Create PDF from markdown. Returns coagent_file_id for email attachments. Write complete content, not just headings.',
+    description: `Create a professional PDF. Two modes:
+
+TEMPLATE MODE (preferred for structured documents): Provide \`template\` + \`data\`. No markdown needed. Templates produce structurally distinct, professionally designed layouts:
+- "resume" — two-column layout, sidebar with skills/education, experience entries with dates
+- "proposal" — cover page, executive summary with accent border, scope checklist, timeline table, pricing table
+- "invoice" — INVOICE header, bill-to block, line items table with alternating rows, right-aligned totals
+- "letter" — letterhead, date, recipient address block, body paragraphs, closing/signature
+- "report" — title page, page-numbered body with section numbering (1. 1.1), running header, footnotes
+- "brief" — MEMORANDUM header, TO/FROM/DATE/RE fields, key takeaways box, action items table
+- "newsletter" — masthead banner, two-column article layout, pull quotes, section dividers
+
+MARKDOWN MODE (for freeform/custom content): Provide \`markdown\` + optionally \`style\` + \`layout\`. Write COMPLETE, DENSE content — every section should have real body text.`,
     input_schema: {
       type: 'object' as const,
       properties: {
-        filename: { type: 'string', description: 'e.g. "Q1 Report.pdf"' },
-        markdown: { type: 'string', description: 'Full markdown. # headings, **bold**, - lists, | tables | (need header+separator), --- page breaks.' },
-        style: { type: 'string', enum: ['professional', 'minimal', 'report'] }
+        filename: { type: 'string', description: 'e.g. "Q1 Report.pdf" or "John_Smith_Resume.pdf"' },
+        // Template mode
+        template: { type: 'string', enum: ['resume', 'proposal', 'invoice', 'letter', 'report', 'brief', 'newsletter'], description: 'Template name. When set, provide structured `data` instead of markdown.' },
+        data: {
+          type: 'object' as const,
+          description: `Structured data for the chosen template. Shape depends on \`template\`. REQUIRED fields (no "?") must never be omitted or empty. Arrays must have at least one item.`,
+          additionalProperties: true,
+          properties: {
+            // ── resume ────────────────────────────────────────────────────────
+            name: {
+              type: 'string',
+              description: '[resume] Full name of the candidate. REQUIRED for resume.',
+            },
+            contact: {
+              type: 'object',
+              description: '[resume] Contact details block. REQUIRED for resume.',
+              properties: {
+                email: { type: 'string' },
+                phone: { type: 'string' },
+                location: { type: 'string' },
+                linkedin: { type: 'string' },
+                website: { type: 'string' },
+              },
+            },
+            summary: {
+              type: 'string',
+              description: '[resume] 2-4 sentence professional summary. Optional for resume.',
+            },
+            experience: {
+              type: 'array',
+              description: '[resume] Work history. REQUIRED for resume. Each entry must include company, role, dates (e.g. "Jan 2021 – Mar 2024"), and at least 2 bullets describing achievements.',
+              items: {
+                type: 'object',
+                properties: {
+                  company: { type: 'string', description: 'Employer name. REQUIRED.' },
+                  role: { type: 'string', description: 'Job title. REQUIRED.' },
+                  dates: { type: 'string', description: 'Date range, e.g. "Jan 2021 – Mar 2024". REQUIRED — never omit.' },
+                  bullets: {
+                    type: 'array',
+                    description: 'Achievement bullets. REQUIRED — at least 2 per role.',
+                    items: { type: 'string' },
+                    minItems: 2,
+                  },
+                },
+                required: ['company', 'role', 'dates', 'bullets'],
+              },
+              minItems: 1,
+            },
+            skills: {
+              type: 'array',
+              description: '[resume] Skills grouped by category. REQUIRED for resume — must include at least one group. Example: [{ category: "Languages", items: ["Python", "TypeScript"] }, { category: "Tools", items: ["Docker", "Postgres"] }]',
+              items: {
+                type: 'object',
+                properties: {
+                  category: { type: 'string', description: 'Skill group label, e.g. "Languages", "Frameworks", "Tools". REQUIRED.' },
+                  items: {
+                    type: 'array',
+                    description: 'Individual skills in this category. REQUIRED — at least one item.',
+                    items: { type: 'string' },
+                    minItems: 1,
+                  },
+                },
+                required: ['category', 'items'],
+              },
+              minItems: 1,
+            },
+            education: {
+              type: 'array',
+              description: '[resume] Education history. REQUIRED for resume.',
+              items: {
+                type: 'object',
+                properties: {
+                  school: { type: 'string', description: 'Institution name. REQUIRED.' },
+                  degree: { type: 'string', description: 'Degree and field, e.g. "B.S. Computer Science". REQUIRED.' },
+                  dates: { type: 'string', description: 'Graduation year or date range, e.g. "2019" or "2015 – 2019". Optional.' },
+                },
+                required: ['school', 'degree'],
+              },
+              minItems: 1,
+            },
+            certifications: {
+              type: 'array',
+              description: '[resume] Optional list of certifications, e.g. ["AWS Certified Solutions Architect", "PMP"].',
+              items: { type: 'string' },
+            },
+            // ── proposal ─────────────────────────────────────────────────────
+            title: {
+              type: 'string',
+              description: '[proposal, report] Document or proposal title. REQUIRED for proposal and report.',
+            },
+            client: {
+              type: 'string',
+              description: '[proposal] Client name. REQUIRED for proposal.',
+            },
+            company: {
+              type: 'string',
+              description: '[proposal, invoice] Your company name. Optional.',
+            },
+            date: {
+              type: 'string',
+              description: '[proposal, invoice, letter, report] Document date, e.g. "April 3, 2026". REQUIRED for invoice and letter.',
+            },
+            scope: {
+              type: 'array',
+              description: '[proposal] Scope checklist items. REQUIRED for proposal — at least one.',
+              items: { type: 'string' },
+              minItems: 1,
+            },
+            timeline: {
+              type: 'array',
+              description: '[proposal] Project timeline phases. Optional.',
+              items: {
+                type: 'object',
+                properties: {
+                  phase: { type: 'string' },
+                  dates: { type: 'string' },
+                  description: { type: 'string' },
+                },
+                required: ['phase', 'dates'],
+              },
+            },
+            pricing: {
+              type: 'array',
+              description: '[proposal] Line items for the pricing table. REQUIRED for proposal.',
+              items: {
+                type: 'object',
+                properties: {
+                  item: { type: 'string', description: 'REQUIRED.' },
+                  description: { type: 'string' },
+                  amount: { type: 'string', description: 'Formatted amount, e.g. "$2,500". REQUIRED.' },
+                },
+                required: ['item', 'amount'],
+              },
+              minItems: 1,
+            },
+            total: {
+              type: 'string',
+              description: '[proposal, invoice] Grand total, e.g. "$10,000". REQUIRED for proposal and invoice.',
+            },
+            terms: {
+              type: 'string',
+              description: '[proposal] Payment or engagement terms. Optional.',
+            },
+            // ── invoice ───────────────────────────────────────────────────────
+            invoiceNumber: {
+              type: 'string',
+              description: '[invoice] Invoice number, e.g. "INV-0042". REQUIRED for invoice.',
+            },
+            dueDate: {
+              type: 'string',
+              description: '[invoice] Payment due date. REQUIRED for invoice.',
+            },
+            from: {
+              type: 'object',
+              description: '[invoice, letter] Sender/your details. REQUIRED for invoice and letter.',
+              properties: {
+                name: { type: 'string' },
+                company: { type: 'string' },
+                address: { type: 'string' },
+                email: { type: 'string' },
+                phone: { type: 'string' },
+              },
+            },
+            to: {
+              type: 'object',
+              description: '[invoice, letter] Recipient details. REQUIRED for invoice and letter.',
+              properties: {
+                name: { type: 'string' },
+                company: { type: 'string' },
+                address: { type: 'string' },
+                email: { type: 'string' },
+              },
+            },
+            lineItems: {
+              type: 'array',
+              description: '[invoice] Invoice line items. REQUIRED for invoice.',
+              items: {
+                type: 'object',
+                properties: {
+                  description: { type: 'string', description: 'REQUIRED.' },
+                  quantity: { type: 'number', description: 'REQUIRED.' },
+                  rate: { type: 'string', description: 'Unit rate, e.g. "$150/hr". REQUIRED.' },
+                  amount: { type: 'string', description: 'Line total. REQUIRED.' },
+                },
+                required: ['description', 'quantity', 'rate', 'amount'],
+              },
+              minItems: 1,
+            },
+            subtotal: {
+              type: 'string',
+              description: '[invoice] Subtotal before tax, e.g. "$4,800". REQUIRED for invoice.',
+            },
+            tax: {
+              type: 'string',
+              description: '[invoice] Tax amount, e.g. "$384". Optional.',
+            },
+            taxRate: {
+              type: 'string',
+              description: '[invoice] Tax rate, e.g. "8%". Optional.',
+            },
+            notes: {
+              type: 'string',
+              description: '[invoice] Footer notes or bank details. Optional.',
+            },
+            paymentTerms: {
+              type: 'string',
+              description: '[invoice] Payment terms, e.g. "Net 30". Optional.',
+            },
+            // ── letter ────────────────────────────────────────────────────────
+            salutation: {
+              type: 'string',
+              description: '[letter] Opening salutation, e.g. "Dear Ms. Johnson,". REQUIRED for letter.',
+            },
+            body: {
+              type: 'array',
+              description: '[letter, brief] Body paragraphs as an array of strings. REQUIRED for letter and brief — at least one paragraph.',
+              items: { type: 'string' },
+              minItems: 1,
+            },
+            closing: {
+              type: 'string',
+              description: '[letter] Closing phrase, e.g. "Sincerely,". REQUIRED for letter.',
+            },
+            senderName: {
+              type: 'string',
+              description: '[letter] Printed name below closing. REQUIRED for letter.',
+            },
+            senderTitle: {
+              type: 'string',
+              description: '[letter] Sender job title below name. Optional.',
+            },
+            // ── report ────────────────────────────────────────────────────────
+            subtitle: {
+              type: 'string',
+              description: '[report] Optional subtitle below the main title.',
+            },
+            author: {
+              type: 'string',
+              description: '[report] Author name. Optional.',
+            },
+            abstract: {
+              type: 'string',
+              description: '[report] Executive summary paragraph. Optional but recommended.',
+            },
+            sections: {
+              type: 'array',
+              description: '[report] Report sections. REQUIRED for report.',
+              items: {
+                type: 'object',
+                properties: {
+                  heading: { type: 'string', description: 'Section heading. REQUIRED.' },
+                  subheading: { type: 'string' },
+                  body: { type: 'string', description: 'Full section body text. REQUIRED — must be substantive.' },
+                  figures: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        caption: { type: 'string' },
+                        note: { type: 'string' },
+                      },
+                    },
+                  },
+                },
+                required: ['heading', 'body'],
+              },
+              minItems: 1,
+            },
+            footnotes: {
+              type: 'array',
+              description: '[report] Optional footnote strings.',
+              items: { type: 'string' },
+            },
+            // ── brief ─────────────────────────────────────────────────────────
+            re: {
+              type: 'string',
+              description: '[brief] Subject / RE field. REQUIRED for brief.',
+            },
+            keyTakeaways: {
+              type: 'array',
+              description: '[brief] Key takeaway bullets. REQUIRED for brief — at least one.',
+              items: { type: 'string' },
+              minItems: 1,
+            },
+            actionItems: {
+              type: 'array',
+              description: '[brief] Action items table. REQUIRED for brief.',
+              items: {
+                type: 'object',
+                properties: {
+                  action: { type: 'string', description: 'REQUIRED.' },
+                  owner: { type: 'string', description: 'REQUIRED.' },
+                  deadline: { type: 'string', description: 'REQUIRED.' },
+                },
+                required: ['action', 'owner', 'deadline'],
+              },
+              minItems: 1,
+            },
+            // ── newsletter ────────────────────────────────────────────────────
+            issue: {
+              type: 'string',
+              description: '[newsletter] Issue identifier, e.g. "Vol. 3, Issue 7". Optional.',
+            },
+            articles: {
+              type: 'array',
+              description: '[newsletter] Articles. REQUIRED for newsletter — at least one.',
+              items: {
+                type: 'object',
+                properties: {
+                  title: { type: 'string', description: 'Article headline. REQUIRED.' },
+                  body: { type: 'string', description: 'Article body text. REQUIRED — must be substantive.' },
+                  pullQuote: { type: 'string', description: 'Optional pull quote to highlight.' },
+                },
+                required: ['title', 'body'],
+              },
+              minItems: 1,
+            },
+            tableOfContents: {
+              type: 'array',
+              description: '[newsletter] Optional TOC entries.',
+              items: { type: 'string' },
+            },
+          },
+        },
+        // Markdown mode
+        markdown: { type: 'string', description: 'Full document markdown (markdown mode only). Formatting: # H1, ## H2, ### H3, **bold**, *italic*, - bullets, 1. numbered, | tables | (need header row + |---|---| separator). --- = horizontal rule. === = page break.' },
+        style: { type: 'string', enum: ['professional', 'minimal', 'report'], description: 'Markdown mode only. professional = dark accent, header lines, page numbers. minimal = clean. report = formal with running header.' },
+        layout: {
+          type: 'object',
+          description: 'Markdown mode only. Optional visual overrides.',
+          properties: {
+            accentColor: { type: 'string', description: 'Hex color override, e.g. "#2563eb"' },
+            columns: { type: 'number', enum: [1, 2], description: '2 = two-column body layout' },
+            density: { type: 'string', enum: ['compact', 'normal', 'spacious'] },
+            headerStyle: { type: 'string', enum: ['left', 'centered', 'banner'] },
+            tableStyle: { type: 'string', enum: ['striped', 'bordered', 'minimal'] },
+            pageNumbers: { type: 'boolean' }
+          }
+        }
       },
-      required: ['filename', 'markdown']
+      required: ['filename']
+    }
+  },
+  {
+    name: 'update_document',
+    description: `Update an existing templated PDF document. Provide the file ID and a partial data patch — only include the fields you want to change. Arrays (experience, skills, etc.) are replaced entirely; objects (contact, from/to) are shallow-merged.
+
+Example: To update just the summary on a resume, send: { "summary": "New summary text" }
+Example: To replace all experience entries, send the full new experience array.
+Example: To update one contact field, send: { "contact": { "email": "new@email.com" } }`,
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        file_id: { type: 'string', description: 'ID of the document to update (from files list)' },
+        data_patch: {
+          type: 'object',
+          description: 'Partial data object with fields to change. Arrays are replaced entirely, objects are shallow-merged.',
+          additionalProperties: true
+        },
+      },
+      required: ['file_id', 'data_patch']
     }
   },
   {
@@ -422,6 +810,28 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
       required: ['action']
     }
   },
+  {
+    name: 'spawn_agents',
+    description: 'Run parallel sub-agents for independent tasks. Each gets its own context and runs simultaneously. Sub-agents can search, read memory/files, create documents, and update memory — but cannot send emails, queue approvals, or perform external actions. Use for: parallel analysis, drafting multiple versions, research + prep simultaneously.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        tasks: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              label: { type: 'string', description: 'Short name for progress display (e.g. "Draft email", "Analyze competitors")' },
+              instruction: { type: 'string', description: 'Full task instruction. Be specific — sub-agent has no conversation context unless you include it.' },
+            },
+            required: ['label', 'instruction']
+          },
+          description: '1-5 parallel tasks to run'
+        }
+      },
+      required: ['tasks']
+    }
+  },
 ]
 
 // Map consolidated memory actions → MCP tool names
@@ -446,66 +856,124 @@ function mapMemoryParams(action: string, input: Record<string, unknown>): Record
 type ToolContext = 'heartbeat' | 'chat' | 'webhook' | 'team'
 
 const TOOL_LABELS: Record<string, string> = {
-  get_current_time: 'Checking time',
-  search_tools: 'Searching for tools',
-  queue_approval: 'Adding to queue',
-  add_done_item: 'Marking done',
-  update_settings: 'Updating settings',
-  files: 'Managing files',
-  calendar: 'Managing calendar',
-  skills: 'Managing skills',
-  memory: 'Checking memory',
-  call_external_tool: 'Calling tool',
-  exa: 'Exa search',
+  get_current_time: 'Checking the Time',
+  search_tools: 'Searching for Tools',
+  queue_approval: 'Adding to Queue',
+  add_done_item: 'Marking as Done',
+  update_settings: 'Updating Settings',
+  files: 'Managing Files',
+  calendar: 'Managing Calendar',
+  skills: 'Managing Skills',
+  memory: 'Checking Memory',
+  spawn_agents: 'Running Agents',
+  call_external_tool: 'Calling Tool',
+  exa: 'Searching the Web',
   research: 'Researching',
-  monitor: 'Search monitor',
-  create_custom_integration: 'Building custom integration',
-  notify_user: 'Sending notification',
-  send_team_message: 'Messaging team',
-  read_team: 'Checking team',
-  team_notes: 'Team notes',
+  monitor: 'Managing Monitors',
+  create_document: 'Creating Document',
+  update_document: 'Updating Document',
+  create_custom_integration: 'Building Integration',
+  set_status_line: 'Updating Status',
+  notify_user: 'Sending Notification',
+  send_team_message: 'Messaging Team',
+  read_team: 'Checking Team',
+  team_notes: 'Updating Team Notes',
+  integration_notes: 'Checking Integrations',
 }
 
 // Action-specific labels for consolidated tools
 const ACTION_LABELS: Record<string, Record<string, string>> = {
-  files: { list: 'Listing files', search: 'Searching files', read: 'Reading file', delete: 'Deleting file', stats: 'Checking storage' },
-  calendar: { create: 'Adding to calendar', update: 'Updating calendar entry', delete: 'Deleting calendar entry', complete: 'Completing task', list: 'Checking calendar' },
-  skills: { save: 'Saving skill', list: 'Listing skills', delete: 'Deleting skill' },
-  memory: { search: 'Searching memory', grep: 'Searching memory', read: 'Reading memory', write: 'Writing memory', edit: 'Editing memory', append: 'Updating memory', list: 'Listing memory', delete: 'Cleaning memory' },
-  exa: { search: 'Searching the web', find_similar: 'Finding similar pages', get_contents: 'Reading web pages' },
-  research: { search: 'Searching research', list: 'Listing research', stats: 'Research stats' },
-  monitor: { create: 'Creating search monitor', list: 'Listing monitors', delete: 'Deleting monitor', trigger: 'Triggering monitor' },
-  create_custom_integration: { propose: 'Proposing capabilities', create: 'Building integration', read: 'Reading integration code', update: 'Updating integration' },
-  team_notes: { read: 'Reading team notes', write: 'Updating team notes' },
+  files: { list: 'Listing Files', search: 'Searching Files', read: 'Reading File', delete: 'Deleting File', stats: 'Checking Storage', move: 'Moving File', rename: 'Renaming File', organize: 'Organizing Files', grep: 'Searching Files' },
+  calendar: { create: 'Adding to Calendar', update: 'Updating Calendar', delete: 'Removing from Calendar', complete: 'Completing Task', list: 'Checking Calendar' },
+  skills: { save: 'Saving Skill', list: 'Listing Skills', delete: 'Removing Skill' },
+  memory: { search: 'Searching Memory', grep: 'Searching Memory', read: 'Reading Memory', write: 'Saving to Memory', edit: 'Editing Memory', append: 'Updating Memory', list: 'Listing Memories', delete: 'Clearing Memory' },
+  exa: { search: 'Searching the Web', find_similar: 'Finding Similar Pages', get_contents: 'Reading Web Pages' },
+  research: { search: 'Searching Research', list: 'Listing Research', stats: 'Checking Research Stats' },
+  monitor: { create: 'Creating Monitor', list: 'Listing Monitors', delete: 'Removing Monitor', trigger: 'Triggering Monitor' },
+  create_custom_integration: { propose: 'Proposing Capabilities', create: 'Building Integration', read: 'Reading Integration', update: 'Updating Integration' },
+  team_notes: { read: 'Reading Team Notes', write: 'Updating Team Notes' },
 }
 
-// "GMAIL_FETCH_EMAILS" → "Gmail: Fetch emails"
+// "GMAIL_FETCH_EMAILS" → "Gmail: Fetching Emails"
+// Universal: auto-detects service prefix from ALL_CAPS pattern, no hardcoded list needed
+
+// Special casing for services that aren't simple title-case
+const SERVICE_CASING: Record<string, string> = {
+  GMAIL: 'Gmail', GITHUB: 'GitHub', LINKEDIN: 'LinkedIn', HUBSPOT: 'HubSpot',
+  GOOGLECALENDAR: 'Calendar', GOOGLE_CALENDAR: 'Calendar',
+  GOOGLESHEETS: 'Sheets', GOOGLE_SHEETS: 'Sheets',
+  GOOGLESLIDES: 'Slides', GOOGLE_SLIDES: 'Slides',
+  GOOGLE_MAPS: 'Maps', WHATSAPP: 'WhatsApp',
+}
+
+// Common verbs that need consonant doubling for gerund
+const DOUBLE_CONSONANT = new Set(['get', 'set', 'put', 'run', 'hit', 'cut', 'let', 'sit', 'rip', 'pin', 'map', 'log', 'tag', 'ban', 'pop', 'tip', 'drop', 'stop', 'plan', 'skip', 'snap', 'step', 'strip', 'swap', 'trap', 'trip', 'wrap'])
+
+function toGerund(verb: string): string {
+  if (verb.endsWith('ing')) return verb  // already gerund
+  if (DOUBLE_CONSONANT.has(verb)) return verb + verb[verb.length - 1] + 'ing'
+  if (verb.endsWith('e') && !verb.endsWith('ee') && !verb.endsWith('ye')) return verb.slice(0, -1) + 'ing'
+  if (verb.endsWith('ie')) return verb.slice(0, -2) + 'ying'
+  return verb + 'ing'
+}
+
+function titleCase(w: string): string {
+  return w.charAt(0).toUpperCase() + w.slice(1)
+}
+
 function humanizeToolName(name: string): string {
-  const prefixMap: Record<string, string> = {
-    GMAIL: 'Gmail', GOOGLECALENDAR: 'Calendar', GOOGLE_CALENDAR: 'Calendar',
-    GITHUB: 'GitHub', LINKEDIN: 'LinkedIn', MAILCHIMP: 'Mailchimp',
-    CALENDLY: 'Calendly', GOOGLESHEETS: 'Sheets', GOOGLE_SHEETS: 'Sheets',
-    GOOGLESLIDES: 'Slides', GOOGLE_SLIDES: 'Slides', EXCEL: 'Excel',
-    FIGMA: 'Figma', GOOGLE_MAPS: 'Maps', COMPOSIO: 'Composio',
-  }
   let service = ''
   let rest = name
-  for (const [key, label] of Object.entries(prefixMap)) {
+
+  // Try compound prefixes first (GOOGLE_CALENDAR), then single (GMAIL)
+  // Check special casing map first for exact matches
+  for (const [key, label] of Object.entries(SERVICE_CASING)) {
     if (name.startsWith(key + '_')) {
       service = label
       rest = name.slice(key.length + 1)
       break
     }
   }
-  // "FETCH_EMAILS" → "Fetch emails"
-  const words = rest.toLowerCase().replace(/_/g, ' ').trim()
-  const humanized = words.charAt(0).toUpperCase() + words.slice(1)
+
+  // If no special casing matched, auto-detect: first ALL_CAPS segment before an action verb
+  if (!service) {
+    const parts = name.split('_')
+    // Find where the service name ends and the action begins
+    // Service names are nouns (NOTION, SLACK), actions are verbs (FETCH, CREATE, LIST)
+    // Heuristic: take the first segment as service if there are 2+ segments and it's all caps
+    if (parts.length >= 2 && parts[0] === parts[0].toUpperCase() && parts[0].length > 1) {
+      const firstWord = parts[0].toLowerCase()
+      // Common action verbs that should NOT be treated as service names
+      const actionVerbs = new Set(['get', 'set', 'list', 'create', 'read', 'write', 'delete', 'update', 'send', 'fetch', 'search', 'find', 'check', 'add', 'remove', 'edit', 'save', 'load', 'run', 'start', 'stop', 'trigger', 'call', 'push', 'pull', 'sync', 'export', 'import', 'upload', 'download', 'move', 'copy', 'rename', 'mark', 'toggle', 'enable', 'disable', 'verify', 'validate', 'test', 'query', 'browse', 'open', 'close', 'cancel', 'approve', 'reject', 'invite', 'share', 'archive', 'restore', 'schedule', 'unsubscribe', 'subscribe'])
+      if (!actionVerbs.has(firstWord)) {
+        service = titleCase(firstWord)
+        rest = parts.slice(1).join('_')
+      }
+    }
+  }
+
+  // "FETCH_EMAILS" → "Fetching Emails"
+  const words = rest.toLowerCase().replace(/_/g, ' ').trim().split(' ').filter(Boolean)
+  if (words.length > 0) {
+    words[0] = toGerund(words[0])
+  }
+  const humanized = words.map(titleCase).join(' ')
   return service ? `${service}: ${humanized}` : humanized
 }
 
 const HEARTBEAT_TOOLS = new Set([
-  'get_current_time', 'memory', 'search_tools', 'notify_user', 'queue_approval',
+  'get_current_time', 'memory', 'search_tools', 'call_external_tool',
+  'queue_approval', 'add_done_item', 'notify_user', 'set_status_line',
+  'schedule', 'files', 'integration_notes', 'skills',
 ])
+
+// External tools the heartbeat agent is NEVER allowed to call (sends, creates, deletes)
+const HEARTBEAT_BLOCKED_PATTERNS = [
+  'SEND_', 'POST_', 'CREATE_', 'DELETE_', 'UPDATE_', 'REMOVE_',
+  'REPLY_', 'FORWARD_', 'DRAFT_', 'PUBLISH_', 'INVITE_', 'SHARE_',
+  'ARCHIVE_', 'MOVE_', 'EDIT_', 'MODIFY_', 'WRITE_', 'INSERT_',
+  'ADD_', 'SUBSCRIBE_', 'UNSUBSCRIBE_', 'CANCEL_', 'APPROVE_', 'REJECT_',
+]
 
 // Tools gated behind a skill — only included when the skill has been activated
 const SKILL_GATED_TOOLS = new Set(['create_custom_integration'])
@@ -513,7 +981,7 @@ const SKILL_GATED_TOOLS = new Set(['create_custom_integration'])
 // Team-only tools — excluded when agent has no team connection
 const TEAM_ONLY_TOOLS = new Set(['send_team_message', 'read_team', 'team_notes'])
 
-function getInternalTools(context: ToolContext, activeSkillTools?: Set<string>, hasTeam?: boolean): Anthropic.Tool[] {
+export function getInternalTools(context: ToolContext, activeSkillTools?: Set<string>, hasTeam?: boolean): Anthropic.Tool[] {
   if (context === 'heartbeat') return INTERNAL_TOOLS.filter(t => HEARTBEAT_TOOLS.has(t.name))
   return INTERNAL_TOOLS.filter(t => {
     if (SKILL_GATED_TOOLS.has(t.name) && !activeSkillTools?.has(t.name)) return false
@@ -525,6 +993,7 @@ function getInternalTools(context: ToolContext, activeSkillTools?: Set<string>, 
 const AUTONOMY_DESCRIPTIONS: Record<string, string> = {
   ask_first: 'Queue everything except read-only lookups.',
   balanced: 'Act on routine/read-only. Queue sends, edits, outreach.',
+  agent: 'Act freely on user requests. Background tasks auto-queue write actions for approval.',
   autonomous: 'Act freely. Only queue destructive actions (bulk deletes).'
 }
 
@@ -542,69 +1011,80 @@ const ALWAYS_QUEUE_TOOLS = [
 function listMemoryFiles(dataDir: string): string[] {
   const memDir = join(dataDir, 'memory')
   try {
-    const { readdirSync } = require('fs') as typeof import('fs')
+    const { readdirSync, statSync } = require('fs') as typeof import('fs')
     return readdirSync(memDir)
       .filter((f: string) => f.endsWith('.md'))
-      .sort()
+      .map((f: string) => ({ name: f, mtime: statSync(join(memDir, f)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime)
+      .slice(0, 10)
+      .map(f => f.name)
   } catch { return [] }
 }
 
-function buildSystemPrompt(connectedServices: string[], agentProfilePath: string, settings: AgentSettings, dataDir: string, teamRoster?: any[], teamName?: string, googleCalendarConnected = false): string {
+function buildSystemPrompt(connectedServices: string[], agentProfilePath: string, settings: AgentSettings, dataDir: string, teamRoster?: any[], teamName?: string, googleCalendarConnected = false, composioSlugs: string[] = []): string {
   const isFirstRun = !existsSync(agentProfilePath)
   const memoryFiles = listMemoryFiles(dataDir)
   const exaConnected = connectedServices.includes('exa')
+
+  const composioSection = composioSlugs.length > 0
+    ? `\nConnected integrations: ${composioSlugs.join(', ')}.`
+    : '\nNo integrations connected yet. The user can connect apps in the Integrations panel.'
 
   const serviceSection = connectedServices.length > 0
     ? `External integrations: ${connectedServices.join(', ')}. For these ONLY, use search_tools → call_external_tool:
 - search_tools(query, context, schema) to find tools. Call memory search in parallel when you need context.
 - call_external_tool(tool_name, parameters) to execute.
-All other tools (memory, files, schedule, skills, send_team_message, etc.) are built-in — call them directly.`
+All other tools (memory, files, schedule, skills, send_team_message, etc.) are built-in — call them directly.${composioSection}`
     : 'No external integrations connected. Settings → connect. Built-in tools (memory, files, schedule, skills) are always available.'
 
   const onboardingSection = !settings.onboarded
-    ? '\n\nONBOARDING: Read onboarding.md from memory and follow it.'
+    ? '\n\nONBOARDING: The user is new. First ask what they want to call you (their agent name), save it via settings update (agent_name field), then read onboarding.md from memory and follow it.'
     : ''
 
   const formatHour = (h: number) => h === 24 ? 'midnight' : h === 0 ? '12am' : h < 12 ? `${h}am` : h === 12 ? '12pm' : `${h - 12}pm`
 
   const customInstructions = settings.custom_instructions?.trim()
 
-  return `You are CoAgent — a private AI agent running on the user's machine. Help with anything asked.
+  return `You are ${settings.agent_name || 'CoAgent'} — a private AI agent running on the user's machine. Help with anything asked.
 ${customInstructions ? `\n${customInstructions}\n` : ''}
 Always search memory before asking the user for info.
 ALWAYS call multiple tools in one response when independent — faster and cheaper.
+NEVER say "I can't do that" without first searching for tools. Always call search_tools before concluding a capability doesn't exist.
 IMPORTANT: Every tool call costs real money. Be deliberate — don't make calls you don't need.
 
 ${serviceSection}
 User: ${settings.name || '?'} | ${settings.email || '?'} | ${settings.role || '?'} | ${settings.timezone || '?'}${settings.what_you_do ? `\nWhat they do: ${settings.what_you_do}` : ''}
 Active: ${formatHour(settings.active_hours.start)}–${formatHour(settings.active_hours.end)}, ${settings.active_days.join(', ')}
 Autonomy: ${settings.autonomy} — ${AUTONOMY_DESCRIPTIONS[settings.autonomy]}
-${settings.heartbeat_interval > 0 ? `Heartbeat: every ${settings.heartbeat_interval}min — process triggers, check memory, escalate.` : ''}
+${settings.heartbeat_interval > 0 ? `Heartbeat: every ${settings.heartbeat_interval}min — process triggers, check memory, escalate. After each heartbeat, call set_status_line with a brief status (3-8 words) summarizing what you found — e.g. "3 things in your queue", "All caught up", "2 new emails".` : ''}
 
-Memory: your long-term brain. Search first (semantic, supports multiple queries in parallel). Call memory search in parallel with search_tools when you need both tools and context. Write things down immediately. Always search before asking for ANY info.
-Files: grep file contents (regex across PDFs, DOCX, XLSX, text) instead of reading whole files. create_folder/move to organize. get_pdf_fields + fill_pdf for fillable PDF forms. [filename](coagent-file:ID) to open. Include coagent_file_ids in tool params to auto-attach files to emails.
-Schedule: create/update/delete/complete/list — routines (cron), tasks (one-time), followups (check-back reminders).${googleCalendarConnected ? ' Google Calendar is synced — schedule(action: "list") already includes Google Calendar events. Use schedule to check the calendar, not the external Google Calendar tool.' : ''}
-Skills: @skill-name to invoke. Check skills(action: list) for unfamiliar tasks.
-Integrations: build NEW integrations from any API using create_custom_integration + @integration-builder skill.
-Approvals: queue_approval for high-stakes actions with full draft. add_done_item after routine tasks.
-Followups: after sending emails/messages/proposals, ask "Want me to follow up? When?" — never auto-create.
-Integration notes: after using an integration, save useful context (IDs, preferences, rules) via integration_notes(write). Auto-injected on search_tools — never call integration_notes(read) for context.
+Memory: search first (semantic, parallel queries). Write things down immediately. Timestamps are automatic. heartbeat.md defines what to check each heartbeat — read and follow it. Before saving a new person/lead/contact, always search memory first to check if they already exist — update the existing entry instead of creating duplicates.${memoryFiles.length > 0 ? `\nRecent memories: ${memoryFiles.join(', ')} — search to find others.` : ''}
+Files: grep to search contents (PDF/DOCX/XLSX/text). create_folder/move to organize. get_pdf_fields + fill_pdf for fillable forms. [filename](coagent-file:ID) to open. coagent_file_ids to attach files to emails.
+Documents: create_document for new PDFs (templates: resume, proposal, invoice, letter, report, brief, newsletter). update_document to patch existing documents — only send changed fields. Prefer update over recreate.
+Schedule: create/update/delete/complete/list — routines (cron), tasks (one-time), followups. Call get_current_time in parallel when scheduling — never guess the date.${googleCalendarConnected ? ' Google Calendar synced — schedule(action: "list") includes Google events. To modify/delete Google events, use call_external_tool with GOOGLECALENDAR_UPDATE_EVENT or GOOGLECALENDAR_DELETE_EVENT (not the schedule tool).' : ''}
+Skills: skills(action: 'list') to see available, skills(action: 'execute', name: 'skill-name') to run. Run proactively when they match the request.
+Integrations: create_custom_integration + @integration-builder for new API integrations.
+Approvals: queue_approval for high-stakes actions. add_done_item after routine tasks.
+Followups: after sending emails/messages/proposals, ask "Want me to follow up?" — never auto-create.
+Integration notes: save context (IDs, preferences) via integration_notes(write). Auto-injected on search_tools.
 
-NEVER fabricate tool results — always call the tool and use the actual response. If unsure, call the tool.
-Be concise. No emojis. Markdown only when helpful.
+Keep responses short and direct — lead with the answer, skip filler and preamble. No emojis. Markdown only when it adds clarity.
+NEVER expose internal reasoning. Do not output text like "I should...", "The user wants me to...", "Let me think about...", or any chain-of-thought. Go straight to the answer or action.
 ${connectedServices.includes('coagent:imessage') ? `iMessage connected. Queue sends for approval unless autonomous.` : ''}
 ${connectedServices.includes('coagent:contacts') ? `Contacts connected via search_tools.` : ''}
-[voice] = voice input. 1-2 short spoken sentences, no markdown.
+VOICE MODE: When the user's message ends with [voice], this is spoken input. Your ENTIRE response must be 1-2 short sentences MAX — under 30 words total. No markdown, no lists, no code, no bullet points. Talk like a person, not a document. Do NOT output "[voice]". Violating the length limit ruins the voice experience.
 Notifications: title 2-4 words, body one sentence.
 ${exaConnected ? `
 Exa: web search, lead gen, competitor research.
-research tool: ALWAYS present your planned queries to the user first and wait for confirmation before calling. Each query dispatches a parallel Haiku sub-agent. Use 3-5 queries from different angles/keywords.
+research tool: ALWAYS present your planned queries to the user first and wait for confirmation before calling. Each query dispatches a parallel sub-agent. Use 3-5 queries from different angles/keywords.
+spawn_agents: run parallel sub-agents for independent tasks. Each gets its own instruction and tools (search, memory, documents) but cannot send emails or perform external actions. Use for: parallel analysis, drafting multiple versions, research + prep simultaneously.
 exa tool: use directly ONLY for get_contents (enrich specific URLs), find_similar (expand from a reference URL), or quick single lookups.
 After research, save structured findings to memory. monitor tool sets up recurring searches.` : ''}${onboardingSection}${teamRoster && teamRoster.length > 0 ? `\n\n## Team: ${teamName || 'Your Team'}\n\nYou are part of a team. Each member has their own AI agent — when you message someone, you're talking to their agent (another AI like you), not the person directly.\nMembers:\n${teamRoster.map((m: any) => `- ${m.name} (${m.role})`).join('\n')}\n\nUse send_team_message with to="name" to message their agent. You'll wait for and receive their agent's response. Omit "to" to broadcast.\nInclude agent_context with relevant background for the receiving agent.` : ''}`
 }
 
 export class Agent {
   private anthropic: Anthropic
+  private openaiClient: OpenAI | null = null
   public mcpManager: MCPManager
   public queue: ApprovalQueue
   public calendar: CalendarStore
@@ -612,8 +1092,10 @@ export class Agent {
   public pendingAgentReplies = new Map<string, (response: string) => void>()
   private conversationHistory: Anthropic.MessageParam[] = []
   private teamConversationHistory: Anthropic.MessageParam[] = []
+  private heartbeatHistory: Anthropic.MessageParam[] = []
   private teamHistoryPath: string
   private teamRunLoopPromise: Promise<string> | null = null
+  private heartbeatRunLoop: Promise<void> | null = null
   private historyPath: string
   private agentProfilePath: string
   private dataDir: string
@@ -633,10 +1115,14 @@ export class Agent {
   public onSettingsChanged?: () => void
   public onCalendarChanged?: () => void
   public googleCalendarConnected = false
+  public imessageConnected = false
+  public composioConnectedSlugs: string[] = []
   private mcpReady: Promise<void>
+  public onStatusLine?: (message: string) => void
   public onNotifyUser?: (title: string, body: string) => void
   public onResearchProgress?: (agents: { query: string; status: string; detail?: string }[]) => void
   public onCustomIntegration?: (action: string, data: any) => Promise<string>
+  public onBroadcast?: (event: any) => void
   public activeSkillTools = new Set<string>()
 
   async getSkills(): Promise<{ name: string; description: string; instructions: string; placeholder?: string; builtin: boolean }[]> {
@@ -702,12 +1188,41 @@ export class Agent {
 
   reinitClient(): void {
     this.anthropic = this.createClient()
+    this.openaiClient = null // lazily recreated on next non-Anthropic call
+  }
+
+  /** Get or create OpenAI-compatible client — routes through relay (which forwards to Moonshot) */
+  private getOpenAIClient(): OpenAI | null {
+    if (this.openaiClient) return this.openaiClient
+    const relay = getRelayConfig()
+    if (relay) {
+      this.openaiClient = new OpenAI({
+        baseURL: `${relay.url.replace(/\/$/, '')}/v1`,
+        apiKey: relay.token,
+      })
+      return this.openaiClient
+    }
+    // Direct to Moonshot (local dev / no relay)
+    const apiKey = process.env.MOONSHOT_API_KEY
+    if (!apiKey) return null
+    this.openaiClient = new OpenAI({
+      baseURL: MOONSHOT_BASE_URL,
+      apiKey,
+    })
+    return this.openaiClient
   }
 
   private async loadHistory(): Promise<void> {
     try {
       const raw = await readFile(this.historyPath, 'utf-8')
       this.conversationHistory = JSON.parse(raw)
+      // Sanitize on load — strip orphaned tool_use/tool_result blocks left by unclean stops
+      const before = this.conversationHistory.length
+      this.conversationHistory = this.sanitizeHistory(this.conversationHistory)
+      if (this.conversationHistory.length !== before) {
+        console.log(`[Agent] Sanitized history on load: ${before} → ${this.conversationHistory.length} messages`)
+        await this.saveHistory()
+      }
       console.log(`[Agent] Loaded ${this.conversationHistory.length} messages from history`)
     } catch {
       this.conversationHistory = []
@@ -726,7 +1241,9 @@ export class Agent {
       await mkdir(join(this.historyPath, '..'), { recursive: true })
       // Cap history to HISTORY_CAP messages — both in memory and on disk
       this.capHistory(this.conversationHistory)
-      await writeFile(this.historyPath, JSON.stringify(this.conversationHistory))
+      const tmp = this.historyPath + '.tmp'
+      await writeFile(tmp, JSON.stringify(this.conversationHistory))
+      await rename(tmp, this.historyPath)
     } catch (err: any) {
       console.error('[Agent] Failed to save history:', err.message)
     }
@@ -745,7 +1262,9 @@ export class Agent {
   private async saveTeamHistory(): Promise<void> {
     try {
       this.capHistory(this.teamConversationHistory)
-      await writeFile(this.teamHistoryPath, JSON.stringify(this.teamConversationHistory), 'utf-8')
+      const tmp = this.teamHistoryPath + '.tmp'
+      await writeFile(tmp, JSON.stringify(this.teamConversationHistory), 'utf-8')
+      await rename(tmp, this.teamHistoryPath)
     } catch (err: any) {
       console.error('[Agent] Failed to save team history:', err.message)
     }
@@ -781,7 +1300,8 @@ export class Agent {
       if (m.role === 'user') inHeartbeat = false
       result.push({ role: m.role as 'user' | 'assistant', content: text, timestamp: new Date().toISOString() })
     }
-    return result
+    // Only return the most recent 100 messages to keep the UI fast
+    return result.slice(-100)
   }
 
   async handleTrigger(
@@ -795,32 +1315,46 @@ export class Agent {
     const isHeartbeat = trigger.source === 'heartbeat'
     const isTodoDue = trigger.source === 'todo_due' || trigger.source === 'task_due'
 
-    // If agent is busy, queue webhook/incoming events for later — don't drop them
-    if (this.runLoopPromise) {
-      if (!isHeartbeat) {
-        if (this.missedEvents.length < 50) {
-          this.missedEvents.push({
-            source: trigger.source,
-            payload: trigger.payload,
-            time: new Date().toISOString()
-          })
-        }
-        console.log(`[Agent] Queued missed event (${trigger.source}) — ${this.missedEvents.length} pending`)
-      } else {
-        console.log(`[Agent] Skipping ${trigger.source} — agent is busy`)
+    // Heartbeat runs independently — has its own run loop, never blocks on user chat
+    if (isHeartbeat) {
+      if (this.heartbeatRunLoop) {
+        console.log('[Agent] Heartbeat already running — skipping')
+        return
       }
+      const events = await getUnprocessedEvents(this.dataDir)
+      const eventIds = events.map((e: any) => e.id).filter(Boolean)
+      trigger = { ...trigger, payload: { ...trigger.payload, events } }
+      console.log(`[Agent] Heartbeat (independent): ${events.length} new event(s)`)
+
+      const message = trigger.content ?? this.buildTriggerMessage(trigger)
+      this.heartbeatHistory.push({ role: 'user', content: message })
+
+      // Call runLoop directly — chat() pushes to conversationHistory which we don't want
+      this.heartbeatRunLoop = this.runLoop(onChunk, 'heartbeat', onToolCall).then(async () => {
+        if (eventIds.length > 0) {
+          markEventsDone(this.dataDir, eventIds).catch(err =>
+            console.error('[Agent] Failed to mark events done:', err.message)
+          )
+        }
+      }).finally(() => { this.heartbeatRunLoop = null })
+      await this.heartbeatRunLoop
       return
     }
 
-    // Heartbeat: fetch unprocessed events from the event store and inject them
-    if (isHeartbeat) {
-      const events = await getUnprocessedEvents(this.dataDir)
-      trigger = { ...trigger, payload: { ...trigger.payload, events } }
-      console.log(`[Agent] Heartbeat: ${events.length} new event(s), ${this.missedEvents.length} missed`)
+    // Non-heartbeat triggers: queue if agent is busy
+    if (this.runLoopPromise) {
+      if (this.missedEvents.length < 50) {
+        this.missedEvents.push({
+          source: trigger.source,
+          payload: trigger.payload,
+          time: new Date().toISOString()
+        })
+      }
+      console.log(`[Agent] Queued missed event (${trigger.source}) — ${this.missedEvents.length} pending`)
+      return
     }
 
     const context: ToolContext = isTodoDue ? 'chat'
-      : isHeartbeat ? 'heartbeat'
       : trigger.source === 'webhook' ? 'webhook'
       : 'chat'
 
@@ -833,9 +1367,7 @@ export class Agent {
     }
 
     // Capture event IDs before processing so we can mark them done after
-    const eventIds = isHeartbeat
-      ? ((trigger.payload as any)?.events as any[] ?? []).map((e: any) => e.id).filter(Boolean)
-      : []
+    const eventIds: string[] = []
 
     // Stream the heartbeat header before Haiku starts
     if (isHeartbeat) {
@@ -854,19 +1386,7 @@ export class Agent {
         )
       }
 
-      // Haiku handles it all: queues actionable items, surfaces a summary in chat.
-      // No Sonnet escalation — the queue is the guardrail for actions.
-      // runLoop already streamed text via onChunk, but we need a clean string message
-      // in history so getChatHistory can find it (runLoop pushes ContentBlock[] which gets filtered).
-      if (context === 'heartbeat' && result && !result.toLowerCase().includes('all clear')) {
-        const time = new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' })
-        console.log('[Agent] Heartbeat summary surfaced to user')
-        const surfaceMsg = result.startsWith('**[Heartbeat')
-          ? result
-          : `**[Heartbeat — ${time}]**\n\n${result}`
-        this.conversationHistory.push({ role: 'assistant', content: surfaceMsg })
-        this.saveHistory()
-      }
+      // Heartbeat now runs independently via handleTrigger — no post-processing needed here
     } finally {
       this.runLoopPromise = null
       if (isTodoDue) this.pinnedTaskIdx = null
@@ -987,6 +1507,8 @@ export class Agent {
     }
     const directMcpServers = new Set(['memory', 'exa'])
     const searchableTools = allExternalTools.filter(t => !directMcpServers.has(serverMap.get(t.name)!))
+    // Lookup map for injecting schemas at call_external_tool time
+    const toolSchemaMap = new Map(allExternalTools.map(t => [t.name, t]))
     const connectedServices = Array.from(new Set([
       ...searchableTools.map(t => serverMap.get(t.name)!),
       ...(exaTools.length > 0 ? ['exa'] : []),
@@ -998,14 +1520,14 @@ export class Agent {
     // Memoize system prompt — only rebuild when services or settings actually change
     const memFileCount = listMemoryFiles(this.dataDir).length
     const teamRosterKey = this.teamClient ? `${this.teamClient.teamId}|${this.teamClient.getRoster().length}` : ''
-    const promptKey = connectedServices.join(',') + '|' + JSON.stringify(settings) + '|' + memFileCount + '|' + teamRosterKey + '|' + this.googleCalendarConnected
+    const promptKey = connectedServices.join(',') + '|' + JSON.stringify(settings) + '|' + memFileCount + '|' + teamRosterKey + '|' + this.googleCalendarConnected + '|' + this.composioConnectedSlugs.join(',')
     let systemPrompt: string
     if (this.cachedSystemPrompt && this.cachedPromptKey === promptKey) {
       systemPrompt = this.cachedSystemPrompt
     } else {
       const teamRoster = this.teamClient?.getRoster()
       const teamName = this.teamClient?.teamName ?? undefined
-      systemPrompt = buildSystemPrompt(connectedServices, this.agentProfilePath, settings, this.dataDir, teamRoster, teamName, this.googleCalendarConnected)
+      systemPrompt = buildSystemPrompt(connectedServices, this.agentProfilePath, settings, this.dataDir, teamRoster, teamName, this.googleCalendarConnected, this.composioConnectedSlugs)
       this.cachedSystemPrompt = systemPrompt
       this.cachedPromptKey = promptKey
       console.log('[Agent] System prompt rebuilt (settings or services changed)')
@@ -1020,17 +1542,49 @@ export class Agent {
 - When using tools, share only the conclusion, not the raw output. "I checked and the contract renews in April" — not the full document contents.`
     }
 
-    // Model routing: Haiku for background tasks, user's power model for everything else
-    const HAIKU = 'claude-haiku-4-5-20251001'
-    const currentModel = (context === 'heartbeat' || context === 'team') ? HAIKU : settings.powerModel
-    const maxTokens = context === 'heartbeat' ? 2048 : 16000
+    // Heartbeat: focused system prompt — runs as independent background agent
+    if (context === 'heartbeat') {
+      const svcList = connectedServices.length > 0
+        ? `Connected integrations: ${connectedServices.join(', ')}. Use search_tools → call_external_tool to access them.`
+        : 'No external integrations connected.'
+      systemPrompt = `You are the Heartbeat Agent — a background process checking in periodically on ${settings.name || 'the user'}'s behalf. You run independently while they may be chatting.
+
+Your job:
+1. Read heartbeat.md from memory — it tells you what to check.
+2. Follow those instructions: check email, calendar, integrations, whatever it says.
+3. Call set_status_line with a brief status (3-8 words) for their dashboard — e.g. "3 new emails", "All caught up", "Meeting in 30 min".
+4. Escalation:
+   - Urgent/time-sensitive (meeting in 5 min, server down, important person) → notify_user (push notification)
+   - Actionable but not urgent (new emails to reply to, tasks due, follow-ups needed) → queue_approval with full context so the user can review and approve
+5. Update memories as needed.
+
+User: ${settings.name || '?'} | ${settings.email || '?'} | ${settings.role || '?'} | ${settings.timezone || '?'}
+${svcList}
+
+Rules:
+- Be fast. Don't waste tool calls.
+- ALWAYS call set_status_line before finishing.
+- You are READ-ONLY for external integrations. You can search and fetch data, but NEVER send emails, create events, post messages, or modify anything. If something needs action, use queue_approval to surface it for the user.
+- Keep memory updates concise.
+- NEVER fabricate tool results — always call the tool.`
+    }
+
+    // Model routing: Kimi K2.5 for heartbeat + team (independent background), power model for chat
+    const KIMI = 'kimi-k2.5'
+    const currentModel = (context === 'heartbeat' || context === 'team') ? KIMI : settings.powerModel
+    const isClaudeModel = isAnthropicModel(currentModel)
+    const maxTokens = context === 'heartbeat' ? 4096 : isClaudeModel ? 16000 : 4096
 
     console.log(`[Agent] Starting ${context} on ${currentModel} (max_tokens: ${maxTokens})`)
 
-    const history = context === 'team' ? this.teamConversationHistory : this.conversationHistory
+    const history = context === 'heartbeat' ? this.heartbeatHistory
+      : context === 'team' ? this.teamConversationHistory
+      : this.conversationHistory
     const saveHistory = context === 'team'
       ? () => this.saveTeamHistory()
-      : () => this.saveHistory()
+      : context === 'heartbeat'
+        ? () => { /* heartbeat history is ephemeral — trim to last 10 messages */ this.heartbeatHistory = this.heartbeatHistory.slice(-10) }
+        : () => this.saveHistory()
 
     const lastUserMsg = history.filter(m => m.role === 'user').at(-1)
     const userText = typeof lastUserMsg?.content === 'string' ? lastUserMsg.content : ''
@@ -1087,6 +1641,39 @@ export class Agent {
       if (this.stopped) {
         console.log('[Agent] Stopped by user')
         this.activeStream = null
+        // Find ALL assistant messages with tool_use blocks that lack matching tool_results.
+        // This covers the common case (last message) and edge cases where the abort
+        // left orphaned tool_use blocks anywhere in the current turn's history.
+        const toolResultIds = new Set<string>()
+        for (const msg of history) {
+          if (!Array.isArray(msg.content)) continue
+          for (const b of msg.content as any[]) {
+            if (b.type === 'tool_result') toolResultIds.add(b.tool_use_id)
+          }
+        }
+        const orphanedToolUses: any[] = []
+        for (const msg of history) {
+          if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue
+          for (const b of msg.content as any[]) {
+            if (b.type === 'tool_use' && !toolResultIds.has(b.id)) {
+              orphanedToolUses.push(b)
+            }
+          }
+        }
+        if (orphanedToolUses.length > 0) {
+          const cancelledResults: Anthropic.MessageParam = {
+            role: 'user',
+            content: orphanedToolUses.map((b: any) => ({
+              type: 'tool_result' as const,
+              tool_use_id: b.id,
+              content: 'Cancelled by user.',
+            }))
+          }
+          history.push(cancelledResults)
+          console.log(`[Agent] Added ${orphanedToolUses.length} cancelled tool_result(s) for orphaned tool_use blocks`)
+        }
+        // Persist so cancelled results survive process restart
+        await saveHistory()
         return lastText || '_Stopped._'
       }
 
@@ -1107,7 +1694,7 @@ export class Agent {
         lastText = ''
       }
 
-      let response: Anthropic.Message
+      let response: { content: Anthropic.ContentBlock[]; stop_reason: string | null; usage: { input_tokens: number; output_tokens: number } }
       let retryDelay = 5000
 
       turn++
@@ -1118,47 +1705,83 @@ export class Agent {
         return lastText || '_Reached maximum turn limit._'
       }
       const t0 = Date.now()
+      const useAnthropic = isAnthropicModel(currentModel)
       while (true) {
         try {
-          const apiMessages = this.addMessageCacheBreakpoint(
-              [...baseMessages, ...loopMessages],
-              isBackground,
-              cacheBreakpointIdx >= 0 ? cacheBreakpointIdx : undefined,
-              '5m'
-            ) as any
-          const stream = this.anthropic.messages.stream({
-            model: currentModel,
-            max_tokens: maxTokens,
-            system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral', ttl: '5m' } as any }],
-            tools: stableTools.length > 0
-              ? [...stableTools.slice(0, -1), { ...stableTools[stableTools.length - 1], cache_control: { type: 'ephemeral', ttl: '5m' } }] as any
-              : [] as any,
-            messages: apiMessages,
-          } as any)
-          this.activeStream = stream
-          stream.on('text', (text) => {
-            try { onChunk?.(text) } catch (err) { console.error('[Agent] onChunk error:', err) }
-          })
+          if (useAnthropic) {
+            // ── Anthropic path (Claude models) ──
+            const apiMessages = this.addMessageCacheBreakpoint(
+                [...baseMessages, ...loopMessages],
+                isBackground,
+                cacheBreakpointIdx >= 0 ? cacheBreakpointIdx : undefined,
+                '5m'
+              ) as any
+            const stream = this.anthropic.messages.stream({
+              model: currentModel,
+              max_tokens: maxTokens,
+              system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral', ttl: '5m' } as any }],
+              tools: stableTools.length > 0
+                ? [...stableTools.slice(0, -1), { ...stableTools[stableTools.length - 1], cache_control: { type: 'ephemeral', ttl: '5m' } }] as any
+                : [] as any,
+              messages: apiMessages,
+            } as any)
+            this.activeStream = stream
+            stream.on('text', (text) => {
+              try { onChunk?.(text) } catch (err) { console.error('[Agent] onChunk error:', err) }
+            })
 
-          response = await stream.finalMessage()
-          this.activeStream = null
-          const u = response.usage as any
-          const cacheHit = u.cache_read_input_tokens ?? 0
-          const cacheWrite = u.cache_creation_input_tokens ?? 0
-          const cacheParts: string[] = []
-          if (cacheHit > 0) cacheParts.push(`${cacheHit} cached`)
-          if (cacheWrite > 0) cacheParts.push(`${cacheWrite} cache write`)
-          const cacheInfo = cacheParts.length > 0 ? ` (${cacheParts.join(', ')})` : ''
-          console.log(`[Agent] Turn ${turn} — ${response.stop_reason} — ${Date.now() - t0}ms — ${response.usage.input_tokens} in${cacheInfo} / ${response.usage.output_tokens} out tokens`)
-          recordUsage(this.dataDir, {
-            category: 'chat',
-            model: currentModel,
-            inputTokens: response.usage.input_tokens,
-            outputTokens: response.usage.output_tokens,
-            cacheReadTokens: u.cache_read_input_tokens ?? 0,
-            cacheCreationTokens: u.cache_creation_input_tokens ?? 0,
-            timestamp: new Date().toISOString(),
-          }).catch(() => {})
+            const anthropicResponse = await stream.finalMessage()
+            this.activeStream = null
+            response = anthropicResponse
+
+            const u = anthropicResponse.usage as any
+            const cacheHit = u.cache_read_input_tokens ?? 0
+            const cacheWrite = u.cache_creation_input_tokens ?? 0
+            const cacheParts: string[] = []
+            if (cacheHit > 0) cacheParts.push(`${cacheHit} cached`)
+            if (cacheWrite > 0) cacheParts.push(`${cacheWrite} cache write`)
+            const cacheInfo = cacheParts.length > 0 ? ` (${cacheParts.join(', ')})` : ''
+            console.log(`[Agent] Turn ${turn} — ${response.stop_reason} — ${Date.now() - t0}ms — ${response.usage.input_tokens} in${cacheInfo} / ${response.usage.output_tokens} out tokens`)
+            recordUsage(this.dataDir, {
+              category: 'chat',
+              model: currentModel,
+              inputTokens: response.usage.input_tokens,
+              outputTokens: response.usage.output_tokens,
+              cacheReadTokens: u.cache_read_input_tokens ?? 0,
+              cacheCreationTokens: u.cache_creation_input_tokens ?? 0,
+              timestamp: new Date().toISOString(),
+            }).catch(() => {})
+          } else {
+            // ── Moonshot direct path (Kimi K2.5, etc.) ──
+            const openai = this.getOpenAIClient()
+            if (!openai) throw new Error('Relay not connected. Activate your relay in Settings to use Kimi.')
+
+            const allMessages = [...baseMessages, ...loopMessages]
+            const abortController = new AbortController()
+            this.activeStream = { abort: () => abortController.abort() } as any
+
+            response = await streamOpenAI(openai, {
+              model: currentModel,
+              system: systemPrompt,
+              messages: allMessages,
+              tools: stableTools,
+              maxTokens,
+            }, onChunk, abortController.signal)
+
+            this.activeStream = null
+            const cached = (response.usage as any).cached_tokens ?? 0
+            const cacheStr = cached > 0 ? ` (${cached} cached)` : ''
+            console.log(`[Agent] Turn ${turn} — ${response.stop_reason} — ${Date.now() - t0}ms — ${response.usage.input_tokens} in${cacheStr} / ${response.usage.output_tokens} out tokens (Moonshot)`)
+            recordUsage(this.dataDir, {
+              category: 'chat',
+              model: currentModel,
+              inputTokens: response.usage.input_tokens,
+              outputTokens: response.usage.output_tokens,
+              cacheReadTokens: cached,
+              cacheCreationTokens: 0,
+              timestamp: new Date().toISOString(),
+            }).catch(() => {})
+          }
           break
         } catch (err: any) {
           this.activeStream = null
@@ -1173,7 +1796,7 @@ export class Agent {
           if (isRateLimit || isOverloaded) {
             const retryAfter = parseInt(err?.headers?.['retry-after'] ?? '') * 1000 || retryDelay
             const reason = isOverloaded ? 'API overloaded' : 'Rate limited'
-            console.warn(`[Agent] ${reason}, retrying in ${retryAfter / 1000}s...`)
+            console.warn(`[Agent] ${reason} (status=${err?.status}, body=${JSON.stringify(err?.error ?? err?.message).slice(0, 200)}), retrying in ${retryAfter / 1000}s...`)
             onChunk?.(`\n\n_${reason} — retrying in ${Math.round(retryAfter / 1000)}s..._`)
             await new Promise(r => setTimeout(r, retryAfter))
             retryDelay = Math.min(retryDelay * 2, 300000)
@@ -1249,8 +1872,8 @@ export class Agent {
 
           } else if (block.name === 'search_tools') {
             searchToolCalls++
-            if (searchToolCalls > 3) {
-              return 'You have enough tools loaded. Use what you have.'
+            if (searchToolCalls > 6) {
+              return 'You have enough tools discovered. Use call_external_tool to execute them — the schema will be provided automatically.'
             }
             const input = block.input as { query: string; context?: string; schema?: string }
             const query = input.query
@@ -1270,34 +1893,10 @@ export class Agent {
             if (matches.length === 0) {
               result = `No tools found matching "${query}". Available services: ${connectedServices.join(', ')}`
             } else {
-              // No dynamic tool injection — external tools go through call_external_tool proxy.
-              // The tools array stays stable so the cache prefix is never busted.
-              result = `Found ${matches.length} tools for "${query}" — use call_external_tool(tool_name, parameters) to call:\n` +
+              // Names + descriptions only — full schema is injected at call_external_tool time
+              // to avoid bloating context with schemas for tools the agent never calls.
+              result = `Found ${matches.length} tools for "${query}" — use call_external_tool(tool_name, parameters) to call. Schema will be provided when you call the tool.\n` +
                 matches.map(t => `- ${t.name}: ${t.description ?? ''}`).join('\n')
-
-              // Append filtered schemas from the combined search
-              if (schemas.length > 0) {
-                const matchMap = new Map(matches.map(t => [t.name, t]))
-                for (const { tool: toolName, params: paramNames } of schemas) {
-                  const tool = matchMap.get(toolName)
-                  if (tool) {
-                    result += formatSchemaForResult(tool, paramNames.length > 0 ? paramNames : undefined)
-                    console.log(`[Agent] Schema for ${toolName}: ${paramNames.length} filtered params`)
-                  }
-                }
-              } else if (matches.length > 0) {
-                // Fallback: show required params only (full schema is too large for context)
-                const topTool = matches[0]
-                const schema = topTool.input_schema as any
-                const reqParams = schema?.required as string[] | undefined
-                if (reqParams && reqParams.length > 0) {
-                  result += formatSchemaForResult(topTool, reqParams)
-                  console.log(`[Agent] Schema fallback for ${topTool.name}: required params only (${reqParams.length})`)
-                } else {
-                  result += formatSchemaForResult(topTool)
-                  console.log(`[Agent] Schema fallback for ${topTool.name}: full schema (no embedding match)`)
-                }
-              }
 
               // Bundle sibling tools from the same integration(s) — so the agent
               // can chain actions (e.g. list channels → send message) without another search_tools call.
@@ -1376,15 +1975,30 @@ export class Agent {
             const action = input.action as string
 
             if (action === 'create') {
-              // Block creating tasks/followups with past due dates
-              if (input.due && (input.type === 'task' || input.type === 'followup')) {
+              const entryType = input.type || 'task'
+
+              // Validate routines must have a valid cron
+              if (entryType === 'routine') {
+                if (!input.cron || typeof input.cron !== 'string' || input.cron.trim().split(/\s+/).length < 5) {
+                  return `Rejected: routines require a valid cron expression. Examples:\n- Daily at 9am: "0 9 * * *"\n- Weekdays at 9am: "0 9 * * 1-5"\n- Mon/Wed/Fri at 2pm: "0 14 * * 1,3,5"\n- Every Monday at 10am: "0 10 * * 1"\n- 1st of month at 9am: "0 9 1 * *"\nRetry with cron field set.`
+                }
+              }
+
+              // Validate tasks/followups must have a due date
+              if ((entryType === 'task' || entryType === 'followup') && !input.due) {
+                return `Rejected: ${entryType}s require a due date (ISO datetime). Example: "2026-04-03T09:00:00". If the user wants a recurring reminder, use type: "routine" with a cron instead.`
+              }
+
+              // Block past due dates
+              if (input.due && (entryType === 'task' || entryType === 'followup')) {
                 const dueDate = new Date(input.due)
                 if (dueDate < new Date()) {
                   return `Rejected: due date ${input.due} is in the past. Use a future date.`
                 }
               }
+
               const entry = this.calendar.create({
-                type: input.type || 'task',
+                type: entryType,
                 label: input.label || 'Untitled',
                 cron: input.cron,
                 due: input.due,
@@ -1392,7 +2006,7 @@ export class Agent {
                 notes: input.notes,
                 enabled: input.enabled ?? true,
               })
-              result = `Created ${entry.type}: "${entry.label}" (${entry.id})`
+              result = `Created ${entry.type}: "${entry.label}" (${entry.id})${entry.cron ? ` — cron: ${entry.cron}` : ''}${entry.due ? ` — due: ${entry.due}` : ''}`
               this.onCalendarChanged?.()
             } else if (action === 'update') {
               const { id, action: _, ...patch } = input
@@ -1499,7 +2113,7 @@ export class Agent {
                   else {
                     const totalMatches = hits.reduce((sum, h) => sum + h.matches.length, 0)
                     const formatted = hits.map(h => `[id:${h.fileId}] ${h.group ? h.group + '/' : ''}${h.filename}\n${h.matches.map(m => `  ${m}`).join('\n')}`).join('\n\n')
-                    const MAX_GREP = 6000
+                    const MAX_GREP = 16000
                     result = formatted.length > MAX_GREP
                       ? formatted.slice(0, MAX_GREP) + `\n\n[Truncated: ${totalMatches} total matches across ${hits.length} files. Showing first ${MAX_GREP} chars. Narrow with folder filter or more specific pattern.]`
                       : `${totalMatches} matches in ${hits.length} files:\n\n${formatted}`
@@ -1509,7 +2123,7 @@ export class Agent {
             } else if (input.action === 'read') {
               try {
                 const content = await readFileContent(this.dataDir, input.id!)
-                const MAX_FILE_READ = 8000
+                const MAX_FILE_READ = 24000
                 if (content.length > MAX_FILE_READ) {
                   result = content.slice(0, MAX_FILE_READ) + `\n\n[Truncated: showing ${MAX_FILE_READ} of ${content.length} chars. Use grep(pattern) to search for specific content.]`
                 } else {
@@ -1720,7 +2334,7 @@ export class Agent {
                   const params = mapMemoryParams(action, input)
                   const raw = await this.mcpManager.callTool('memory', mcpTool, params)
                   // Size-cap read results to prevent context blowup
-                  const MAX_MEMORY_READ = 6000
+                  const MAX_MEMORY_READ = 16000
                   if (action === 'read' && raw.length > MAX_MEMORY_READ) {
                     result = raw.slice(0, MAX_MEMORY_READ) + `\n\n[Truncated: showing ${MAX_MEMORY_READ} of ${raw.length} chars. Use grep(pattern) to search within this file.]`
                   } else {
@@ -1732,33 +2346,106 @@ export class Agent {
               }
             }
 
+          } else if (block.name === 'set_status_line') {
+            const input = block.input as { message: string }
+            this.onStatusLine?.(input.message)
+            result = 'Status line updated.'
+
           } else if (block.name === 'notify_user') {
             const input = block.input as { title: string; body: string }
             this.onNotifyUser?.(input.title, input.body)
             result = 'Notification sent.'
 
           } else if (block.name === 'create_document') {
-            const input = block.input as { filename: string; markdown: string; style?: string }
+            const input = block.input as { filename: string; markdown?: string; style?: string; layout?: any; template?: string; data?: any }
             try {
-              const { renderMarkdownToPdf } = await import('./document-renderer.js')
               const filename = input.filename.endsWith('.pdf') ? input.filename : `${input.filename}.pdf`
-              const style = (input.style || 'professional') as 'professional' | 'minimal' | 'report'
-              const buf = await renderMarkdownToPdf(input.markdown, style, filename.replace('.pdf', ''))
+              // Pass brand kit from settings if configured
+              const brand = (settings.brand_company || settings.brand_color || settings.brand_logo)
+                ? { companyName: settings.brand_company || undefined, accentColor: settings.brand_color || undefined, logoBase64: settings.brand_logo || undefined }
+                : undefined
+              let buf: Buffer
+              if (input.template && input.data) {
+                const { renderTemplatedDocument } = await import('./document-renderer.js')
+                // Ensure discriminant field is set on data
+                const templateData = { ...input.data, template: input.template }
+                console.log(`[Agent] Template data keys:`, Object.keys(input.data))
+                console.log(`[Agent] Template data:`, JSON.stringify(input.data).slice(0, 500))
+                this.onBroadcast?.({ type: 'document_building', template: input.template, data: input.data })
+                buf = await renderTemplatedDocument(templateData as any, brand)
+                console.log(`[Agent] Created document: ${filename} (${buf.length} bytes, template: ${input.template})`)
+              } else {
+                const { renderMarkdownToPdf } = await import('./document-renderer.js')
+                const style = (input.style || 'professional') as 'professional' | 'minimal' | 'report'
+                buf = await renderMarkdownToPdf(input.markdown || '', style, filename.replace('.pdf', ''), brand, input.layout)
+                console.log(`[Agent] Created document: ${filename} (${buf.length} bytes, style: ${style})`)
+              }
               const entry = await ingestFile(this.dataDir, filename, buf, 'application/pdf')
+              if (input.template && input.data) {
+                await updateDocumentMeta(this.dataDir, entry.id, {
+                  template: input.template,
+                  templateData: input.data,
+                  lastRenderedAt: new Date().toISOString()
+                })
+              }
+              this.onBroadcast?.({ type: 'document_ready', fileId: entry.id, filename: entry.filename })
               result = `Document created: "${entry.filename}" (${Math.round(buf.length / 1024)}KB)\ncoagent_file_id: ${entry.id}\n\nUse this ID to attach the document to emails or share it.`
-              console.log(`[Agent] Created document: ${entry.filename} (${buf.length} bytes, style: ${style})`)
             } catch (err: any) {
               result = `Document creation failed: ${err.message}`
               console.error('[Agent] Document creation error:', err)
             }
 
+          } else if (block.name === 'update_document') {
+            const input = block.input as { file_id: string; data_patch: any }
+            try {
+              const meta = await getDocumentMeta(this.dataDir, input.file_id)
+              if (!meta) {
+                result = 'Error: This document has no stored template data. It may have been created before update support was added, or created in markdown mode. Please use create_document to recreate it.'
+              } else {
+                // Deep merge: arrays replaced, objects shallow-merged
+                const merged = { ...meta.templateData }
+                for (const [key, value] of Object.entries(input.data_patch)) {
+                  if (Array.isArray(value)) {
+                    merged[key] = value  // arrays: replace entirely
+                  } else if (value && typeof value === 'object' && !Array.isArray(value)) {
+                    merged[key] = { ...(merged[key] || {}), ...value }  // objects: shallow merge
+                  } else {
+                    merged[key] = value  // primitives: replace
+                  }
+                }
+
+                const brand = (settings.brand_company || settings.brand_color || settings.brand_logo)
+                  ? { companyName: settings.brand_company || undefined, accentColor: settings.brand_color || undefined, logoBase64: settings.brand_logo || undefined }
+                  : undefined
+
+                const { renderTemplatedDocument } = await import('./document-renderer.js')
+                const buf = await renderTemplatedDocument({ ...merged, template: meta.template }, brand)
+
+                // Overwrite existing file in place (same ID, same path)
+                await updateFileContent(this.dataDir, input.file_id, Buffer.from(buf))
+                await updateDocumentMeta(this.dataDir, input.file_id, {
+                  template: meta.template,
+                  templateData: merged,
+                  lastRenderedAt: new Date().toISOString()
+                })
+
+                const files = await listFiles(this.dataDir)
+                const updatedFile = files.find(f => f.id === input.file_id)
+                const filename = updatedFile?.filename || 'Document'
+                result = `Updated document "${filename}" (${Math.round(buf.length / 1024)}KB). File ID: ${input.file_id}`
+              }
+            } catch (err: any) {
+              result = `Error updating document: ${err.message}`
+            }
+
           } else if (block.name === 'research') {
-            // Parallel Haiku sub-agent research
+            // Parallel Kimi sub-agent research (falls back to Haiku if no OpenAI client)
             const input = block.input as { queries: string[] }
             const queries = (input.queries || []).slice(0, 5)
             onToolCall?.('research', `Researching ${queries.length} queries`)
             try {
-              result = await runResearch(queries, this.anthropic, this.mcpManager, this.dataDir, (progress) => {
+              const researchClient = this.getOpenAIClient() || this.anthropic
+              result = await runResearch(queries, researchClient as any, this.mcpManager, this.dataDir, (progress) => {
                 // Send detailed per-agent progress to frontend
                 this.onResearchProgress?.(progress.map(p => ({
                   query: p.query,
@@ -1783,6 +2470,133 @@ export class Agent {
               console.error('[Agent] research error:', err.message)
             }
 
+          } else if (block.name === 'spawn_agents') {
+            // General-purpose parallel sub-agents
+            const input = block.input as { tasks: SubAgentTask[] }
+            const tasks = (input.tasks || []).slice(0, 5)
+            onToolCall?.('spawn_agents', `Running ${tasks.length} sub-agents`)
+            try {
+              const subClient = this.getOpenAIClient() || this.anthropic
+              // Build a tool executor that reuses the agent's own tool routing
+              const toolExecutor = async (name: string, inp: Record<string, unknown>): Promise<string> => {
+                // Route exa tools to MCP
+                if (name === 'exa') {
+                  return await this.mcpManager.callTool('exa', name, inp)
+                }
+                if (name === 'memory') {
+                  const action = inp.action as string
+                  const memMcp = MEMORY_MCP_MAP[action]
+                  if (!memMcp) return `Unknown memory action: ${action}`
+                  return await this.mcpManager.callTool('memory', memMcp, mapMemoryParams(action, inp))
+                }
+                if (name === 'get_current_time') {
+                  return new Date().toLocaleString('en-US', { timeZone: (await readSettings(this.dataDir)).timezone })
+                }
+                if (name === 'search_tools') {
+                  const { tools: allToolsList } = await this.mcpManager.getAllTools()
+                  const query = ((inp.query as string) || '').toLowerCase()
+                  const matched = allToolsList.filter(t =>
+                    t.name.toLowerCase().includes(query) ||
+                    (t.description || '').toLowerCase().includes(query)
+                  ).slice(0, 10)
+                  return matched.map(t => `${t.name}: ${t.description || ''}`).join('\n') || 'No tools found.'
+                }
+                if (name === 'create_document') {
+                  const settings = await readSettings(this.dataDir)
+                  const fname = ((inp.filename as string) || 'document.pdf').endsWith('.pdf')
+                    ? (inp.filename as string)
+                    : `${inp.filename as string}.pdf`
+                  const brand = (settings.brand_company || settings.brand_color || settings.brand_logo)
+                    ? { companyName: settings.brand_company || undefined, accentColor: settings.brand_color || undefined, logoBase64: settings.brand_logo || undefined }
+                    : undefined
+                  let buf: Buffer
+                  if (inp.template && inp.data) {
+                    const { renderTemplatedDocument } = await import('./document-renderer.js')
+                    const templateData = { ...(inp.data as any), template: inp.template as string }
+                    this.onBroadcast?.({ type: 'document_building', template: inp.template, data: inp.data })
+                    buf = await renderTemplatedDocument(templateData as any, brand)
+                  } else {
+                    const { renderMarkdownToPdf } = await import('./document-renderer.js')
+                    const style = (inp.style as string) || 'professional'
+                    buf = await renderMarkdownToPdf(inp.markdown as string, style as any, fname.replace('.pdf', ''), brand, inp.layout as any)
+                  }
+                  const entry = await ingestFile(this.dataDir, fname, buf, 'application/pdf')
+                  if (inp.template && inp.data) {
+                    await updateDocumentMeta(this.dataDir, entry.id, {
+                      template: inp.template as string,
+                      templateData: inp.data,
+                      lastRenderedAt: new Date().toISOString()
+                    })
+                  }
+                  this.onBroadcast?.({ type: 'document_ready', fileId: entry.id, filename: entry.filename })
+                  return `Document created: ${entry.filename} (${buf.length} bytes). File ID: ${entry.id}`
+                }
+                if (name === 'update_document') {
+                  const fileId = inp.file_id as string
+                  const dataPatch = inp.data_patch as any
+                  const meta = await getDocumentMeta(this.dataDir, fileId)
+                  if (!meta) {
+                    return 'Error: This document has no stored template data. It may have been created before update support was added, or created in markdown mode. Please use create_document to recreate it.'
+                  }
+                  // Deep merge: arrays replaced, objects shallow-merged
+                  const merged = { ...meta.templateData }
+                  for (const [key, value] of Object.entries(dataPatch)) {
+                    if (Array.isArray(value)) {
+                      merged[key] = value
+                    } else if (value && typeof value === 'object' && !Array.isArray(value)) {
+                      merged[key] = { ...(merged[key] || {}), ...value }
+                    } else {
+                      merged[key] = value
+                    }
+                  }
+                  const subSettings = await readSettings(this.dataDir)
+                  const brand = (subSettings.brand_company || subSettings.brand_color || subSettings.brand_logo)
+                    ? { companyName: subSettings.brand_company || undefined, accentColor: subSettings.brand_color || undefined, logoBase64: subSettings.brand_logo || undefined }
+                    : undefined
+                  const { renderTemplatedDocument } = await import('./document-renderer.js')
+                  const buf = await renderTemplatedDocument({ ...merged, template: meta.template }, brand)
+                  // Overwrite existing file in place (same ID, same path)
+                  await updateFileContent(this.dataDir, fileId, Buffer.from(buf))
+                  await updateDocumentMeta(this.dataDir, fileId, {
+                    template: meta.template,
+                    templateData: merged,
+                    lastRenderedAt: new Date().toISOString()
+                  })
+                  const files = await listFiles(this.dataDir)
+                  const updatedFile = files.find(f => f.id === fileId)
+                  const filename = updatedFile?.filename || 'Document'
+                  return `Updated document "${filename}" (${Math.round(buf.length / 1024)}KB). File ID: ${fileId}`
+                }
+                // Files, schedule, skills — route to the main handler
+                if (name === 'files' || name === 'schedule' || name === 'skills') {
+                  // These are complex handlers — for now return a simple read
+                  return `Tool ${name} not available in sub-agents yet.`
+                }
+                return `Unknown tool: ${name}`
+              }
+
+              result = await runSubAgents(
+                tasks,
+                subClient as any,
+                INTERNAL_TOOLS,
+                this.mcpManager,
+                toolExecutor,
+                this.dataDir,
+                (progress) => {
+                  const done = progress.filter(p => p.status === 'done').length
+                  const running = progress.filter(p => p.status === 'running').length
+                  const parts: string[] = []
+                  if (running > 0) parts.push(`${running} running`)
+                  if (done > 0) parts.push(`${done} done`)
+                  onToolCall?.('spawn_agents', `Sub-agents: ${parts.join(', ')}`)
+                }
+              )
+              console.log(`[Agent] spawn_agents (${tasks.length} tasks) → ${result.length} chars`)
+            } catch (err: any) {
+              result = `Sub-agent error: ${err.message}`
+              console.error('[Agent] spawn_agents error:', err.message)
+            }
+
           } else if (serverMap.get(block.name) === 'exa') {
             // Exa tools — route directly to MCP server
             try {
@@ -1795,6 +2609,28 @@ export class Agent {
 
           } else if (block.name === 'call_external_tool') {
             const { tool_name: extToolName, parameters: extParams } = block.input as { tool_name: string; parameters: Record<string, unknown> }
+
+            // Background guardrail: auto-queue write actions from heartbeats/triggers.
+            // In 'autonomous' mode, background tasks can act freely. All other modes auto-queue.
+            if (isBackground && settings.autonomy !== 'autonomous' && HEARTBEAT_BLOCKED_PATTERNS.some(p => extToolName.toUpperCase().includes(p))) {
+              // Auto-queue the action instead of just blocking — user sees it in their approval queue
+              const toolLabel = humanizeToolName(extToolName)
+              const paramSummary = Object.entries(extParams).map(([k, v]) => `${k}: ${typeof v === 'string' ? v.slice(0, 200) : JSON.stringify(v).slice(0, 200)}`).join('\n')
+              this.queue.add({
+                type: extToolName.toUpperCase().includes('SEND_EMAIL') || extToolName.toUpperCase().includes('SEND_DRAFT') ? 'message'
+                  : extToolName.toUpperCase().includes('EVENT') ? 'task'
+                  : 'other',
+                title: toolLabel,
+                description: `Background task wants to call ${extToolName}`,
+                detail: paramSummary,
+                notes: 'Auto-queued: background tasks cannot execute write actions directly.',
+                action: `${extToolName}`,
+                metadata: extParams as any,
+              })
+              result = `Auto-queued for user approval: "${toolLabel}". Do not retry — the user will review it.`
+              console.log(`[Agent] Heartbeat auto-queued write tool: ${extToolName}`)
+            } else {
+
             const serverName = serverMap.get(extToolName)
             if (!serverName) {
               result = `Tool "${extToolName}" not found. Call search_tools first to discover available tools.`
@@ -1877,12 +2713,17 @@ export class Agent {
                 }
               }
               {
+                // Inject full parameter schema so the agent knows exact params for retries
+                const toolDef = toolSchemaMap.get(extToolName)
+                const schemaNote = toolDef ? `\n\n[${extToolName} schema]${formatSchemaForResult(toolDef)}` : ''
+
                 const raw = await this.mcpManager.callTool(serverName, extToolName, toolInput)
-                const MAX_TOOL_RESULT = 4000
-                result = raw.length > MAX_TOOL_RESULT
-                  ? raw.slice(0, MAX_TOOL_RESULT) + `\n\n[Truncated: ${raw.length - MAX_TOOL_RESULT} chars omitted from history to save context]`
+                const MAX_TOOL_RESULT = 16000
+                const trimmed = raw.length > MAX_TOOL_RESULT
+                  ? raw.slice(0, MAX_TOOL_RESULT) + `\n\n[Truncated: ${raw.length - MAX_TOOL_RESULT} chars omitted]`
                   : raw
-                logToolCall(this.dataDir, serverName, extToolName, toolInput, result)
+                result = trimmed + schemaNote
+                logToolCall(this.dataDir, serverName, extToolName, toolInput, trimmed)
                 // Track Composio action usage
                 recordUsage(this.dataDir, {
                   category: 'composio', model: serverName, actions: 1,
@@ -1926,6 +2767,7 @@ export class Agent {
                 }
               }
             }
+            } // close heartbeat guard
 
           } else if (block.name === 'send_team_message') {
             const input = block.input as { message: string; agent_context?: string; to?: string }
@@ -2095,7 +2937,8 @@ export class Agent {
         : ''
       const hasEvents = (events && events.length > 0) || this.missedEvents.length > 0
       if (this.missedEvents.length > 0) this.missedEvents = []
-      return `[Heartbeat — ${time}]${eventsSection}${missedSection}\n\nRead heartbeat.md for instructions.${hasEvents ? ' Check contacts.md for known people.' : ''} ${hasEvents ? 'For actionable items from known contacts, call queue_approval (do NOT just say you queued — actually call the tool). Then summarize.' : 'If nothing needs attention, reply "All clear."'}`
+      const imsgNote = this.imessageConnected ? '\n\nCheck iMessages: call IMESSAGE_LIST_CONVERSATIONS to see recent messages. If there are new messages from known contacts, read them and handle accordingly.' : ''
+      return `[Heartbeat — ${time}]${eventsSection}${missedSection}\n\nRead heartbeat.md for instructions.${hasEvents ? ' Check contacts.md for known people.' : ''}${imsgNote} ${hasEvents ? 'For actionable items from known contacts, call queue_approval (do NOT just say you queued — actually call the tool). Then summarize.' : 'If nothing needs attention, reply "All clear."'}`
     }
     if (trigger.source === 'todo_due' || trigger.source === 'task_due') {
       const payload = trigger.payload as any
@@ -2104,6 +2947,15 @@ export class Agent {
       const context = payload?.context ?? payload?.instruction ?? ''
       const contextSection = context ? `\n\nContext notes:\n${context}` : ''
       return `[Scheduled task — ${time}] A task is now due. Execute it.\n\nTask: ${task}\nTask ID: ${todoId}${contextSection}\n\n1. Read agent.md and any relevant memory for additional context.\n2. Carry out the task using the correct tools.\n3. When done, mark it complete with the schedule tool (action: complete).\n4. Add a done item describing what you did.\n\nDo not do anything outside the scope of this task.`
+    }
+    if (trigger.source === 'meeting_brief') {
+      const p = trigger.payload as any
+      const title = p?.title ?? 'Unknown meeting'
+      const start = p?.start ?? ''
+      const minsUntil = p?.minutesUntil ?? 30
+      const location = p?.location ? `\nLocation: ${p.location}` : ''
+      const notes = p?.notes ? `\nNotes: ${p.notes}` : ''
+      return `[Meeting Brief — ${time}] You have a meeting in ${minsUntil} minutes. Prepare a briefing.\n\nMeeting: ${title}\nStarts: ${start}${location}${notes}\n\nInstructions:\n1. Search memory for any context about the people or topic in this meeting.\n2. Search Gmail for recent emails with the attendees.\n3. If the person/company is unfamiliar, do a quick Exa search.\n4. Present a concise briefing: who they are, recent interactions, anything relevant to discuss, and any open action items.\n\nKeep it brief and actionable.`
     }
     if (trigger.source === 'webhook') return `[Webhook — ${time}] Event received: ${JSON.stringify(trigger.payload)}. Search memory and handle it.`
     return `[Manual — ${time}] ${trigger.payload?.message ?? ''}`
@@ -2116,9 +2968,9 @@ export class Agent {
   private selectHistory(_currentQuery: string, historySource?: Anthropic.MessageParam[]): Anthropic.MessageParam[] {
     const history = historySource ?? this.conversationHistory
 
-    // Find the last 5 real user messages (text, not just tool_results)
+    // Find the last 10 real user messages (text, not just tool_results)
     const realUserIndices: number[] = []
-    for (let i = history.length - 1; i >= 0 && realUserIndices.length < 5; i--) {
+    for (let i = history.length - 1; i >= 0 && realUserIndices.length < 10; i--) {
       const msg = history[i]
       if (msg.role !== 'user') continue
       const isRealUser = typeof msg.content === 'string' ||
@@ -2192,8 +3044,9 @@ export class Agent {
   private compactToolResults(messages: Anthropic.MessageParam[]): Anthropic.MessageParam[] {
     if (messages.length <= 4) return messages
 
-    // Find the last TWO user messages that contain plain text (not just tool_results).
-    // Keep 2-turn window of full-fidelity tool results.
+    // Find the last TEN user messages that contain plain text (not just tool_results).
+    // Keep 10-turn window of full-fidelity tool results so the agent retains data
+    // across follow-up questions without re-calling tools.
     let userTurnCount = 0
     let compactBefore = 0
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -2203,7 +3056,7 @@ export class Agent {
           (Array.isArray(msg.content) && (msg.content as any[]).some(b => b.type === 'text'))
         if (isRealUserMsg) {
           userTurnCount++
-          if (userTurnCount >= 2) { compactBefore = i; break }
+          if (userTurnCount >= 10) { compactBefore = i; break }
         }
       }
     }
@@ -2233,27 +3086,31 @@ export class Agent {
       if (idx >= compactBefore) { result.push(msg); continue }
 
       if (msg.role === 'assistant' && Array.isArray(msg.content)) {
-        const textBlocks = (msg.content as any[]).filter(b => b.type !== 'tool_use')
-        if (textBlocks.length > 0) {
-          const stripped = (msg.content as any[]).length - textBlocks.length
-          if (stripped > 0) { droppedBlocks += stripped; savedChars += JSON.stringify(msg.content).length - JSON.stringify(textBlocks).length }
-          result.push({ ...msg, content: textBlocks })
-        }
-        // If assistant message was ONLY tool_use blocks (no text), drop it entirely
+        // Keep tool_use blocks but strip their input to save tokens (IDs must stay for matching tool_results)
+        const compacted = (msg.content as any[]).map(b => {
+          if (b.type !== 'tool_use') return b
+          droppedBlocks++
+          const inputStr = JSON.stringify(b.input || {})
+          savedChars += inputStr.length
+          return { ...b, input: { _compacted: true } }
+        })
+        result.push({ ...msg, content: compacted })
         continue
       }
 
       if (msg.role === 'user' && Array.isArray(msg.content)) {
-        const kept = (msg.content as any[]).filter(b => {
-          if (b.type !== 'tool_result') return true
-          if (skillToolUseIds.has(b.tool_use_id)) return true
+        const kept = (msg.content as any[]).map(b => {
+          if (b.type !== 'tool_result') return b
+          if (skillToolUseIds.has(b.tool_use_id)) return b
+          // Keep a short summary instead of dropping entirely — so the agent
+          // knows what data it already fetched without re-calling tools
+          const content = typeof b.content === 'string' ? b.content : ''
+          if (content.length <= 200) return b
           droppedBlocks++
-          savedChars += (b.content?.length || 0)
-          return false
+          savedChars += content.length - 200
+          return { ...b, content: content.slice(0, 200) + '\n[Older result trimmed — re-call tool if full data needed]' }
         })
-        if (kept.length > 0) {
-          result.push({ ...msg, content: kept })
-        }
+        result.push({ ...msg, content: kept })
         continue
       }
 
@@ -2270,36 +3127,100 @@ export class Agent {
   /**
    * Remove orphaned tool_use/tool_result blocks to prevent API 400 errors.
    *
-   * Two cases:
-   * 1. Orphaned tool_result: no matching tool_use in the window (window sliced through a pair)
-   * 2. Orphaned tool_use: assistant message with tool_use blocks but no tool_result in the next
-   *    message — happens when history was saved mid-loop due to a crash or concurrent write
+   * Handles:
+   * 1. Orphaned tool_result: no matching tool_use in the window
+   * 2. Orphaned tool_use: no matching tool_result in the window
+   * 3. Duplicate IDs: Kimi reuses tool_call IDs like "update_document:N" across
+   *    different API calls. Uses cardinality counting (not just Set membership)
+   *    to ensure each tool_use has exactly one matching tool_result.
    */
   private sanitizeHistory(messages: typeof this.conversationHistory): typeof this.conversationHistory {
     let result = [...messages]
+
+    // ── Deduplicate tool_call IDs (Kimi K2.5 reuses IDs across responses) ──
+    // Collect all (tool_use id, msgIndex, blockIndex) and (tool_result tool_use_id, msgIndex, blockIndex) in order
+    const useOccurrences = new Map<string, { msgIdx: number; blockIdx: number }[]>()
+    const resultOccurrences = new Map<string, { msgIdx: number; blockIdx: number }[]>()
+    for (let mi = 0; mi < result.length; mi++) {
+      const msg = result[mi]
+      if (!Array.isArray(msg.content)) continue
+      for (let bi = 0; bi < (msg.content as any[]).length; bi++) {
+        const block = (msg.content as any[])[bi]
+        if (block.type === 'tool_use') {
+          if (!useOccurrences.has(block.id)) useOccurrences.set(block.id, [])
+          useOccurrences.get(block.id)!.push({ msgIdx: mi, blockIdx: bi })
+        }
+        if (block.type === 'tool_result') {
+          if (!resultOccurrences.has(block.tool_use_id)) resultOccurrences.set(block.tool_use_id, [])
+          resultOccurrences.get(block.tool_use_id)!.push({ msgIdx: mi, blockIdx: bi })
+        }
+      }
+    }
+    // Rename duplicate IDs (keep first occurrence, rename 2nd+ with unique suffix)
+    for (const [id, uses] of useOccurrences) {
+      if (uses.length <= 1) continue
+      const results = resultOccurrences.get(id) || []
+      for (let k = 1; k < uses.length; k++) {
+        const newId = `${id}_dedup_${Math.random().toString(36).slice(2, 8)}`
+        const use = uses[k];
+        (result[use.msgIdx].content as any[])[use.blockIdx] = {
+          ...(result[use.msgIdx].content as any[])[use.blockIdx],
+          id: newId,
+        }
+        // Rename the matching tool_result (kth result for kth use)
+        if (k < results.length) {
+          const res = results[k];
+          (result[res.msgIdx].content as any[])[res.blockIdx] = {
+            ...(result[res.msgIdx].content as any[])[res.blockIdx],
+            tool_use_id: newId,
+          }
+        }
+        console.log(`[Agent] Deduplicated tool_call ID: ${id} → ${newId}`)
+      }
+    }
 
     // Iterate until stable — each pass can orphan new blocks
     let changed = true
     while (changed) {
       changed = false
 
-      // Collect tool_use and tool_result IDs in current window
-      const toolUseIds = new Set<string>()
-      const toolResultIds = new Set<string>()
+      // Count tool_use and tool_result occurrences per ID (cardinality-aware)
+      const toolUseCounts = new Map<string, number>()
+      const toolResultCounts = new Map<string, number>()
       for (const msg of result) {
         if (!Array.isArray(msg.content)) continue
         for (const block of msg.content as any[]) {
-          if (block.type === 'tool_use') toolUseIds.add(block.id)
-          if (block.type === 'tool_result') toolResultIds.add(block.tool_use_id)
+          if (block.type === 'tool_use') toolUseCounts.set(block.id, (toolUseCounts.get(block.id) || 0) + 1)
+          if (block.type === 'tool_result') toolResultCounts.set(block.tool_use_id, (toolResultCounts.get(block.tool_use_id) || 0) + 1)
         }
       }
 
-      // Filter orphaned blocks
+      // Track how many of each ID we've allowed through (for duplicate ID handling)
+      const useAllowed = new Map<string, number>()
+      const resultAllowed = new Map<string, number>()
+
+      // Filter orphaned and excess duplicate blocks
       const filtered = result.map(msg => {
         if (!Array.isArray(msg.content)) return msg
         const kept = (msg.content as any[]).filter(block => {
-          if (block.type === 'tool_result') return toolUseIds.has(block.tool_use_id)
-          if (block.type === 'tool_use') return toolResultIds.has(block.id)
+          if (block.type === 'tool_result') {
+            const id = block.tool_use_id
+            const useCount = toolUseCounts.get(id) || 0
+            if (useCount === 0) return false  // orphaned result
+            const allowed = resultAllowed.get(id) || 0
+            if (allowed >= useCount) return false  // excess duplicate
+            resultAllowed.set(id, allowed + 1)
+            return true
+          }
+          if (block.type === 'tool_use') {
+            const id = block.id
+            const resultCount = toolResultCounts.get(id) || 0
+            if (resultCount === 0) return false  // orphaned use
+            const allowed = useAllowed.get(id) || 0
+            if (allowed >= resultCount) return false  // excess duplicate
+            useAllowed.set(id, allowed + 1)
+            return true
+          }
           return true
         })
         if (kept.length === 0) return null

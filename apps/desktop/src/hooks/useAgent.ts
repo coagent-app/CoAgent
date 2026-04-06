@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { open } from '@tauri-apps/plugin-shell'
+import { invoke } from '@tauri-apps/api/core'
 import type { ApprovalItem, DoneItem, AgentMessage, WSServerMessage, WSClientMessage, Integration, AgentSettings, FileEntry, AuthStatus, AuthMethod, RelayUsage, UsageSummary, CalendarEntry, AdminUser, GoogleCalendarInfo, WSServerMessage as WSSMsg } from '@coagent/shared'
 
 type RelayCredentials = Extract<WSSMsg, { type: 'relay_credentials' }>
@@ -7,6 +8,22 @@ type RelayCredentials = Extract<WSSMsg, { type: 'relay_credentials' }>
 const WS_URL = 'ws://localhost:7830'
 const RECONNECT_BASE = 250
 const RECONNECT_MAX = 10000
+
+// ── LocalStorage cache for instant UI on restart ─────────────────────────────
+const CACHE_KEY = 'coagent_state_cache'
+function loadCache(): Record<string, any> {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY)
+    return raw ? JSON.parse(raw) : {}
+  } catch { return {} }
+}
+function saveCache(patch: Record<string, any>) {
+  try {
+    const current = loadCache()
+    localStorage.setItem(CACHE_KEY, JSON.stringify({ ...current, ...patch }))
+  } catch {}
+}
+const _cached = loadCache()
 
 export function useAgent() {
   const wsRef = useRef<WebSocket | null>(null)
@@ -16,13 +33,13 @@ export function useAgent() {
   const recentIngestedFiles = useRef<{ id: string; filename: string }[]>([])
   const [queue, setQueue] = useState<ApprovalItem[]>([])
   const [done, setDone] = useState<DoneItem[]>([])
-  const [messages, setMessages] = useState<AgentMessage[]>([])
+  const [messages, setMessages] = useState<AgentMessage[]>(_cached.messages ?? [])
   const [streamingText, setStreamingText] = useState<string | null>(null)
   const [thinking, setThinking] = useState(false)
   const [processing, setProcessing] = useState(false)
   const [connected, setConnected] = useState(false)
-  const [integrations, setIntegrations] = useState<Integration[]>([])
-  const [settings, setSettings] = useState<AgentSettings | null>(null)
+  const [integrations, setIntegrations] = useState<Integration[]>(_cached.integrations ?? [])
+  const [settings, setSettings] = useState<AgentSettings | null>(_cached.settings ?? null)
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null)
   const [files, setFiles] = useState<FileEntry[]>([])
   const [folders, setFolders] = useState<string[]>([])
@@ -31,6 +48,8 @@ export function useAgent() {
   const [toolLabel, setToolLabel] = useState<string | null>(null)
   const [researchAgents, setResearchAgents] = useState<{ query: string; status: string; detail?: string }[]>([])
   const [lastHeartbeat, setLastHeartbeat] = useState<{ time: Date; status: string; nextAt?: Date } | null>(null)
+  const [heartbeatLog, setHeartbeatLog] = useState<{ time: Date; status: string }[]>([])
+  const [statusLine, setStatusLine] = useState<string | null>(null)
   const [skills, setSkills] = useState<{ name: string; description: string; instructions: string }[]>([])
   const [pendingFields, setPendingFields] = useState<{ slug: string; fields: { name: string; displayName: string; description: string }[] } | null>(null)
   const [relayActive, setRelayActive] = useState<boolean>(false)
@@ -51,6 +70,7 @@ export function useAgent() {
   const [teamStatus, setTeamStatus] = useState<{ status: 'processing' | 'idle'; from?: string } | null>(null)
   const [triggerPrompt, setTriggerPrompt] = useState<Integration | null>(null)
   const [googleCalendarStatus, setGoogleCalendarStatus] = useState<{ connected: boolean; calendars: GoogleCalendarInfo[]; lastSync: string | null }>({ connected: false, calendars: [], lastSync: null })
+  const [editingDocument, setEditingDocument] = useState<{ fileId: string; template: string; data: any } | null>(null)
   const prevConnectedSlugs = useRef<Set<string> | null>(null)
 
   useEffect(() => {
@@ -66,17 +86,27 @@ export function useAgent() {
       if (unmounted) return
       const socket = new WebSocket(WS_URL)
 
-      socket.onopen = () => {
-        setConnected(true)
-        reconnectDelay.current = RECONNECT_BASE
-        socket.send(JSON.stringify({ type: 'get_team_info' }))
-        socket.send(JSON.stringify({ type: 'team_history', limit: 50 }))
-        socket.send(JSON.stringify({ type: 'get_google_calendar_status' }))
+      let authConfirmed = false
+
+      socket.onopen = async () => {
+        try {
+          const nonce = await invoke<string>('get_ws_nonce')
+          socket.send(JSON.stringify({ type: 'auth', nonce }))
+        } catch (err) {
+          console.error('[WS] Failed to get nonce:', err)
+          socket.close()
+          return
+        }
+        // Don't send anything else yet — wait for server to confirm auth
+        // by sending us the first message (sendFullState triggers on successful auth)
       }
 
       socket.onclose = () => {
         setConnected(false)
         if (wsRef.current === socket) wsRef.current = null
+        // Clear any stale OAuth poll intervals from previous connection
+        pollIntervals.current.forEach(clearInterval)
+        pollIntervals.current = []
         if (!unmounted) {
           reconnectTimer.current = setTimeout(() => {
             reconnectDelay.current = Math.min(reconnectDelay.current * 1.5, RECONNECT_MAX)
@@ -86,7 +116,22 @@ export function useAgent() {
       }
 
       socket.onmessage = (event) => {
-        const msg: WSServerMessage = JSON.parse(event.data)
+        let msg: WSServerMessage
+        try {
+          msg = JSON.parse(event.data)
+        } catch {
+          console.error('[WS] Failed to parse message:', event.data?.slice?.(0, 100))
+          return
+        }
+        // First server message after auth confirms authentication succeeded
+        if (!authConfirmed) {
+          authConfirmed = true
+          setConnected(true)
+          reconnectDelay.current = RECONNECT_BASE
+          socket.send(JSON.stringify({ type: 'get_team_info' }))
+          socket.send(JSON.stringify({ type: 'team_history', limit: 50 }))
+          socket.send(JSON.stringify({ type: 'get_google_calendar_status' }))
+        }
         if (msg.type === 'queue_update') setQueue(msg.items)
         if (msg.type === 'done_update') setDone(msg.items)
         if (msg.type === 'agent_thinking') {
@@ -155,7 +200,16 @@ export function useAgent() {
             import('@/lib/voice').then(v => v.showVoiceSummary(''))
           }
         }
-        if (msg.type === 'chat_history') setMessages(msg.messages)
+        if (msg.type === 'agent_stopped') {
+          setThinking(false)
+          setToolLabel(null)
+          setProcessing(false)
+          if ((window as any).__voiceActive) {
+            ;(window as any).__voiceActive = false
+            import('@/lib/voice').then(v => { v.cancelTts(); v.showVoiceSummary('') })
+          }
+        }
+        if (msg.type === 'chat_history') { setMessages(msg.messages); saveCache({ messages: msg.messages.slice(-50) }) }
         if (msg.type === 'integrations_update') {
           // Detect newly connected integration with triggers → show prompt
           // Skip first update (initial load) — only detect transitions during this session
@@ -170,11 +224,11 @@ export function useAgent() {
             }
           }
           prevConnectedSlugs.current = connectedNow
-          setIntegrations(msg.integrations)
+          setIntegrations(msg.integrations); saveCache({ integrations: msg.integrations })
           const wa = msg.integrations.find((i: any) => i.slug === 'coagent:whatsapp')
           if (wa?.connected) setWhatsappQr(null)
         }
-        if (msg.type === 'settings_update') setSettings(msg.settings)
+        if (msg.type === 'settings_update') { setSettings(msg.settings); saveCache({ settings: msg.settings }) }
         if (msg.type === 'auth_status') setAuthStatus(msg.status)
         if (msg.type === 'files_update') setFiles(msg.files)
         if (msg.type === 'folders_update') setFolders(msg.folders)
@@ -192,8 +246,10 @@ export function useAgent() {
             setLastHeartbeat(prev => ({ time: prev?.time ?? new Date(), status: prev?.status ?? 'done', nextAt }))
           } else {
             setLastHeartbeat({ time: new Date(), status: msg.status, nextAt })
+            setHeartbeatLog(prev => [...prev.slice(-19), { time: new Date(), status: msg.status }])
           }
         }
+        if (msg.type === 'status_line') setStatusLine(msg.message)
         if (msg.type === 'skills_update') setSkills(msg.skills)
         if (msg.type === 'voice_transcribed') {
           // Show the user's voice input in chat (dedupe in case of multiple connections)
@@ -213,10 +269,10 @@ export function useAgent() {
           import('@/lib/voice').then(v => v.playTtsAudio(msg.data))
         }
         if (msg.type === 'voice_tts_chunk') {
-          import('@/lib/voice').then(v => v.handleTtsChunk(msg.data, msg.seq))
+          import('@/lib/voice').then(v => v.handleTtsChunk(msg.data, msg.seq, (msg as any).format))
         }
         if (msg.type === 'voice_tts_done') {
-          import('@/lib/voice').then(v => v.handleTtsDone())
+          import('@/lib/voice').then(v => v.handleTtsDone((msg as any).format))
         }
         if (msg.type === 'voice_tts_cancel') {
           import('@/lib/voice').then(v => v.cancelTts())
@@ -234,8 +290,12 @@ export function useAgent() {
         if ((msg as any).type === 'whatsapp_qr') {
           setWhatsappQr((msg as any).dataUrl)
         }
-        if (msg.type === 'relay_credentials') {
-          setRelayCredentials(msg)
+        if ((msg as any).type === 'relay_credentials_ready') {
+          // Fetch credentials via Tauri IPC instead of receiving over WS
+          invoke<string>('get_relay_credentials').then(json => {
+            const creds = JSON.parse(json)
+            setRelayCredentials({ type: 'relay_credentials', ...creds })
+          }).catch(err => console.error('[Relay] Failed to get credentials:', err))
         }
         if (msg.type === 'admin_token_created') {
           setAdminNewToken({ token: msg.token, userId: msg.userId })
@@ -255,6 +315,18 @@ export function useAgent() {
         if ((msg as any).type === 'team_status') {
           const s = msg as any
           setTeamStatus(s.status === 'idle' ? null : { status: s.status, from: s.from })
+        }
+        if ((msg as any).type === 'document_updated') {
+          // Close the editor panel and refresh will happen via files_update
+          setEditingDocument(null)
+        }
+        if ((msg as any).type === 'document_building') {
+          const { template, data } = msg as any
+          setEditingDocument({ fileId: '__building__', template, data })
+        }
+        if ((msg as any).type === 'document_ready') {
+          const { fileId } = msg as any
+          setEditingDocument(prev => prev ? { ...prev, fileId } : null)
         }
         if (msg.type === 'error') { setError(msg.message); setTimeout(() => setError(null), 5000) }
         if (msg.type === 'integration_needs_fields') {
@@ -288,6 +360,9 @@ export function useAgent() {
       wsRef.current?.close()
     }
   }, [])
+
+  // ── Persist messages to localStorage for instant load on restart ─────────────
+  useEffect(() => { saveCache({ messages: messages.slice(-50) }) }, [messages])
 
   // ── Voice: allow App.tsx to send WS messages via custom event ───────────────
   useEffect(() => {
@@ -332,7 +407,13 @@ export function useAgent() {
   }, [])
 
   const send = useCallback((msg: WSClientMessage) => {
-    wsRef.current?.send(JSON.stringify(msg))
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      setError('Connection lost — reconnecting…')
+      setProcessing(false)
+      setTimeout(() => setError(null), 3000)
+      return
+    }
+    wsRef.current.send(JSON.stringify(msg))
   }, [])
 
   const chat = useCallback((message: string) => {
@@ -369,12 +450,19 @@ export function useAgent() {
     setStreamingText(null)
     setToolLabel(null)
     setProcessing(false)
+    // Always reset voice pill state
+    if ((window as any).__voiceActive) {
+      ;(window as any).__voiceActive = false
+      import('@/lib/voice').then(v => { v.cancelTts(); v.showVoiceSummary('') })
+    }
   }, [send])
 
   const approve = useCallback((id: string) => send({ type: 'approve', id }), [send])
   const reject = useCallback((id: string) => send({ type: 'reject', id }), [send])
   const editQueueItem = useCallback((id: string, detail: string) => send({ type: 'edit_queue_item', id, detail }), [send])
-  const connectIntegration = useCallback((slug: string, params?: Record<string, string>) => send({ type: 'integration_connect', slug, params }), [send])
+  const connectIntegration = useCallback((slug: string, params?: Record<string, string>) => {
+    send({ type: 'integration_connect', slug, params })
+  }, [send])
   const disconnectIntegration = useCallback((slug: string) => send({ type: 'integration_disconnect', slug }), [send])
 
   const updateSkill = useCallback((name: string, description: string, instructions: string) => {
@@ -502,10 +590,16 @@ export function useAgent() {
     send({ type: 'toggle_trigger', triggerSlug, appSlug, enabled })
   }, [send])
 
-  const getRelayCredentials = useCallback(() => {
+  const getRelayCredentials = useCallback(async () => {
     setRelayCredentials(null)
-    send({ type: 'get_relay_credentials' })
-  }, [send])
+    try {
+      const json = await invoke<string>('get_relay_credentials')
+      const creds = JSON.parse(json)
+      setRelayCredentials({ type: 'relay_credentials', ...creds })
+    } catch (err) {
+      console.error('[Relay] Failed to get credentials via IPC:', err)
+    }
+  }, [])
 
   const adminCreateToken = useCallback((label: string) => {
     send({ type: 'admin_create_token', label })
@@ -549,5 +643,28 @@ export function useAgent() {
     send({ type: 'team_history', limit } as any)
   }, [send])
 
-  return { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, pendingFields, setPendingFields, setModel, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, getTeamInfo, getTeamHistory, triggerPrompt, setTriggerPrompt }
+  const openDocumentEditor = useCallback((fileId: string) => {
+    const file = files.find(f => f.id === fileId)
+    if (file?.documentMeta) {
+      setEditingDocument({
+        fileId,
+        template: file.documentMeta.template,
+        data: file.documentMeta.templateData
+      })
+    }
+  }, [files])
+
+  const saveDocumentEdits = useCallback((fileId: string, data: any) => {
+    send({ type: 'update_document_fields', fileId, data } as any)
+  }, [send])
+
+  const closeDocumentEditor = useCallback(() => {
+    setEditingDocument(null)
+  }, [])
+
+  const triggerHeartbeat = useCallback(() => {
+    send({ type: 'trigger_heartbeat' })
+  }, [send])
+
+  return { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, pendingFields, setPendingFields, setModel, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, getTeamInfo, getTeamHistory, triggerPrompt, setTriggerPrompt, editingDocument, openDocumentEditor, saveDocumentEdits, closeDocumentEditor }
 }

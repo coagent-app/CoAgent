@@ -8,15 +8,10 @@ export interface RelayCredentials {
 
 const KEY = 'coagent_relay_credentials'
 
-// HARDCODED FOR TESTING — remove before production
-const DEV_CREDENTIALS: RelayCredentials = {
-  relayUrl: 'https://coagent-relay.brettponters.workers.dev',
-  token: 'cc180ec91d0573143bd01a83cc328a204fb016ea6a41d9665fa6a9fd3d689644',
-  userId: 'default',
-}
-
 export async function getCredentials(): Promise<RelayCredentials | null> {
-  return DEV_CREDENTIALS
+  const raw = await SecureStore.getItemAsync(KEY)
+  if (!raw) return null
+  try { return JSON.parse(raw) } catch { return null }
 }
 
 export async function saveCredentials(creds: RelayCredentials): Promise<void> {

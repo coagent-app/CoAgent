@@ -1,25 +1,43 @@
-#!/usr/bin/env bun
-import { Server } from '@modelcontextprotocol/sdk/server/index.js'
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from '@modelcontextprotocol/sdk/types.js'
-import { Database } from 'bun:sqlite'
+/**
+ * Local Contacts tool handler.
+ *
+ * Runs in-process inside coagent-server (a direct child of the Tauri app),
+ * which inherits Full Disk Access from the signed app bundle. We avoid
+ * spawning a sidecar subprocess because macOS TCC does NOT propagate FDA to
+ * grandchild processes.
+ *
+ * macOS stores contacts in per-source databases under
+ * ~/Library/Application Support/AddressBook/Sources/<UUID>/AddressBook-v22.abcddb
+ * (iCloud, Exchange, etc.). The root-level DB typically only contains the
+ * local "On My Mac" account which is nearly empty when iCloud sync is active.
+ * We query all source databases and merge results.
+ *
+ * bun:sqlite is available at runtime in the compiled Bun binary but is not
+ * a Node.js / TypeScript module, so we require() it dynamically to keep tsc
+ * happy while still getting the real implementation at runtime.
+ */
+
 import { readdirSync, statSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
+import Anthropic from '@anthropic-ai/sdk'
+
+// Lazy-load bun:sqlite — only available in the compiled Bun sidecar, not Node dev mode
+let _Database: any = null
+function getDatabase(): any {
+  if (!_Database) _Database = require('bun:sqlite').Database
+  return _Database
+}
 
 /**
  * Find all AddressBook-v22.abcddb files across all sources.
- * macOS stores contacts in per-source databases under
- * ~/Library/Application Support/AddressBook/Sources/<UUID>/,
- * while the root-level DB typically only contains the local "On My Mac" account.
+ * Prioritizes Sources/ subdirectories (iCloud, Exchange) over the root DB.
  */
 function findAddressBookDbs(): string[] {
   const abDir = join(homedir(), 'Library', 'Application Support', 'AddressBook')
   const dbs: string[] = []
 
+  // Check Sources subdirectories first (iCloud, Exchange, etc.)
   const sourcesDir = join(abDir, 'Sources')
   try {
     for (const entry of readdirSync(sourcesDir)) {
@@ -30,6 +48,7 @@ function findAddressBookDbs(): string[] {
     }
   } catch { /* Sources dir may not exist */ }
 
+  // Also include root DB as fallback (may have local-only contacts)
   const rootDb = join(abDir, 'AddressBook-v22.abcddb')
   try {
     if (statSync(rootDb).isFile()) dbs.push(rootDb)
@@ -38,93 +57,29 @@ function findAddressBookDbs(): string[] {
   return dbs
 }
 
-function openAllDbs(): Database[] {
+/** Open all discoverable AddressBook databases (readonly). Caller must close them. */
+function openAllDbs(): any[] {
   return findAddressBookDbs().map(path => {
     try {
-      return new Database(path, { readonly: true })
+      return new (getDatabase())(path, { readonly: true })
     } catch {
-      return null as any
+      return null
     }
   }).filter(Boolean)
 }
 
-/** Core Data timestamp → ISO string (epoch = 2001-01-01) */
+/** Core Data timestamp -> ISO string (epoch = 2001-01-01) */
 function coreDataToISO(ts: number | null): string | null {
   if (!ts) return null
   return new Date((ts + 978307200) * 1000).toISOString()
 }
 
-/** Strip Apple's internal label wrapper: _$!<Home>!$_ → Home */
+/** Strip Apple's internal label wrapper: _$!<Home>!$_ -> Home */
 function cleanLabel(label: string | null): string {
   if (!label) return 'other'
   const m = label.match(/^_\$!<(.+?)>!\$_$/)
   return m ? m[1].toLowerCase() : label.toLowerCase()
 }
-
-process.stdout.on('error', (err: any) => {
-  if (err?.code === 'EPIPE') process.exit(0)
-})
-process.on('uncaughtException', (err: any) => {
-  if (err?.code === 'EPIPE' || err?.message?.includes('EPIPE')) process.exit(0)
-  console.error('[Contacts] Uncaught:', err)
-  process.exit(1)
-})
-
-const server = new Server(
-  { name: 'coagent-contacts', version: '0.0.1' },
-  { capabilities: { tools: {} } }
-)
-
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
-    {
-      name: 'CONTACTS_SEARCH',
-      description: 'Search contacts by name, email, phone number, or organization. Returns matching contacts with their details.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          query: {
-            type: 'string',
-            description: 'Search query — matches against name, email, phone, organization',
-          },
-          limit: {
-            type: 'number',
-            description: 'Maximum number of results (default 20)',
-          },
-        },
-        required: ['query'],
-      },
-    },
-    {
-      name: 'CONTACTS_GET',
-      description: 'Get full details for a specific contact by their ID (Z_PK). Includes all phone numbers, emails, addresses.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          id: {
-            type: 'number',
-            description: 'Contact ID (Z_PK from a search result)',
-          },
-        },
-        required: ['id'],
-      },
-    },
-    {
-      name: 'CONTACTS_LIST_RECENT',
-      description: 'List recently modified or added contacts.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          limit: {
-            type: 'number',
-            description: 'Maximum number of contacts to return (default 20)',
-          },
-        },
-        required: [],
-      },
-    },
-  ],
-}))
 
 interface ContactRow {
   Z_PK: number
@@ -150,28 +105,19 @@ interface AddressRow {
   ZLABEL: string | null
 }
 
-function formatContact(row: ContactRow, phones: PhoneRow[], emails: EmailRow[], addresses?: AddressRow[]) {
+function formatContact(row: ContactRow, phones: PhoneRow[], emails: EmailRow[], addresses?: AddressRow[]): Record<string, unknown> {
   const name = [row.ZFIRSTNAME, row.ZLASTNAME].filter(Boolean).join(' ') || row.ZORGANIZATION || 'Unknown'
-  const result: any = {
-    id: row.Z_PK,
-    name,
-  }
+  const result: Record<string, unknown> = { id: row.Z_PK, name }
   if (row.ZORGANIZATION) result.organization = row.ZORGANIZATION
   if (row.ZJOBTITLE) result.job_title = row.ZJOBTITLE
   if (row.ZDEPARTMENT) result.department = row.ZDEPARTMENT
   if (row.ZNICKNAME) result.nickname = row.ZNICKNAME
   if (row.ZBIRTHDAY) result.birthday = coreDataToISO(row.ZBIRTHDAY)
   if (phones.length > 0) {
-    result.phones = phones.map(p => ({
-      number: p.ZFULLNUMBER,
-      label: cleanLabel(p.ZLABEL),
-    }))
+    result.phones = phones.map(p => ({ number: p.ZFULLNUMBER, label: cleanLabel(p.ZLABEL) }))
   }
   if (emails.length > 0) {
-    result.emails = emails.map(e => ({
-      address: e.ZADDRESS,
-      label: cleanLabel(e.ZLABEL),
-    }))
+    result.emails = emails.map(e => ({ address: e.ZADDRESS, label: cleanLabel(e.ZLABEL) }))
   }
   if (addresses && addresses.length > 0) {
     result.addresses = addresses.map(a => ({
@@ -187,24 +133,67 @@ function formatContact(row: ContactRow, phones: PhoneRow[], emails: EmailRow[], 
   return result
 }
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params
+export const CONTACTS_TOOLS: Anthropic.Tool[] = [
+  {
+    name: 'CONTACTS_SEARCH',
+    description: 'Search contacts by name, email, phone number, or organization. Returns matching contacts with their details.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Search query — matches against name, email, phone, organization',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number of results (default 20)',
+        },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'CONTACTS_GET',
+    description: 'Get full details for a specific contact by their ID (Z_PK). Includes all phone numbers, emails, addresses.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: {
+          type: 'number',
+          description: 'Contact ID (Z_PK from a search result)',
+        },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'CONTACTS_LIST_RECENT',
+    description: 'List recently modified or added contacts.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        limit: {
+          type: 'number',
+          description: 'Maximum number of contacts to return (default 20)',
+        },
+      },
+      required: [],
+    },
+  },
+]
 
+export async function handleContactsTool(name: string, args: Record<string, unknown>): Promise<string> {
   try {
     if (name === 'CONTACTS_SEARCH') {
       const query = args?.query as string
       const limit = (args?.limit as number) ?? 20
       const allDbs = openAllDbs()
       if (allDbs.length === 0) {
-        return {
-          content: [{ type: 'text', text: 'No AddressBook databases found. Please grant Full Disk Access.' }],
-          isError: true,
-        }
+        return 'No AddressBook databases found. Please grant Full Disk Access to this application in System Settings > Privacy & Security > Full Disk Access.'
       }
-
       try {
         const like = `%${query}%`
-        const allContacts: any[] = []
+        const allContacts: Record<string, unknown>[] = []
 
         for (const db of allDbs) {
           const rows = db.query(`
@@ -234,6 +223,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }
 
+        // Deduplicate by name and limit
         const seen = new Set<string>()
         const deduped = allContacts.filter(c => {
           const key = (c.name as string).toLowerCase()
@@ -242,9 +232,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           return true
         }).slice(0, limit)
 
-        return {
-          content: [{ type: 'text', text: JSON.stringify(deduped, null, 2) }],
-        }
+        return JSON.stringify(deduped, null, 2)
       } finally {
         for (const db of allDbs) db.close()
       }
@@ -254,12 +242,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const id = args?.id as number
       const allDbs = openAllDbs()
       if (allDbs.length === 0) {
-        return {
-          content: [{ type: 'text', text: 'No AddressBook databases found. Please grant Full Disk Access.' }],
-          isError: true,
-        }
+        return 'No AddressBook databases found. Please grant Full Disk Access.'
       }
-
       try {
         for (const db of allDbs) {
           const row = db.query(`
@@ -279,16 +263,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               'SELECT ZSTREET, ZCITY, ZSTATE, ZZIPCODE, ZCOUNTRYNAME, ZLABEL FROM ZABCDPOSTALADDRESS WHERE ZOWNER = ?'
             ).all(id) as AddressRow[]
 
-            return {
-              content: [{ type: 'text', text: JSON.stringify(formatContact(row, phones, emails, addresses), null, 2) }],
-            }
+            return JSON.stringify(formatContact(row, phones, emails, addresses), null, 2)
           }
         }
 
-        return {
-          content: [{ type: 'text', text: `Contact with ID ${id} not found.` }],
-          isError: true,
-        }
+        return `Contact with ID ${id} not found.`
       } finally {
         for (const db of allDbs) db.close()
       }
@@ -298,14 +277,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const limit = (args?.limit as number) ?? 20
       const allDbs = openAllDbs()
       if (allDbs.length === 0) {
-        return {
-          content: [{ type: 'text', text: 'No AddressBook databases found. Please grant Full Disk Access.' }],
-          isError: true,
-        }
+        return 'No AddressBook databases found. Please grant Full Disk Access.'
       }
-
       try {
-        const allContacts: any[] = []
+        const allContacts: Record<string, unknown>[] = []
 
         for (const db of allDbs) {
           const rows = db.query(`
@@ -328,42 +303,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }
 
+        // Sort by modification date descending across all sources, then limit
         allContacts.sort((a, b) => {
           const aDate = a.modified as string || ''
           const bDate = b.modified as string || ''
           return bDate.localeCompare(aDate)
         })
 
-        return {
-          content: [{ type: 'text', text: JSON.stringify(allContacts.slice(0, limit), null, 2) }],
-        }
+        return JSON.stringify(allContacts.slice(0, limit), null, 2)
       } finally {
         for (const db of allDbs) db.close()
       }
     }
 
-    throw new Error(`Unknown tool: ${name}`)
+    throw new Error(`Unknown contacts tool: ${name}`)
   } catch (error: any) {
     if (error?.code === 'SQLITE_CANTOPEN' || error?.message?.includes('unable to open')) {
-      return {
-        content: [{
-          type: 'text',
-          text: 'Cannot open AddressBook database. Please grant Full Disk Access to this application in System Settings > Privacy & Security > Full Disk Access.',
-        }],
-        isError: true,
-      }
+      return 'Cannot open AddressBook database. Please grant Full Disk Access to this application in System Settings > Privacy & Security > Full Disk Access.'
     }
-
-    return {
-      content: [{ type: 'text', text: `Error: ${error?.message ?? String(error)}` }],
-      isError: true,
-    }
+    return `Error: ${error?.message ?? String(error)}`
   }
-})
-
-async function main() {
-  const transport = new StdioServerTransport()
-  await server.connect(transport)
 }
-
-main().catch(console.error)

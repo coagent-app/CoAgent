@@ -2,10 +2,15 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { mkdir } from 'fs/promises'
 import Anthropic from '@anthropic-ai/sdk'
+import OpenAI from 'openai'
 import { recordUsage } from './usage-tracker.js'
 import { getRelayConfig } from './auth.js'
+import { streamOpenAI } from './openai-provider.js'
 import { embed } from './tool-embeddings.js'
 import { connect, Table } from '@lancedb/lancedb'
+
+const KIMI_MODEL = 'kimi-k2.5'
+const MOONSHOT_BASE_URL = 'https://api.moonshot.cn/v1'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -241,9 +246,16 @@ export async function extractInsights(
   if (log.length === 0) return
 
   const relay = getRelayConfig()
-  const anthropic = relay
+  let openaiClient: OpenAI | null = null
+  if (relay) {
+    openaiClient = new OpenAI({ baseURL: `${relay.url.replace(/\/$/, '')}/v1`, apiKey: relay.token })
+  } else if (process.env.MOONSHOT_API_KEY) {
+    openaiClient = new OpenAI({ baseURL: MOONSHOT_BASE_URL, apiKey: process.env.MOONSHOT_API_KEY })
+  }
+  // Fallback to Anthropic if no Kimi client available
+  const anthropic = !openaiClient ? (relay
     ? new Anthropic({ baseURL: relay.url, apiKey: relay.token })
-    : new Anthropic()
+    : new Anthropic()) : null
 
   // Group logs by integration
   const byService = new Map<string, ToolLogEntry[]>()
@@ -274,22 +286,36 @@ Search memory for existing entries about the people and projects mentioned. Then
       : t
   )
 
-  // Agentic loop — Haiku calls memory tools, then outputs briefings
+  // Agentic loop — Kimi K2.5 calls memory tools, then outputs briefings
   const messages: Anthropic.MessageParam[] = [{ role: 'user', content: userMessage }]
   const MAX_TURNS = 15
+  const useKimi = !!openaiClient
+  const modelName = useKimi ? KIMI_MODEL : 'claude-haiku-4-5-20251001'
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
-    const response = await (anthropic.messages.create as Function)({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 2048,
-      system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-      tools: cachedTools,
-      messages
-    })
+    let response: { content: Anthropic.ContentBlock[]; stop_reason: string | null; usage: { input_tokens: number; output_tokens: number } }
+
+    if (useKimi) {
+      response = await streamOpenAI(openaiClient!, {
+        model: KIMI_MODEL,
+        system: SYSTEM_PROMPT,
+        messages,
+        tools: cachedTools,
+        maxTokens: 2048,
+      })
+    } else {
+      response = await (anthropic!.messages.create as Function)({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 2048,
+        system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+        tools: cachedTools,
+        messages
+      })
+    }
 
     recordUsage(dataDir, {
       category: 'nightly_job',
-      model: 'claude-haiku-4-5-20251001',
+      model: modelName,
       inputTokens: response.usage.input_tokens,
       outputTokens: response.usage.output_tokens,
       cacheReadTokens: (response.usage as any).cache_read_input_tokens ?? 0,
@@ -303,14 +329,13 @@ Search memory for existing entries about the people and projects mentioned. Then
     }
 
     if (response.stop_reason === 'tool_use') {
-      // Execute tool calls and send results back
       messages.push({ role: 'assistant', content: response.content })
 
       const toolResults: Anthropic.ToolResultBlockParam[] = []
       for (const block of response.content) {
         if (block.type !== 'tool_use') continue
 
-        console.log(`[ServiceLogger] Haiku calling: ${block.name}(${JSON.stringify(block.input).slice(0, 100)})`)
+        console.log(`[ServiceLogger] ${modelName} calling: ${block.name}(${JSON.stringify(block.input).slice(0, 100)})`)
         try {
           const result = await callMemoryTool(block.name, block.input as Record<string, unknown>)
           toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: result })
@@ -323,7 +348,6 @@ Search memory for existing entries about the people and projects mentioned. Then
       continue
     }
 
-    // Unexpected stop reason
     console.warn(`[ServiceLogger] Unexpected stop_reason: ${response.stop_reason}`)
     break
   }

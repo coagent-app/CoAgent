@@ -24,6 +24,9 @@ interface CalendarPaneProps {
   onGoogleToggle?: (calendarId: string, enabled: boolean) => void
   onGoogleColor?: (calendarId: string, color: string) => void
   onGoogleSync?: () => void
+  autoBriefMeetings?: boolean
+  autoBriefMinutes?: number
+  onUpdateSettings?: (patch: Record<string, unknown>) => void
 }
 
 const TYPE_COLORS = {
@@ -37,6 +40,11 @@ function typeColors(type: string) {
   return TYPE_COLORS[type as keyof typeof TYPE_COLORS] ?? TYPE_COLORS.task
 }
 
+/** Title-case a label: capitalize first letter of each word */
+function titleCase(s: string): string {
+  return s.replace(/\b\w/g, c => c.toUpperCase())
+}
+
 export function CalendarPane({
   entries,
   onComplete,
@@ -48,6 +56,9 @@ export function CalendarPane({
   onGoogleToggle,
   onGoogleColor,
   onGoogleSync,
+  autoBriefMeetings,
+  autoBriefMinutes,
+  onUpdateSettings,
 }: CalendarPaneProps) {
   const [view, setView] = useState<CalendarView>('week')
   const [anchor, setAnchor] = useState(new Date())
@@ -188,6 +199,9 @@ export function CalendarPane({
           onToggle={onGoogleToggle || (() => {})}
           onColor={onGoogleColor || (() => {})}
           onClose={() => setShowGoogleModal(false)}
+          autoBriefMeetings={autoBriefMeetings ?? false}
+          autoBriefMinutes={autoBriefMinutes ?? 30}
+          onUpdateSettings={onUpdateSettings}
         />
       )}
     </div>
@@ -246,7 +260,7 @@ function EntryDetailPanel({
         <div className="px-4 py-3 space-y-4">
           {/* Label */}
           <p className="text-[15px] font-semibold text-neutral-900 dark:text-neutral-100 leading-snug">
-            {entry.label}
+            {titleCase(entry.label)}
           </p>
 
           {/* Time range for Google events */}
@@ -369,6 +383,9 @@ function GoogleCalendarModal({
   onToggle,
   onColor,
   onClose,
+  autoBriefMeetings,
+  autoBriefMinutes,
+  onUpdateSettings,
 }: {
   status: { connected: boolean; calendars: GoogleCalendarInfo[]; lastSync: string | null }
   onConnect: () => void
@@ -376,6 +393,9 @@ function GoogleCalendarModal({
   onToggle: (calendarId: string, enabled: boolean) => void
   onColor: (calendarId: string, color: string) => void
   onClose: () => void
+  autoBriefMeetings: boolean
+  autoBriefMinutes: number
+  onUpdateSettings?: (patch: Record<string, unknown>) => void
 }) {
   const [colorPickerFor, setColorPickerFor] = useState<string | null>(null)
 
@@ -474,6 +494,37 @@ function GoogleCalendarModal({
                   ? `Last synced ${formatTime(status.lastSync)}`
                   : 'Not yet synced'}
               </p>
+
+              {/* Auto-brief before meetings */}
+              <div className="flex flex-col gap-2 pt-1 border-t border-neutral-100 dark:border-neutral-800">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={autoBriefMeetings}
+                    onChange={e => onUpdateSettings?.({ auto_brief_meetings: e.target.checked })}
+                    className="w-3.5 h-3.5 rounded accent-blue-600 cursor-pointer"
+                  />
+                  <span className="text-[13px] text-neutral-700 dark:text-neutral-300">Auto Brief Before Meetings</span>
+                </label>
+                {autoBriefMeetings && (
+                  <div className="flex items-center gap-2 ml-5">
+                    <span className="text-[12px] text-neutral-500 dark:text-neutral-400">Brief</span>
+                    <select
+                      value={autoBriefMinutes}
+                      onChange={e => onUpdateSettings?.({ auto_brief_minutes: Number(e.target.value) })}
+                      className="text-[12px] bg-neutral-100 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 rounded px-1.5 py-0.5 border border-neutral-200 dark:border-neutral-700"
+                    >
+                      <option value={5}>5 min</option>
+                      <option value={10}>10 min</option>
+                      <option value={15}>15 min</option>
+                      <option value={30}>30 min</option>
+                      <option value={45}>45 min</option>
+                      <option value={60}>1 hour</option>
+                    </select>
+                    <span className="text-[12px] text-neutral-500 dark:text-neutral-400">before</span>
+                  </div>
+                )}
+              </div>
 
               {/* Disconnect button */}
               <button
@@ -578,7 +629,7 @@ function AgendaSection({
             {entry.type === 'event' && entry.source === 'google' && <img src="https://logos.composio.dev/api/googlecalendar" alt="" className="w-4 h-4 flex-shrink-0 mt-0.5" />}
             {entry.type === 'event' && entry.source !== 'google' && <CalendarDays size={14} className={cn('mt-0.5 flex-shrink-0', colors.text)} />}
             <div className="flex-1 min-w-0">
-              <p className="text-[14px] text-neutral-800 dark:text-neutral-200 leading-relaxed">{entry.label}</p>
+              <p className="text-[14px] text-neutral-800 dark:text-neutral-200 leading-relaxed">{titleCase(entry.label)}</p>
               <p className={cn('text-[12px] mt-0.5', colors.text)}>
                 {entry.cron || (entry.start && formatTime(entry.start)) || (entry.due && formatTime(entry.due)) || ''}
               </p>
@@ -607,6 +658,15 @@ function formatTime(iso: string): string {
 
 /* ── Week View ──────────────────────────────────────── */
 
+function useCurrentMinute() {
+  const [now, setNow] = useState(new Date())
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 60_000)
+    return () => clearInterval(id)
+  }, [])
+  return now
+}
+
 function WeekView({
   entries,
   anchor,
@@ -625,6 +685,9 @@ function WeekView({
   const hours = Array.from({ length: 24 }, (_, i) => i)
   const isOffHour = (h: number) => h < activeHours.start || h >= activeHours.end
   const scrollRef = useRef<HTMLDivElement>(null)
+  const now = useCurrentMinute()
+  const nowTop = (now.getHours() + now.getMinutes() / 60) * 48
+  const todayIndex = days.findIndex(d => isToday(d))
 
   useEffect(() => {
     const el = scrollRef.current?.closest('[data-radix-scroll-area-viewport]') as HTMLElement | null
@@ -633,7 +696,7 @@ function WeekView({
 
   return (
     <ScrollArea className="h-full">
-      <div ref={scrollRef} className="grid grid-cols-[50px_repeat(7,1fr)] min-w-0">
+      <div ref={scrollRef} className="grid grid-cols-[50px_repeat(7,1fr)] min-w-0 relative">
         <div className="sticky top-0 z-10 bg-white dark:bg-neutral-950" />
         {days.map(day => (
           <div key={day.toISOString()} className={cn(
@@ -644,6 +707,23 @@ function WeekView({
             <p className={cn('text-[14px] font-medium', isToday(day) ? 'text-blue-600' : 'text-neutral-700 dark:text-neutral-300')}>{format(day, 'd')}</p>
           </div>
         ))}
+
+        {/* Current time indicator */}
+        {todayIndex >= 0 && (
+          <div
+            className="absolute z-30 pointer-events-none"
+            style={{
+              top: `calc(${nowTop}px + 45px)`, /* offset for sticky header */
+              left: `calc(50px + ${todayIndex} * ((100% - 50px) / 7))`,
+              width: `calc((100% - 50px) / 7)`,
+            }}
+          >
+            <div className="flex items-center">
+              <div className="w-1.5 h-1.5 rounded-full bg-blue-500 -ml-[3px] flex-shrink-0" />
+              <div className="flex-1 h-[1.5px] bg-blue-500" />
+            </div>
+          </div>
+        )}
 
         {hours.map(hour => (
           <React.Fragment key={hour}>
@@ -659,16 +739,20 @@ function WeekView({
                     isToday(day) && !isOffHour(hour) && 'bg-blue-50/30 dark:bg-blue-950/10 dark:border-l-transparent',
                     isOffHour(hour) && 'bg-neutral-50 dark:bg-neutral-900/50'
                   )}>
-                  {dayEntries.map(entry => {
+                  {dayEntries.map((entry, idx) => {
                     const durationHours = getEntryDurationHours(entry)
                     const heightPx = Math.max(durationHours * 48, 20)
+                    const count = dayEntries.length
+                    const widthPct = count > 1 ? `${Math.floor(100 / count)}%` : undefined
+                    const leftPct = count > 1 ? `${Math.floor((100 / count) * idx)}%` : undefined
                     return (
                       <div
                         key={entry.id}
                         onClick={() => onSelect(entry)}
-                        style={{ height: `${heightPx}px`, zIndex: 20 }}
+                        style={{ height: `${heightPx}px`, zIndex: 20 + idx, ...(widthPct ? { width: widthPct, left: leftPct } : {}) }}
                         className={cn(
-                          'absolute inset-x-0.5 top-0 rounded px-1 py-0.5 text-[10px] cursor-pointer overflow-hidden flex items-start gap-1',
+                          'absolute top-0 rounded px-1 py-0.5 text-[10px] cursor-pointer overflow-hidden flex items-start gap-1',
+                          count <= 1 && 'inset-x-0.5',
                           typeColors(entry.type).bg,
                           typeColors(entry.type).text,
                           selectedId === entry.id && 'ring-1 ring-current'
@@ -676,7 +760,7 @@ function WeekView({
                       >
                         {entry.source === 'google' && <img src="https://logos.composio.dev/api/googlecalendar" alt="" className="w-3 h-3 flex-shrink-0 mt-px" />}
                         <div className="min-w-0 flex-1">
-                          <span className="truncate block">{entry.label}</span>
+                          <span className="truncate block">{titleCase(entry.label)}</span>
                           {heightPx >= 36 && entry.start && entry.end && (
                             <span className="truncate block opacity-70 text-[9px]">
                               {format(parseISO(entry.start), 'h:mm a')} – {format(parseISO(entry.end), 'h:mm a')}
@@ -748,7 +832,7 @@ function MonthView({
                   )}
                 >
                   {entry.source === 'google' && <img src="https://logos.composio.dev/api/googlecalendar" alt="" className="w-2.5 h-2.5 absolute bottom-0.5 right-1" />}
-                  {entry.label}
+                  {titleCase(entry.label)}
                 </div>
               ))}
               {dayEntries.length > 3 && (
@@ -780,6 +864,9 @@ function DayView({
   const hours = Array.from({ length: 24 }, (_, i) => i)
   const isOffHour = (h: number) => h < activeHours.start || h >= activeHours.end
   const scrollRef = useRef<HTMLDivElement>(null)
+  const now = useCurrentMinute()
+  const showNowLine = isToday(anchor)
+  const nowTop = (now.getHours() + now.getMinutes() / 60) * 48
 
   useEffect(() => {
     const el = scrollRef.current?.closest('[data-radix-scroll-area-viewport]') as HTMLElement | null
@@ -788,7 +875,19 @@ function DayView({
 
   return (
     <ScrollArea className="h-full">
-      <div ref={scrollRef} className="px-4">
+      <div ref={scrollRef} className="px-4 relative">
+        {/* Current time indicator */}
+        {showNowLine && (
+          <div
+            className="absolute z-30 pointer-events-none"
+            style={{ top: `${nowTop}px`, left: '50px', right: '0' }}
+          >
+            <div className="flex items-center">
+              <div className="w-1.5 h-1.5 rounded-full bg-blue-500 -ml-[3px] flex-shrink-0" />
+              <div className="flex-1 h-[1.5px] bg-blue-500" />
+            </div>
+          </div>
+        )}
         {hours.map(hour => {
           const hourEntries = getEntriesStartingAtHour(entries, anchor, hour)
           return (
@@ -800,16 +899,20 @@ function DayView({
                 {format(setHours(new Date(), hour), 'h a')}
               </div>
               <div className="flex-1 relative overflow-visible">
-                {hourEntries.map(entry => {
+                {hourEntries.map((entry, idx) => {
                   const durationHours = getEntryDurationHours(entry)
                   const heightPx = Math.max(durationHours * 48, 24)
+                  const count = hourEntries.length
+                  const widthPct = count > 1 ? `${Math.floor(100 / count)}%` : undefined
+                  const leftPct = count > 1 ? `${Math.floor((100 / count) * idx)}%` : undefined
                   return (
                     <div
                       key={entry.id}
                       onClick={() => onSelect(entry)}
-                      style={{ height: `${heightPx}px`, zIndex: 20 }}
+                      style={{ height: `${heightPx}px`, zIndex: 20 + idx, ...(widthPct ? { width: widthPct, left: leftPct } : {}) }}
                       className={cn(
-                        'absolute inset-x-0 top-0 rounded px-2 py-1 text-[12px] cursor-pointer overflow-hidden flex items-start gap-1.5',
+                        'absolute top-0 rounded px-2 py-1 text-[12px] cursor-pointer overflow-hidden flex items-start gap-1.5',
+                        count <= 1 && 'inset-x-0',
                         typeColors(entry.type).bg,
                         typeColors(entry.type).text,
                         selectedId === entry.id && 'ring-1 ring-current'
@@ -817,7 +920,7 @@ function DayView({
                     >
                       {entry.source === 'google' && <img src="https://logos.composio.dev/api/googlecalendar" alt="" className="w-3.5 h-3.5 flex-shrink-0 mt-px" />}
                       <div className="min-w-0 flex-1">
-                        <span className="truncate block">{entry.label}</span>
+                        <span className="truncate block">{titleCase(entry.label)}</span>
                         {heightPx >= 40 && entry.start && entry.end && (
                           <span className="truncate block opacity-70 text-[10px]">
                             {format(parseISO(entry.start), 'h:mm a')} – {format(parseISO(entry.end), 'h:mm a')}

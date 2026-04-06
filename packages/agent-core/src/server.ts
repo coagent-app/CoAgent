@@ -1,7 +1,7 @@
 import { config } from 'dotenv'
 import { WebSocketServer, WebSocket } from 'ws'
 import { writeFile, mkdir } from 'fs/promises'
-import { existsSync, accessSync, constants } from 'fs'
+import { existsSync, writeFileSync } from 'fs'
 import { Agent } from './agent.js'
 import { GoogleCalendarService } from './google-calendar.js'
 import { MCPServerConfig } from './mcp-manager.js'
@@ -10,7 +10,9 @@ import { INTEGRATIONS, getIntegrationStatuses, generateAuthUrl, getRequiredField
 import { startScheduler } from './scheduler.js'
 import { readSettings, writeSettings } from './settings.js'
 
-import { listFiles, listFolders, ingestFile, deleteFileEntry, createFolder, moveFile, moveFolder, renameFile, renameFolder, deleteFolder, saveFolderOrder, searchFiles, autoOrganizeFiles } from './file-store.js'
+import { listFiles, listFolders, ingestFile, deleteFileEntry, createFolder, moveFile, moveFolder, renameFile, renameFolder, deleteFolder, saveFolderOrder, searchFiles, autoOrganizeFiles, getDocumentMeta, updateDocumentMeta } from './file-store.js'
+import { IMESSAGE_TOOLS, handleImessageTool } from './local-tools-imessage.js'
+import { CONTACTS_TOOLS, handleContactsTool } from './local-tools-contacts.js'
 import { embedTools, purgeTools, setToolEmbeddingsDir } from './tool-embeddings.js'
 import { writeRelayCredentials, getRelayConfig, getOpenAIProxy, loadApiKeysToEnv } from './auth.js'
 import { getUsageSummary, recordUsageGlobal, setUsageDataDir } from './usage-tracker.js'
@@ -32,7 +34,7 @@ import { getEdition } from './edition.js'
 import type { WSClientMessage, WSServerMessage } from '@coagent/shared'
 import { join } from 'path'
 import { homedir } from 'os'
-import { readRegistry, writeCustomMcpCredentials, disconnectCustomMcp, deleteCustomMcp, getCustomMcpConfigs, getCustomIntegrations, readCustomMcpCode, updateCustomMcpCode, getCustomMcpDir } from './custom-mcp.js'
+import { initCustomMcpDir, readRegistry, writeCustomMcpCredentials, disconnectCustomMcp, deleteCustomMcp, getCustomMcpConfigs, getCustomIntegrations, readCustomMcpCode, updateCustomMcpCode, getCustomMcpDir } from './custom-mcp.js'
 
 // Load from data dir .env — the secure isolated folder on the user's machine.
 // loadApiKeysToEnv runs first so any keys already in process.env (e.g. from the
@@ -50,7 +52,7 @@ function timeAgo(isoTimestamp: string): string {
   return `${Math.floor(seconds / 86400)}d ago`
 }
 
-// ── OpenAI TTS helper ─────────────────────────────────────────────────────────
+// ── TTS helpers ──────────────────────────────────────────────────────────────
 function stripMdForTts(s: string): string {
   return s
     .replace(/```[\s\S]*?```/g, '')         // remove code blocks
@@ -68,38 +70,32 @@ function stripMdForTts(s: string): string {
     .trim()
 }
 
-/** Stream TTS audio — sends chunks over WebSocket as they arrive from OpenAI */
+// ── TTS via relay (relay picks cheapest provider: Google Cloud → OpenAI) ────
 async function streamTts(text: string, voice: string | undefined, sendFn: (msg: any) => void): Promise<void> {
   const proxy = getOpenAIProxy()
-  if (!proxy) { console.log('[TTS] No proxy configured, skipping'); return }
+  if (!proxy) { console.log('[TTS] No relay configured, skipping'); return }
   const clean = stripMdForTts(text)
   if (!clean) { console.log('[TTS] No text after markdown cleanup, skipping'); return }
   const ttsVoice = voice || 'alloy'
-  console.log('[TTS] Streaming (voice: %s) text: %s', ttsVoice, clean.slice(0, 80))
+  console.log('[TTS] Relay streaming (voice: %s) text: %s', ttsVoice, clean.slice(0, 80))
   try {
     const res = await fetch(`${proxy.baseUrl}/v1/audio/speech`, {
       method: 'POST',
       headers: { 'Authorization': proxy.authHeader, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'tts-1', input: clean, voice: ttsVoice, response_format: 'mp3' }),
+      body: JSON.stringify({ model: 'tts-1', input: clean, voice: ttsVoice, response_format: 'mp3', speed: 1.10 }),
     })
-    if (!res.ok) { console.error('[TTS] API error:', res.status, await res.text().catch(() => '')); return }
+    if (!res.ok) { console.error('[TTS] Relay error:', res.status, await res.text().catch(() => '')); return }
     if (!res.body) { console.error('[TTS] No response body'); return }
     const reader = res.body.getReader()
     let seq = 0
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
-      sendFn({ type: 'voice_tts_chunk', seq, data: Buffer.from(value).toString('base64') })
+      sendFn({ type: 'voice_tts_chunk', seq, data: Buffer.from(value).toString('base64'), format: 'mp3' })
       seq++
     }
     console.log('[TTS] Stream complete, sent %d chunks', seq)
-    sendFn({ type: 'voice_tts_done' })
-    // Track TTS usage — exact character count sent to API
-    recordUsageGlobal({
-      category: 'tts', model: 'tts-1', characters: clean.length,
-      inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0,
-      timestamp: new Date().toISOString(),
-    }).catch(err => console.error('[TTS] Usage tracking failed:', err.message))
+    sendFn({ type: 'voice_tts_done', format: 'mp3' })
   } catch (err: any) {
     console.error('[TTS] Stream failed:', err.message)
   }
@@ -156,15 +152,6 @@ function resolveMcpMemory(): { command: string; args: string[] } {
   return { command: 'node', args: [mcpMemoryPath] }
 }
 
-function resolveMcpImessage(): { command: string; args: string[] } {
-  const { dirname } = require('path') as typeof import('path')
-  const sidecarPath = join(dirname(process.execPath), 'coagent-imessage')
-  if (existsSync(sidecarPath)) {
-    return { command: sidecarPath, args: [] }
-  }
-  const mcpPath = require.resolve('@coagent/mcp-imessage')
-  return { command: 'node', args: [mcpPath] }
-}
 
 function resolveMcpExa(): { command: string; args: string[] } | null {
   // Only enable if EXA_API_KEY is configured
@@ -182,19 +169,14 @@ function resolveMcpExa(): { command: string; args: string[] } | null {
   }
 }
 
-function resolveMcpContacts(): { command: string; args: string[] } {
-  const { dirname } = require('path') as typeof import('path')
-  const sidecarPath = join(dirname(process.execPath), 'coagent-contacts')
-  if (existsSync(sidecarPath)) {
-    return { command: sidecarPath, args: [] }
-  }
-  const mcpPath = require.resolve('@coagent/mcp-contacts')
-  return { command: 'node', args: [mcpPath] }
-}
 
 function canAccessChatDb(): boolean {
   try {
-    accessSync(join(homedir(), 'Library', 'Messages', 'chat.db'), constants.R_OK)
+    const { openSync, readSync, closeSync } = require('fs')
+    const fd = openSync(join(homedir(), 'Library', 'Messages', 'chat.db'), 'r')
+    const buf = Buffer.alloc(16)
+    readSync(fd, buf, 0, 16, 0)
+    closeSync(fd)
     return true
   } catch {
     return false
@@ -203,7 +185,11 @@ function canAccessChatDb(): boolean {
 
 function canAccessAddressBook(): boolean {
   try {
-    accessSync(join(homedir(), 'Library', 'Application Support', 'AddressBook', 'AddressBook-v22.abcddb'), constants.R_OK)
+    const { openSync, readSync, closeSync } = require('fs')
+    const fd = openSync(join(homedir(), 'Library', 'Application Support', 'AddressBook', 'AddressBook-v22.abcddb'), 'r')
+    const buf = Buffer.alloc(16)
+    readSync(fd, buf, 0, 16, 0)
+    closeSync(fd)
     return true
   } catch {
     return false
@@ -246,6 +232,18 @@ function buildMcpConfigs(): MCPServerConfig[] {
 
 const DATA_DIR = process.env.COAGENT_DATA_DIR || join(homedir(), '.coagent')
 setUsageDataDir(DATA_DIR)
+initCustomMcpDir(DATA_DIR)
+
+function writeRelayCredentialsFile() {
+  const relayUrl = process.env.RELAY_URL ?? ''
+  const token = process.env.RELAY_TOKEN ?? ''
+  const userId = process.env.RELAY_USER_ID ?? 'default'
+  if (relayUrl && token) {
+    const credPath = join(DATA_DIR, '.relay-credentials')
+    writeFileSync(credPath, JSON.stringify({ relayUrl, token, userId }), { mode: 0o600 })
+  }
+}
+writeRelayCredentialsFile()
 
 // --- Default memory files (written on first run, never overwritten) ---
 
@@ -761,33 +759,24 @@ writeDefaultSkills().catch(err => console.error('[Server] Failed to write defaul
 
 const agent = new Agent(buildMcpConfigs(), DATA_DIR)
 
+
 let wss: WebSocketServer | null = null
 let voiceProcessing = false
 let chatInProgress = false
+let agentBusy = false
 let nextHeartbeatAt: string | undefined
 
 const scheduler = startScheduler(agent, DATA_DIR, {
   onHeartbeat: (status, summary, nextAt) => {
     if (nextAt) nextHeartbeatAt = nextAt.toISOString()
+    console.log(`[Server] Heartbeat callback: status=${status}, nextAt=${nextAt?.toISOString() ?? 'none'}`)
     broadcast({ type: 'heartbeat', status, summary, nextAt: nextAt?.toISOString() })
   },
   onHeartbeatStream: (() => {
-    let streamed = ''
     return (type: 'start' | 'chunk' | 'tool' | 'done', data?: any) => {
-      if (type === 'start') {
-        streamed = ''
-        broadcast({ type: 'agent_thinking' } as any)
-      } else if (type === 'chunk') {
-        streamed += data.text
-        broadcast({ type: 'chat_chunk', text: data.text })
-      } else if (type === 'tool') {
-        broadcast({ type: 'chat_segment_end' })
-        broadcast({ type: 'tool_start', tool: data.tool, label: data.label })
-      } else if (type === 'done') {
-        broadcast({ type: 'chat_segment_end' })
-        if (streamed.trim()) {
-          broadcast({ type: 'chat_response', message: { role: 'assistant', content: streamed, timestamp: new Date().toISOString() } })
-        }
+      // Heartbeat is independent — don't stream into the chat UI.
+      // Status updates reach the UI via set_status_line tool.
+      if (type === 'done') {
         broadcast({ type: 'queue_update', items: agent.queue.getPending() })
         broadcast({ type: 'done_update', items: agent.queue.getDone() })
         broadcast({ type: 'calendar_update', entries: agent.calendar.getAll() })
@@ -813,6 +802,10 @@ const scheduler = startScheduler(agent, DATA_DIR, {
   }
 })
 
+agent.onStatusLine = (message: string) => {
+  broadcast({ type: 'status_line', message })
+}
+
 agent.onNotifyUser = (title: string, body: string) => {
   broadcast({ type: 'push_notification', title, body } as any)
 }
@@ -821,10 +814,15 @@ agent.onResearchProgress = (agents) => {
   broadcast({ type: 'research_progress', agents } as any)
 }
 
+agent.onBroadcast = (event) => {
+  broadcast(event)
+}
+
 agent.onSettingsChanged = async () => {
   const settings = await readSettings(DATA_DIR)
   broadcast({ type: 'settings_update', settings })
   scheduler.rescheduleHeartbeat()
+  scheduler.rescheduleBrief()
 }
 
 agent.onSkillsChanged = async () => {
@@ -948,7 +946,7 @@ agent.onCustomIntegration = async (action, data) => {
       const { execSync } = await import('child_process')
       const dir = getCustomMcpDir(name)
       console.log(`[Custom MCP] Installing dependencies in ${dir}...`)
-      execSync('npm install --production', { cwd: dir, stdio: 'pipe', timeout: 60000 })
+      execSync('npm install --production --ignore-scripts', { cwd: dir, stdio: 'pipe', timeout: 60000 })
       console.log(`[Custom MCP] Dependencies installed for ${name}`)
 
       // Send credential form to frontend
@@ -989,7 +987,7 @@ agent.onCustomIntegration = async (action, data) => {
         pkg.dependencies = { '@modelcontextprotocol/sdk': '^1.0.0', ...data.dependencies }
         await writeFile(pkgPath, JSON.stringify(pkg, null, 2), 'utf-8')
         const { execSync } = await import('child_process')
-        execSync('npm install --production', { cwd: dir, stdio: 'pipe', timeout: 60000 })
+        execSync('npm install --production --ignore-scripts', { cwd: dir, stdio: 'pipe', timeout: 60000 })
       }
 
       // Restart the MCP if it's currently connected
@@ -1021,6 +1019,18 @@ let teamClient: TeamClient | null = null
 let currentMcpSlugs: string[] = []
 let imessageConnected = false
 let contactsConnected = false
+
+// Persist local integration connections so they survive restarts
+const LOCAL_CONNECTIONS_FILE = join(DATA_DIR, 'local-connections.json')
+function saveLocalConnections() {
+  const data = { imessage: imessageConnected, contacts: contactsConnected }
+  require('fs').writeFileSync(LOCAL_CONNECTIONS_FILE, JSON.stringify(data))
+}
+function loadLocalConnections(): { imessage: boolean; contacts: boolean } {
+  try {
+    return JSON.parse(require('fs').readFileSync(LOCAL_CONNECTIONS_FILE, 'utf-8'))
+  } catch { return { imessage: false, contacts: false } }
+}
 let whatsappConnected = false
 let whatsAppClient: WhatsAppClient | null = null
 const whatsappQueue: { jid: string; name: string; text: string; media?: WhatsAppMedia }[] = []
@@ -1174,6 +1184,7 @@ async function refreshComposioMcp(slugs: string[]): Promise<void> {
   // Only reconnect the composio HTTP client — don't touch the memory MCP
   await agent.mcpManager.connectHttp('composio', url, apiKey)
   currentMcpSlugs = mergedSlugs
+  agent.composioConnectedSlugs = slugs
   updateSetupMd(mergedSlugs).catch(err => console.error('[Server] Failed to update setup.md:', err.message))
   console.log('[Composio] MCP refreshed with toolkits:', mergedSlugs.join(', '))
   // Embed new tools + params immediately so they're ready before the user types
@@ -1204,6 +1215,7 @@ if (composioKey()) {
     console.log('[Composio] MCP URL obtained, connecting HTTP client...')
     await agent.mcpManager.connectHttp('composio', url, apiKey)
     currentMcpSlugs = userToolkits
+    agent.composioConnectedSlugs = slugs
     updateSetupMd(slugs).catch(err => console.error('[Server] Failed to update setup.md:', err.message))
     console.log('[Composio] MCP connected with toolkits:', toolkits.join(', '))
     // Embed tools + params on connect so they're ready before the first message
@@ -1223,6 +1235,27 @@ getCustomMcpConfigs().then(async (configs) => {
     embedToolsFromMcp().catch(() => {})
   }
 }).catch(err => console.error('[Custom MCP] Failed to connect:', err.message))
+
+// Auto-reconnect local integrations (iMessage, Contacts) that were connected before restart
+;(async () => {
+  const saved = loadLocalConnections()
+  if (saved.imessage && canAccessChatDb()) {
+    try {
+      agent.mcpManager.registerLocal('coagent:imessage', IMESSAGE_TOOLS, handleImessageTool)
+      imessageConnected = true
+      agent.imessageConnected = true
+      console.log('[iMessage] Auto-reconnected from saved state')
+    } catch (e: any) { console.log('[iMessage] Auto-reconnect failed:', e.message) }
+  }
+  if (saved.contacts) {
+    try {
+      agent.mcpManager.registerLocal('coagent:contacts', CONTACTS_TOOLS, handleContactsTool)
+      contactsConnected = true
+      console.log('[Contacts] Auto-reconnected from saved state')
+    } catch (e: any) { console.log('[Contacts] Auto-reconnect failed:', e.message) }
+  }
+  if (saved.imessage || saved.contacts) embedToolsFromMcp().catch(() => {})
+})()
 
 // Kill any stale process on the port before starting
 try {
@@ -1250,6 +1283,12 @@ try {
 } catch {}
 
 wss = new WebSocketServer({ host: '127.0.0.1', port: PORT })
+
+// Generate WebSocket auth nonce — only Tauri app can read this via IPC
+const WS_NONCE = require('crypto').randomBytes(32).toString('hex')
+const noncePath = require('path').join(DATA_DIR, '.ws-nonce')
+require('fs').writeFileSync(noncePath, WS_NONCE, { mode: 0o600 })
+console.log(`[Server] WS auth nonce written to ${noncePath}`)
 
 wss.on('error', (err: any) => {
   if (err.code === 'EADDRINUSE') {
@@ -1564,6 +1603,7 @@ async function sendFullState(ws: WebSocket): Promise<void> {
   send(ws, { type: 'queue_update', items: agent.queue.getPending() })
   send(ws, { type: 'done_update', items: agent.queue.getDone() })
   send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
+  console.log(`[Server] sendFullState heartbeat: nextHeartbeatAt=${nextHeartbeatAt ?? 'not set'}`)
   if (nextHeartbeatAt) send(ws, { type: 'heartbeat', status: 'scheduled', nextAt: nextHeartbeatAt })
   if (googleCal) {
     const gcalStatus = await googleCal.getStatus()
@@ -1578,13 +1618,6 @@ async function sendFullState(ws: WebSocket): Promise<void> {
   readSettings(DATA_DIR).then(settings => send(ws, { type: 'settings_update', settings })).catch(console.error)
   sendRelayStatus(ws).catch(console.error)
   agent.getSkills().then(skills => send(ws, { type: 'skills_update', skills })).catch(console.error)
-  // Send relay credentials so Team Notes can fetch without waiting for Settings visit
-  const relayUrl = process.env.RELAY_URL ?? ''
-  const token = process.env.RELAY_TOKEN ?? ''
-  const userId = process.env.RELAY_USER_ID ?? 'default'
-  if (relayUrl && token) {
-    send(ws, { type: 'relay_credentials', relayUrl, token, userId })
-  }
 }
 
 /** Broadcast full agent state to all connected WebSocket clients. */
@@ -1599,6 +1632,36 @@ function broadcastFullState(): void {
 
 function attachWssHandlers(server: WebSocketServer): void {
   server.on('connection', (ws) => {
+    let authenticated = false
+    const authTimer = setTimeout(() => {
+      if (!authenticated) {
+        console.warn('[Server] WS client failed to authenticate within 2s — closing')
+        ws.close(4001, 'Auth timeout')
+      }
+    }, 2000)
+
+    const authHandler = (raw: any) => {
+      try {
+        const msg = JSON.parse(typeof raw === 'string' ? raw : raw.toString())
+        if (msg.type === 'auth' && msg.nonce === WS_NONCE) {
+          authenticated = true
+          clearTimeout(authTimer)
+          ws.removeListener('message', authHandler)
+          handleAuthenticatedConnection(ws)
+        } else {
+          console.warn('[Server] WS auth failed — invalid nonce')
+          ws.close(4003, 'Invalid nonce')
+        }
+      } catch {
+        ws.close(4002, 'Invalid auth message')
+      }
+    }
+
+    ws.on('message', authHandler)
+  })
+} // end attachWssHandlers
+
+function handleAuthenticatedConnection(ws: WebSocket): void {
     sendFullState(ws).catch(console.error)
 
   ws.on('close', () => { console.log('[Server] Client disconnected') })
@@ -1619,7 +1682,7 @@ function attachWssHandlers(server: WebSocketServer): void {
       const data = (msg as any).data
       if (data?.results?.length) {
         try {
-          const { saveResearch } = await import('@coagent/mcp-exa/dist/research-store.js')
+          const { saveResearch } = await import('@coagent/mcp-exa/dist/research-store.js' as any)
           const query = data.search?.query || data.query || 'monitor'
           const entries = data.results.map((r: any) => ({
             url: r.url,
@@ -1697,6 +1760,8 @@ function attachWssHandlers(server: WebSocketServer): void {
       console.log('[Server] Stop agent requested')
       agent.stop()
       voiceProcessing = false
+      chatInProgress = false
+      agentBusy = false
       broadcast({ type: 'voice_tts_cancel' } as any)
       return
     }
@@ -1708,7 +1773,7 @@ function attachWssHandlers(server: WebSocketServer): void {
     }
 
     if (msg.type === 'chat') {
-      if (chatInProgress) {
+      if (chatInProgress || agentBusy) {
         send(ws, { type: 'error', message: 'Please wait — still processing your last message.' } as any)
         return
       }
@@ -1720,6 +1785,7 @@ function attachWssHandlers(server: WebSocketServer): void {
         return
       }
       chatInProgress = true
+      agentBusy = true
       broadcast({ type: 'agent_thinking' } as any)
       try {
         let streamed = ''
@@ -1755,6 +1821,7 @@ function attachWssHandlers(server: WebSocketServer): void {
         broadcast({ type: 'agent_stopped' } as any)
       } finally {
         chatInProgress = false
+        agentBusy = false
       }
     }
 
@@ -1799,15 +1866,17 @@ function attachWssHandlers(server: WebSocketServer): void {
 
     if (msg.type === 'voice_audio') {
       // Guard: skip if another voice request is already being processed
-      if (voiceProcessing) {
+      if (voiceProcessing || agentBusy) {
         console.log('[Voice] Skipping duplicate voice_audio — already processing')
         return
       }
       voiceProcessing = true
+      agentBusy = true
       // Receive base64 audio from frontend, transcribe with Whisper, then process as voice chat
       const voiceProxy = getOpenAIProxy()
       if (!voiceProxy) {
         voiceProcessing = false
+        agentBusy = false
         send(ws, { type: 'error', message: 'Relay not configured — voice input unavailable.' })
         return
       }
@@ -1844,6 +1913,7 @@ function attachWssHandlers(server: WebSocketServer): void {
         if (!text) {
           // Nothing transcribed — silently dismiss the pill
           voiceProcessing = false
+          agentBusy = false
           send(ws, { type: 'voice_summary', summary: '' })
           return
         }
@@ -1853,6 +1923,7 @@ function attachWssHandlers(server: WebSocketServer): void {
         // Process as a voice chat message
         if (!getRelayConfig()) {
           voiceProcessing = false
+          agentBusy = false
           send(ws, { type: 'chat_response', message: { role: 'assistant', content: 'Relay not configured — cannot respond.', timestamp: new Date().toISOString() } })
           return
         }
@@ -1905,8 +1976,10 @@ function attachWssHandlers(server: WebSocketServer): void {
         await ttsChain
         send(ws, { type: 'voice_summary', summary: fullResponse })
         voiceProcessing = false
+        agentBusy = false
       } catch (err: any) {
         voiceProcessing = false
+        agentBusy = false
         console.error('[Voice] Transcription/chat error:', err.message)
         send(ws, { type: 'error', message: `Voice failed: ${err.message}` })
         send(ws, { type: 'agent_stopped' })
@@ -1914,6 +1987,10 @@ function attachWssHandlers(server: WebSocketServer): void {
     }
 
     if (msg.type === 'voice_chat') {
+      if (chatInProgress || agentBusy) {
+        send(ws, { type: 'chat_response', message: { role: 'assistant', content: 'I\'m still working on the previous request.', timestamp: new Date().toISOString() } })
+        return
+      }
       if (!getRelayConfig()) {
         send(ws, {
           type: 'chat_response',
@@ -1922,6 +1999,8 @@ function attachWssHandlers(server: WebSocketServer): void {
         return
       }
       broadcast({ type: 'agent_thinking' } as any)
+      chatInProgress = true
+      agentBusy = true
       try {
         let streamed = ''
         let currentSegment = ''
@@ -1972,6 +2051,9 @@ function attachWssHandlers(server: WebSocketServer): void {
         console.error('[Server] voice_chat error:', err.message)
         broadcast({ type: 'error', message: err.message ?? 'Something went wrong.' } as any)
         broadcast({ type: 'agent_stopped' } as any)
+      } finally {
+        chatInProgress = false
+        agentBusy = false
       }
     }
 
@@ -2140,10 +2222,9 @@ function attachWssHandlers(server: WebSocketServer): void {
 
     if (msg.type === 'integration_connect') {
       if (msg.slug === 'coagent:mobile') {
-        const relayUrl = process.env.RELAY_URL ?? ''
-        const token = process.env.RELAY_TOKEN ?? ''
-        const userId = process.env.RELAY_USER_ID ?? 'default'
-        send(ws, { type: 'relay_credentials', relayUrl, token, userId })
+        // Credentials available via Tauri IPC (get_relay_credentials) — write fresh file
+        writeRelayCredentialsFile()
+        send(ws, { type: 'relay_credentials_ready' } as any)
         return
       }
       if (msg.slug === 'coagent:whatsapp') {
@@ -2183,9 +2264,7 @@ function attachWssHandlers(server: WebSocketServer): void {
       }
       if (msg.slug === 'coagent:imessage') {
         console.log('[iMessage] Connect requested...')
-        // In production, check FDA first. Skip in dev since the parent app may differ.
-        const skipFdaCheck = process.env.NODE_ENV === 'development' || process.env.TAURI_ENV_DEBUG === 'true'
-        if (!skipFdaCheck && !canAccessChatDb()) {
+        if (!canAccessChatDb()) {
           console.log('[iMessage] FDA check failed — opening settings')
           try {
             const { execSync } = require('child_process')
@@ -2194,20 +2273,17 @@ function attachWssHandlers(server: WebSocketServer): void {
           send(ws, {
             type: 'integration_fda_required' as any,
             slug: msg.slug,
-            message: 'Enable Full Disk Access for CoAgent in the Settings window that just opened, then restart and click Connect again.'
+            message: 'Add Co-Agent to Full Disk Access in System Settings, then restart the app and click Connect again.'
           })
           return
         }
-        console.log('[iMessage] Connecting MCP...')
+        console.log('[iMessage] Registering local handler...')
         try {
-          const imsg = resolveMcpImessage()
           await agent.mcpManager.disconnect('coagent:imessage')
-          await agent.mcpManager.connect([{
-            name: 'coagent:imessage',
-            command: imsg.command,
-            args: imsg.args
-          }])
+          agent.mcpManager.registerLocal('coagent:imessage', IMESSAGE_TOOLS, handleImessageTool)
           imessageConnected = true
+          agent.imessageConnected = true
+          saveLocalConnections()
           embedToolsFromMcp().catch(() => {})
           await sendIntegrations(ws)
         } catch (err: any) {
@@ -2217,8 +2293,7 @@ function attachWssHandlers(server: WebSocketServer): void {
       }
       if (msg.slug === 'coagent:contacts') {
         console.log('[Contacts] Connect requested...')
-        const skipFdaCheck = process.env.NODE_ENV === 'development' || process.env.TAURI_ENV_DEBUG === 'true'
-        if (!skipFdaCheck && !canAccessAddressBook()) {
+        if (!canAccessAddressBook()) {
           console.log('[Contacts] FDA check failed — opening settings')
           try {
             const { execSync } = require('child_process')
@@ -2227,20 +2302,16 @@ function attachWssHandlers(server: WebSocketServer): void {
           send(ws, {
             type: 'integration_fda_required' as any,
             slug: msg.slug,
-            message: 'Enable Full Disk Access for CoAgent in the Settings window that just opened, then restart and click Connect again.'
+            message: 'Add Co-Agent to Full Disk Access in System Settings, then restart the app and click Connect again.'
           })
           return
         }
-        console.log('[Contacts] Connecting MCP...')
+        console.log('[Contacts] Registering local handler...')
         try {
-          const contacts = resolveMcpContacts()
           await agent.mcpManager.disconnect('coagent:contacts')
-          await agent.mcpManager.connect([{
-            name: 'coagent:contacts',
-            command: contacts.command,
-            args: contacts.args
-          }])
+          agent.mcpManager.registerLocal('coagent:contacts', CONTACTS_TOOLS, handleContactsTool)
           contactsConnected = true
+          saveLocalConnections()
           embedToolsFromMcp().catch(() => {})
           await sendIntegrations(ws)
         } catch (err: any) {
@@ -2329,6 +2400,8 @@ function attachWssHandlers(server: WebSocketServer): void {
         try {
           await agent.mcpManager.disconnect('coagent:imessage')
           imessageConnected = false
+          agent.imessageConnected = false
+          saveLocalConnections()
           await sendIntegrations(ws)
         } catch (err: any) {
           send(ws, { type: 'error', message: err.message })
@@ -2339,6 +2412,7 @@ function attachWssHandlers(server: WebSocketServer): void {
         try {
           await agent.mcpManager.disconnect('coagent:contacts')
           contactsConnected = false
+          saveLocalConnections()
           await sendIntegrations(ws)
         } catch (err: any) {
           send(ws, { type: 'error', message: err.message })
@@ -2407,11 +2481,17 @@ function attachWssHandlers(server: WebSocketServer): void {
     }
 
     if (msg.type === 'capability_confirm') {
+      if (chatInProgress || agentBusy) {
+        send(ws, { type: 'error', message: 'Please wait — still processing your last message.' } as any)
+        return
+      }
       const selected = msg.capabilities.join(', ')
       const authInfo = msg.authValues && Object.keys(msg.authValues).length > 0
         ? `\nThe user provided these auth credentials: ${JSON.stringify(msg.authValues)}. Store these securely in the integration's env config.`
         : ''
       const chatMsg = `The user confirmed these capabilities for the custom integration: ${selected}.${authInfo} Now generate the MCP server code and call create_custom_integration with action "create" to build it.`
+      chatInProgress = true
+      agentBusy = true
       send(ws, { type: 'agent_thinking' })
       try {
         let streamed = ''
@@ -2436,6 +2516,9 @@ function attachWssHandlers(server: WebSocketServer): void {
         console.error('[Server] capability_confirm error:', err.message)
         send(ws, { type: 'error', message: err.message ?? 'Something went wrong.' })
         send(ws, { type: 'agent_stopped' })
+      } finally {
+        chatInProgress = false
+        agentBusy = false
       }
     }
 
@@ -2455,6 +2538,10 @@ function attachWssHandlers(server: WebSocketServer): void {
         // If heartbeat interval or active hours changed, reschedule the wake
         if (msg.patch.heartbeat_interval !== undefined || msg.patch.active_hours !== undefined || msg.patch.active_days !== undefined) {
           scheduler.rescheduleHeartbeat()
+        }
+        // If auto-brief settings changed, reschedule the brief timer
+        if (msg.patch.auto_brief_meetings !== undefined || msg.patch.auto_brief_minutes !== undefined) {
+          scheduler.rescheduleBrief()
         }
       } catch (err: any) {
         send(ws, { type: 'error', message: err.message })
@@ -2609,19 +2696,67 @@ function attachWssHandlers(server: WebSocketServer): void {
       }
     }
 
+    if (msg.type === 'update_document_fields') {
+      try {
+        const meta = await getDocumentMeta(DATA_DIR, msg.fileId)
+        if (!meta) {
+          send(ws, { type: 'error', message: 'This document has no stored template data.' } as any)
+          return
+        }
+
+        // Deep merge: arrays replaced, objects shallow-merged, primitives replaced
+        const merged = { ...meta.templateData }
+        for (const [key, value] of Object.entries(msg.data)) {
+          if (Array.isArray(value)) {
+            merged[key] = value
+          } else if (value && typeof value === 'object' && !Array.isArray(value)) {
+            merged[key] = { ...(merged[key] || {}), ...value }
+          } else {
+            merged[key] = value
+          }
+        }
+
+        const settings = await readSettings(DATA_DIR)
+        const brand = (settings.brand_company || settings.brand_color || settings.brand_logo)
+          ? { companyName: settings.brand_company || undefined, accentColor: settings.brand_color || undefined, logoBase64: settings.brand_logo || undefined }
+          : undefined
+
+        const { renderTemplatedDocument } = await import('./document-renderer.js')
+        const buf = await renderTemplatedDocument({ ...merged, template: meta.template }, brand)
+
+        // Write the new PDF to the same path
+        const files = await listFiles(DATA_DIR)
+        const originalFile = files.find(f => f.id === msg.fileId)
+
+        if (originalFile) {
+          // Overwrite the file on disk
+          const { writeFile: writeFileAsync } = await import('fs/promises')
+          await writeFileAsync(originalFile.path, buf)
+
+          // Update the metadata with new data
+          await updateDocumentMeta(DATA_DIR, msg.fileId, {
+            template: meta.template,
+            templateData: merged,
+            lastRenderedAt: new Date().toISOString()
+          })
+
+          send(ws, { type: 'document_updated', fileId: msg.fileId } as any)
+          broadcastFilesDebounced()
+        }
+      } catch (err: any) {
+        console.error('[Server] update_document_fields error:', err.message)
+        send(ws, { type: 'error', message: `Failed to update document: ${err.message}` } as any)
+      }
+    }
+
     if (msg.type === 'trigger_heartbeat') {
       console.log('[Server] Manual heartbeat triggered')
-      broadcast({ type: 'agent_thinking' } as any)
       try {
         await agent.handleTrigger(
           { source: 'heartbeat' },
-          (chunk) => broadcast({ type: 'chat_chunk', text: chunk }),
-          (tool, label) => {
-            broadcast({ type: 'chat_segment_end' })
-            broadcast({ type: 'tool_start', tool, label })
-          }
+          () => {},
+          () => {}
         )
-        broadcast({ type: 'chat_segment_end' })
         send(ws, { type: 'heartbeat', status: 'done' })
         send(ws, { type: 'queue_update', items: agent.queue.getPending() })
         send(ws, { type: 'done_update', items: agent.queue.getDone() })
@@ -2642,6 +2777,7 @@ function attachWssHandlers(server: WebSocketServer): void {
         })
         if (res.ok) {
           const data = await res.json() as { model: string; usage: any; admin?: boolean }
+          writeRelayCredentialsFile()
           send(ws, { type: 'relay_status', active: true, model: data.model, usage: data.usage, admin: data.admin ?? false })
         } else {
           send(ws, { type: 'relay_status', active: false, model: null, usage: null })
@@ -2668,13 +2804,6 @@ function attachWssHandlers(server: WebSocketServer): void {
       agent.reinitClient()
       relayStatusCache = null
       sendRelayStatus(ws, true).catch(console.error)
-    }
-
-    if (msg.type === 'get_relay_credentials') {
-      const relayUrl = process.env.RELAY_URL ?? ''
-      const token = process.env.RELAY_TOKEN ?? ''
-      const userId = process.env.RELAY_USER_ID ?? 'default'
-      send(ws, { type: 'relay_credentials', relayUrl, token, userId })
     }
 
     if (msg.type === 'admin_create_token') {
@@ -2809,8 +2938,7 @@ function attachWssHandlers(server: WebSocketServer): void {
     }
 
   })
-  }) // end server.on('connection')
-} // end attachWssHandlers
+} // end handleAuthenticatedConnection
 
 attachWssHandlers(wss!)
 

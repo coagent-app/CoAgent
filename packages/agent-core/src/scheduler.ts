@@ -225,6 +225,7 @@ export interface SchedulerCallbacks {
 
 export interface SchedulerHandle {
   rescheduleHeartbeat: () => void
+  rescheduleBrief: () => void
 }
 
 // ── 3 AM job tracking ─────────────────────────────────────────────────────
@@ -419,13 +420,122 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
     }
   }
 
+  // ── Meeting brief timer: fires N minutes before calendar events ─────────────
+
+  let briefTimer: ReturnType<typeof setTimeout> | null = null
+  const briefedEvents = new Set<string>()
+
+  async function fireMeetingBrief(): Promise<void> {
+    const settings = await readSettings(dataDir)
+    if (!settings.auto_brief_meetings) { scheduleBriefTimer(); return }
+
+    const minutesBefore = settings.auto_brief_minutes || 30
+    const now = Date.now()
+    const briefWindow = minutesBefore * 60 * 1000
+
+    // Find events starting within the brief window that haven't been briefed yet
+    const events = agent.calendar.getAll().filter(e =>
+      e.type === 'event' && e.start && !briefedEvents.has(e.id)
+    )
+
+    for (const event of events) {
+      const startTime = new Date(event.start!).getTime()
+      const briefTime = startTime - briefWindow
+      // Fire if we're within 2 minutes of the brief time (tolerance for sleep/wake drift)
+      if (now >= briefTime && now < startTime && (now - briefTime) < 2 * 60 * 1000) {
+        briefedEvents.add(event.id)
+        const minsUntil = Math.round((startTime - now) / 60000)
+        console.log(`[Scheduler] Meeting brief firing: "${event.label}" in ${minsUntil}min`)
+        callbacks?.onTodoStream?.('start', { task: `Meeting brief: ${event.label}`, due: event.start })
+        try {
+          let streamed = ''
+          await keepAwakeDuring(
+            agent.handleTrigger(
+              {
+                source: 'meeting_brief',
+                payload: {
+                  eventId: event.id,
+                  title: event.label,
+                  start: event.start,
+                  end: event.end,
+                  location: event.location,
+                  notes: event.notes,
+                  minutesUntil: minsUntil,
+                }
+              },
+              (chunk) => {
+                streamed += chunk
+                callbacks?.onTodoStream?.('chunk', { text: chunk })
+              },
+              (tool, label) => {
+                callbacks?.onTodoStream?.('tool', { tool, label })
+              }
+            )
+          )
+          callbacks?.onTodoStream?.('done', { response: streamed })
+        } catch (err: any) {
+          console.error(`[Scheduler] Meeting brief error (${event.id}):`, err.message)
+        }
+      }
+    }
+    scheduleBriefTimer()
+  }
+
+  function scheduleBriefTimer(): void {
+    if (briefTimer) clearTimeout(briefTimer)
+    briefTimer = null
+
+    readSettings(dataDir).then(settings => {
+      if (!settings.auto_brief_meetings) return
+
+      const minutesBefore = settings.auto_brief_minutes || 30
+      const now = Date.now()
+      const events = agent.calendar.getAll().filter(e =>
+        e.type === 'event' && e.start && !briefedEvents.has(e.id)
+      )
+
+      // Find the next event that needs a brief
+      let nextBriefTime: number | null = null
+      for (const event of events) {
+        const startTime = new Date(event.start!).getTime()
+        const briefTime = startTime - minutesBefore * 60 * 1000
+        if (briefTime > now && (nextBriefTime === null || briefTime < nextBriefTime)) {
+          nextBriefTime = briefTime
+        }
+      }
+
+      if (nextBriefTime) {
+        const delay = nextBriefTime - now
+        const briefAt = new Date(nextBriefTime)
+        console.log(`[Scheduler] Next meeting brief in ${Math.round(delay / 60000)}min at ${briefAt.toLocaleString()}`)
+        briefTimer = setTimeout(() => fireMeetingBrief(), delay)
+        scheduleWake(briefAt)
+      }
+    }).catch(() => {})
+  }
+
   // ── Heartbeat timer: fires at exact interval, no polling ───────────────────
 
   let heartbeatTimer: ReturnType<typeof setTimeout> | null = null
 
-  let heartbeatScheduledAt: number = 0
+  // Generation counter: incremented every time scheduleHeartbeatTimer() is called.
+  // The async readSettings().then() callback only proceeds if its captured generation
+  // still matches — this prevents a race where two rapid calls both set a timer, creating
+  // an orphaned timer that can never be cleared.
+  let heartbeatGeneration = 0
 
-  async function fireHeartbeat(): Promise<void> {
+  // The expected wall-clock time the next heartbeat should fire, for logging.
+  let heartbeatExpectedAt: number = 0
+
+  async function fireHeartbeat(generation: number): Promise<void> {
+    const lateBy = heartbeatExpectedAt > 0 ? Date.now() - heartbeatExpectedAt : 0
+    console.log(`[Scheduler] Heartbeat timer fired (gen ${generation}${lateBy > 0 ? `, ${Math.round(lateBy / 60000)}min late` : ''})`)
+    // If the generation doesn't match the current one, this is an orphaned timer — ignore.
+    if (generation !== heartbeatGeneration) {
+      console.log(`[Scheduler] Stale timer callback (gen ${generation} vs current ${heartbeatGeneration}) — ignoring`)
+      return
+    }
+
     const settings = await readSettings(dataDir)
     const interval = settings.heartbeat_interval ?? 60
     if (interval <= 0) { cancelScheduledWake(); return }
@@ -437,19 +547,7 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
       return
     }
 
-    // Skip stale heartbeats (fired >5 min late, e.g. after sleep/wake)
-    if (heartbeatScheduledAt > 0) {
-      const expectedAt = heartbeatScheduledAt + interval * 60 * 1000
-      const lateBy = Date.now() - expectedAt
-      if (lateBy > 5 * 60 * 1000) {
-        console.log(`[Scheduler] Stale heartbeat (${Math.round(lateBy / 60000)}min late) — skipping`)
-        callbacks?.onHeartbeat?.('skipped')
-        scheduleHeartbeatTimer()
-        return
-      }
-    }
-
-    // Skip if agent is currently processing a user message
+    // Defer if agent is busy with user chat
     if (agent.isProcessing) {
       console.log('[Scheduler] Agent busy with user message — deferring heartbeat')
       callbacks?.onHeartbeat?.('skipped')
@@ -480,18 +578,33 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
   }
 
   function scheduleHeartbeatTimer(): void {
+    // Increment generation first — any in-flight .then() from a previous call will see
+    // a mismatched generation and skip setting the timer, preventing orphaned timers.
+    const gen = ++heartbeatGeneration
+
     if (heartbeatTimer) clearTimeout(heartbeatTimer)
     heartbeatTimer = null
 
     readSettings(dataDir).then(settings => {
+      // Guard: if another scheduleHeartbeatTimer() call happened while we awaited
+      // readSettings, our generation is stale — bail out to avoid creating an orphan.
+      if (gen !== heartbeatGeneration) return
+
       const interval = settings.heartbeat_interval ?? 60
       if (interval <= 0) return
 
-      const delay = interval * 60 * 1000
-      const wakeAt = new Date(Date.now() + delay)
-      heartbeatScheduledAt = Date.now()
-      console.log(`[Scheduler] Next heartbeat in ${interval}min at ${wakeAt.toLocaleString()}`)
-      heartbeatTimer = setTimeout(() => fireHeartbeat(), delay)
+      // Snap to clock increments (e.g. :00, :30) instead of "now + interval"
+      const hbNow = new Date()
+      const msPerInterval = interval * 60 * 1000
+      const msSinceEpoch = hbNow.getTime()
+      const nextSlot = Math.ceil(msSinceEpoch / msPerInterval) * msPerInterval
+      // If nextSlot is within 15s of now, skip to the one after (avoid firing immediately)
+      const wakeMs = (nextSlot - msSinceEpoch) < 15_000 ? nextSlot + msPerInterval : nextSlot
+      const delay = wakeMs - msSinceEpoch
+      const wakeAt = new Date(wakeMs)
+      heartbeatExpectedAt = wakeMs
+      console.log(`[Scheduler] Next heartbeat in ${Math.round(delay / 60000)}min at ${wakeAt.toLocaleString()} (gen ${gen})`)
+      heartbeatTimer = setTimeout(() => fireHeartbeat(gen), delay)
       callbacks?.onHeartbeat?.('scheduled', undefined, wakeAt)
 
       // Wake at whichever is sooner: heartbeat, next task, or 3 AM nightly job
@@ -515,6 +628,7 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
     origOnCalendarChanged?.()
     scheduleTaskTimer()
     syncRoutineTimers()
+    scheduleBriefTimer()
   }
 
   // ── Startup: fire any overdue tasks, register routines, then schedule timers ─
@@ -522,8 +636,9 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
   ;(async () => {
     syncRoutineTimers()
     await fireDueTasks()
+    scheduleBriefTimer()
     scheduleHeartbeatTimer()
   })().catch(err => console.error('[Scheduler] Startup error:', (err as Error).message))
 
-  return { rescheduleHeartbeat: scheduleHeartbeatTimer }
+  return { rescheduleHeartbeat: scheduleHeartbeatTimer, rescheduleBrief: scheduleBriefTimer }
 }

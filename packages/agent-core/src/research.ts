@@ -1,11 +1,13 @@
 // packages/agent-core/src/research.ts
-// Parallel Haiku sub-agent research — Sonnet provides queries, Haiku executes
+// Parallel Kimi sub-agent research — main agent provides queries, Kimi sub-agents execute
 
 import Anthropic from '@anthropic-ai/sdk'
+import OpenAI from 'openai'
 import type { MCPManager } from './mcp-manager.js'
 import { recordUsage } from './usage-tracker.js'
+import { streamOpenAI } from './openai-provider.js'
 
-const HAIKU = 'claude-haiku-4-5-20251001'
+const KIMI_MODEL = 'kimi-k2.5'
 const MAX_TOOL_LOOPS = 5
 
 const SEARCH_SYSTEM = `You are a research sub-agent. Cast a wide net and bring back as much raw data as possible. Another AI will deduplicate and filter — you just gather.
@@ -33,7 +35,7 @@ export interface ResearchProgress {
 
 export async function runResearch(
   queries: string[],
-  anthropic: Anthropic,
+  client: OpenAI | Anthropic,
   mcpManager: MCPManager,
   dataDir?: string,
   onProgress?: (progress: ResearchProgress[]) => void,
@@ -54,9 +56,9 @@ export async function runResearch(
     query: q, status: 'searching' as const, loop: 0
   }))
 
-  // Run all queries in parallel via Haiku sub-agents
+  // Run all queries in parallel via Kimi sub-agents
   const results = await Promise.all(
-    queries.map((q, i) => runSubAgent(q, anthropic, mcpManager, exaTools, dataDir, (p) => {
+    queries.map((q, i) => runSubAgent(q, client, mcpManager, exaTools, dataDir, (p) => {
       progressState[i] = p
       onProgress?.(progressState)
     }))
@@ -69,7 +71,7 @@ export async function runResearch(
     return `Research failed — all sub-agents errored.\n\n${results.join('\n')}`
   }
 
-  // Return labeled results — let the main agent (Sonnet) synthesize
+  // Return labeled results — let the main agent synthesize
   const combined = results
     .map((r, i) => `--- "${queries[i]}" ---\n${r}`)
     .join('\n\n')
@@ -121,13 +123,15 @@ ${combined}
 
 async function runSubAgent(
   query: string,
-  anthropic: Anthropic,
+  client: OpenAI | Anthropic,
   mcpManager: MCPManager,
   exaTools: Anthropic.Tool[],
   dataDir?: string,
   onProgress?: (p: ResearchProgress) => void,
 ): Promise<string> {
-  console.log(`[Research:sub] Starting: "${query}" with ${exaTools.length} tools: ${exaTools.map(t => t.name).join(', ')}`)
+  const isOpenAI = client instanceof OpenAI
+
+  console.log(`[Research:sub] Starting: "${query}" with ${exaTools.length} tools via ${isOpenAI ? 'Kimi' : 'Haiku'}`)
   const messages: Anthropic.MessageParam[] = [
     { role: 'user', content: query }
   ]
@@ -135,22 +139,42 @@ async function runSubAgent(
   for (let loop = 0; loop < MAX_TOOL_LOOPS; loop++) {
     try {
       console.log(`[Research:sub] "${query}" loop ${loop + 1}/${MAX_TOOL_LOOPS}`)
-      const res = await anthropic.messages.create({
-        model: HAIKU,
-        max_tokens: 4096,
-        system: [{ type: 'text', text: SEARCH_SYSTEM, cache_control: { type: 'ephemeral' } }] as any,
-        tools: exaTools.map((t, i) => i === exaTools.length - 1
-          ? { ...t, cache_control: { type: 'ephemeral' } }
-          : t
-        ) as any,
-        messages: messages as any
-      } as any)
+
+      let res: {
+        content: Anthropic.ContentBlock[]
+        stop_reason: string | null
+        usage: { input_tokens: number; output_tokens: number }
+      }
+
+      if (isOpenAI) {
+        // Kimi path via OpenAI-compatible client
+        res = await streamOpenAI(client, {
+          model: KIMI_MODEL,
+          system: SEARCH_SYSTEM,
+          messages,
+          tools: exaTools,
+          maxTokens: 4096,
+        })
+      } else {
+        // Fallback: Anthropic Haiku path
+        const anthropicRes = await (client as Anthropic).messages.create({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 4096,
+          system: [{ type: 'text', text: SEARCH_SYSTEM, cache_control: { type: 'ephemeral' } }] as any,
+          tools: exaTools.map((t, i) => i === exaTools.length - 1
+            ? { ...t, cache_control: { type: 'ephemeral' } }
+            : t
+          ) as any,
+          messages: messages as any
+        } as any)
+        res = anthropicRes
+      }
 
       // Track usage
       if (dataDir && res.usage) {
         recordUsage(dataDir, {
           timestamp: new Date().toISOString(),
-          model: HAIKU,
+          model: isOpenAI ? KIMI_MODEL : 'claude-haiku-4-5-20251001',
           inputTokens: res.usage.input_tokens || 0,
           outputTokens: res.usage.output_tokens || 0,
           cacheReadTokens: (res.usage as any).cache_read_input_tokens || 0,

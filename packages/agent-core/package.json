@@ -10,8 +10,8 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.30.0",
     "@coagent/mcp-contacts": "workspace:*",
-    "@coagent/mcp-imessage": "workspace:*",
     "@coagent/mcp-exa": "workspace:*",
+    "@coagent/mcp-imessage": "workspace:*",
     "@coagent/mcp-memory": "workspace:*",
     "@coagent/shared": "workspace:*",
     "@coagent/team-core": "workspace:*",
@@ -31,6 +31,7 @@
     "mammoth": "^1.11.0",
     "marked": "^17.0.5",
     "node-cron": "^3.0.0",
+    "openai": "^6.33.0",
     "pdf-lib": "^1.17.1",
     "pdf-parse": "^1.1.4",
     "pdfkit": "^0.18.0",
