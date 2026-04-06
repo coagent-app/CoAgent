@@ -64,7 +64,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE1RDE2QTFEQUZFNkNBNjUKUldSbHl1YXZIV3JSRlhGUWQzMlNUbVFIb1ZBOHM2OWdONDhxWGljaHg4UlY1WVJJSVNHdTgvWEkK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDYzRTE5OTVGRTIyMjNDMUYKUldRZlBDTGlYNW5oWXoyWTBqRmhJL2RvUW1zMTdkdWc0cW9WSWt3Unc1VkZiUEVUa2ZjK2N4U3UK",
       "endpoints": [
         "https://github.com/coagent-app/CoAgent/releases/latest/download/latest.json"
       ]
