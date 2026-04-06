@@ -9,6 +9,8 @@ export interface Env {
   COMPOSIO_WEBHOOK_SECRET?: string  // Standard Webhooks HMAC secret — optional, warns if unset
   EXA_WEBHOOK_SECRET?: string       // Shared secret for Exa monitor webhooks — optional, warns if unset
   GOOGLE_TTS_API_KEY?: string       // Google Cloud TTS — cheaper than OpenAI ($4/1M vs $15/1M)
+  GOOGLE_CLIENT_ID?: string         // Google OAuth — served to desktop apps on activation
+  GOOGLE_CLIENT_SECRET?: string
   TOKENS: KVNamespace
   USER_SESSION: DurableObjectNamespace
   TEAM_CHANNEL: DurableObjectNamespace
@@ -1741,6 +1743,8 @@ export default {
         usage: data.usage,
         createdAt: data.createdAt,
         admin: data.admin || false,
+        googleClientId: env.GOOGLE_CLIENT_ID || undefined,
+        googleClientSecret: env.GOOGLE_CLIENT_SECRET || undefined,
       })
     }
 

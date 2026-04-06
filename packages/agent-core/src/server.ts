@@ -864,13 +864,7 @@ agent.onSkillsChanged = async () => {
 }
 
 // Google Calendar
-const googleCal = (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET)
-  ? new GoogleCalendarService(
-      process.env.GOOGLE_CLIENT_ID,
-      process.env.GOOGLE_CLIENT_SECRET,
-      DATA_DIR,
-    )
-  : null
+let googleCal: GoogleCalendarService | null = null
 
 /** Apply sync results correctly — full sync replaces, incremental upserts */
 function applyGoogleSyncResult(result: { entries: any[]; changed: boolean; full: boolean; removedIds?: string[] }) {
@@ -882,25 +876,31 @@ function applyGoogleSyncResult(result: { entries: any[]; changed: boolean; full:
   }
 }
 
-if (googleCal) {
+function initGoogleCalendar(clientId: string, clientSecret: string) {
+  if (googleCal) return // already initialized
+  googleCal = new GoogleCalendarService(clientId, clientSecret, DATA_DIR)
   googleCal.setStoreCallback((entries) => {
-    // Polling callback — always a full set from the store callback
     agent.calendar.setGoogleEvents(entries)
   })
   googleCal.setUpdateCallback(async () => {
     broadcast({ type: 'calendar_update', entries: agent.calendar.getAll() } as any)
-    const status = await googleCal.getStatus()
+    const status = await googleCal!.getStatus()
     broadcast({ type: 'google_calendar_status', ...status } as any)
   })
-  // On startup, do an initial sync to populate calendar
   googleCal.init().then(async () => {
-    agent.googleCalendarConnected = await googleCal.isConnected()
+    agent.googleCalendarConnected = await googleCal!.isConnected()
     if (agent.googleCalendarConnected) {
-      const result = await googleCal.sync()
+      const result = await googleCal!.sync()
       applyGoogleSyncResult(result)
       broadcast({ type: 'calendar_update', entries: agent.calendar.getAll() } as any)
     }
   }).catch(err => console.error('[Server] Google Calendar init error:', err.message))
+  console.log('[Server] Google Calendar initialized')
+}
+
+// Init on startup if env vars are present
+if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
+  initGoogleCalendar(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET)
 }
 
 agent.onCustomIntegration = async (action, data) => {
@@ -2842,8 +2842,14 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
           signal: AbortSignal.timeout(15000),
         })
         if (res.ok) {
-          const data = await res.json() as { model: string; usage: any; admin?: boolean }
+          const data = await res.json() as { model: string; usage: any; admin?: boolean; googleClientId?: string; googleClientSecret?: string }
           writeRelayCredentialsFile()
+          // Initialize Google Calendar if relay provides credentials
+          if (data.googleClientId && data.googleClientSecret) {
+            const envPath = join(DATA_DIR, '.env')
+            writeFileSync(envPath, `GOOGLE_CLIENT_ID=${data.googleClientId}\nGOOGLE_CLIENT_SECRET=${data.googleClientSecret}\n`, { mode: 0o600 })
+            initGoogleCalendar(data.googleClientId, data.googleClientSecret)
+          }
           send(ws, { type: 'relay_status', active: true, model: data.model, usage: data.usage, admin: data.admin ?? false })
           send(ws, { type: 'relay_credentials_ready' })
         } else {
