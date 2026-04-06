@@ -25,7 +25,7 @@ In `packages/team-core/package.json`, add to `dependencies`:
 
 **Step 2: Install**
 
-Run: `cd /Users/brettponters/AI-Projects/CoAgent && pnpm install`
+Run: `cd /Users/coagent-app/AI-Projects/CoAgent && pnpm install`
 Expected: Clean install, no errors
 
 **Step 3: Commit**
@@ -251,7 +251,7 @@ this.teamLog = new TeamLog(options.dataDir, options.relayUrl, options.relayToken
 
 **Step 3: Build and verify**
 
-Run: `cd /Users/brettponters/AI-Projects/CoAgent && npx tsc --project packages/team-core/tsconfig.json`
+Run: `cd /Users/coagent-app/AI-Projects/CoAgent && npx tsc --project packages/team-core/tsconfig.json`
 Expected: Clean compile, no errors
 
 **Step 4: Commit**
@@ -386,7 +386,7 @@ Then find every reference to `this.conversationHistory` inside `runLoop()` and r
 
 **Step 5: Build and verify**
 
-Run: `cd /Users/brettponters/AI-Projects/CoAgent && npx tsc --project packages/agent-core/tsconfig.json`
+Run: `cd /Users/coagent-app/AI-Projects/CoAgent && npx tsc --project packages/agent-core/tsconfig.json`
 Expected: Clean compile
 
 **Step 6: Commit**
@@ -497,7 +497,7 @@ function timeAgo(isoTimestamp: string): string {
 
 **Step 3: Build and verify**
 
-Run: `cd /Users/brettponters/AI-Projects/CoAgent && npx tsc --project packages/agent-core/tsconfig.json`
+Run: `cd /Users/coagent-app/AI-Projects/CoAgent && npx tsc --project packages/agent-core/tsconfig.json`
 Expected: Clean compile
 
 **Step 4: Commit**
@@ -515,12 +515,12 @@ git commit -m "feat(server): wire up hybrid context assembly for team messages"
 
 **Step 1: Rebuild team-core**
 
-Run: `cd /Users/brettponters/AI-Projects/CoAgent && npx tsc --project packages/team-core/tsconfig.json`
+Run: `cd /Users/coagent-app/AI-Projects/CoAgent && npx tsc --project packages/team-core/tsconfig.json`
 Expected: Clean compile
 
 **Step 2: Rebuild agent-core**
 
-Run: `cd /Users/brettponters/AI-Projects/CoAgent && npx tsc --project packages/agent-core/tsconfig.json`
+Run: `cd /Users/coagent-app/AI-Projects/CoAgent && npx tsc --project packages/agent-core/tsconfig.json`
 Expected: Clean compile
 
 **Step 3: Restart Brian's agent**
@@ -533,7 +533,7 @@ sleep 1
 COAGENT_DATA_DIR="$HOME/.coagent-brian" COAGENT_PORT=7831 node packages/agent-core/dist/server.js &
 ```
 
-Wait for: `[Team] Connected to team "Brett Team" with 2 members`
+Wait for: `[Team] Connected to team "Sam Team" with 2 members`
 
 **Step 4: Verify embeddings directory created**
 

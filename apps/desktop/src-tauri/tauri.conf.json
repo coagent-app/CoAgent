@@ -66,7 +66,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDMyQjUwNjY2MkRFRkIyOEEKUldTS3N1OHRaZ2ExTWdzN1Z6ZldzbCtwUDM3MHI3djJWK0psSGsydXFrREpEckxxekEwa3duTkcK",
       "endpoints": [
-        "https://github.com/brettponters/CoAgent/releases/latest/download/latest.json"
+        "https://github.com/coagent-app/CoAgent/releases/latest/download/latest.json"
       ]
     }
   }

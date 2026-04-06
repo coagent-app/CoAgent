@@ -149,33 +149,33 @@ it('returns empty defaults for new profile fields', async () => {
 })
 
 it('persists and reads back profile fields', async () => {
-  await writeSettings(tmpDir, { name: 'Brett', email: 'brett@example.com', role: 'real estate agent' })
+  await writeSettings(tmpDir, { name: 'Sam', email: 'sam@example.com', role: 'real estate agent' })
   const s = await readSettings(tmpDir)
-  expect(s.name).toBe('Brett')
-  expect(s.email).toBe('brett@example.com')
+  expect(s.name).toBe('Sam')
+  expect(s.email).toBe('sam@example.com')
   expect(s.role).toBe('real estate agent')
 })
 
 it('partial profile update does not clobber other fields', async () => {
-  await writeSettings(tmpDir, { name: 'Brett', email: 'brett@example.com' })
-  await writeSettings(tmpDir, { name: 'Brett P' })
+  await writeSettings(tmpDir, { name: 'Sam', email: 'sam@example.com' })
+  await writeSettings(tmpDir, { name: 'Sam P' })
   const s = await readSettings(tmpDir)
-  expect(s.name).toBe('Brett P')
-  expect(s.email).toBe('brett@example.com')
+  expect(s.name).toBe('Sam P')
+  expect(s.email).toBe('sam@example.com')
 })
 ```
 
 **Step 4: Run existing tests to ensure they still pass**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/packages/agent-core && npx vitest run src/settings.test.ts
+cd /Users/coagent-app/AI-Projects/CoAgent/packages/agent-core && npx vitest run src/settings.test.ts
 ```
 Expected: all tests PASS
 
 **Step 5: Verify TypeScript compiles**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent && npx tsc --noEmit -p packages/agent-core/tsconfig.json && npx tsc --noEmit -p packages/shared/tsconfig.json
+cd /Users/coagent-app/AI-Projects/CoAgent && npx tsc --noEmit -p packages/agent-core/tsconfig.json && npx tsc --noEmit -p packages/shared/tsconfig.json
 ```
 Expected: no errors
 
@@ -225,7 +225,7 @@ if (msg.type === 'update_settings') {
 **Step 4: Verify TypeScript compiles**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent && npx tsc --noEmit -p packages/agent-core/tsconfig.json
+cd /Users/coagent-app/AI-Projects/CoAgent && npx tsc --noEmit -p packages/agent-core/tsconfig.json
 ```
 Expected: no errors
 
@@ -286,7 +286,7 @@ Current settings:
 **Step 3: Verify TypeScript compiles + run tests**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent && npx tsc --noEmit -p packages/agent-core/tsconfig.json && cd packages/agent-core && npx vitest run
+cd /Users/coagent-app/AI-Projects/CoAgent && npx tsc --noEmit -p packages/agent-core/tsconfig.json && cd packages/agent-core && npx vitest run
 ```
 Expected: no errors, all tests PASS
 
@@ -342,7 +342,7 @@ return { queue, done, todos, messages, streamingText, thinking, connected, integ
 **Step 5: Verify TypeScript compiles**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent && npx tsc --noEmit -p apps/desktop/tsconfig.json
+cd /Users/coagent-app/AI-Projects/CoAgent && npx tsc --noEmit -p apps/desktop/tsconfig.json
 ```
 Expected: no errors
 
@@ -607,7 +607,7 @@ export function SettingsPane({ settings, onUpdate }: SettingsPaneProps) {
 **Step 2: Verify TypeScript compiles**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent && npx tsc --noEmit -p apps/desktop/tsconfig.json
+cd /Users/coagent-app/AI-Projects/CoAgent && npx tsc --noEmit -p apps/desktop/tsconfig.json
 ```
 Expected: no errors
 
@@ -710,14 +710,14 @@ Add the settings view render after the `done` view block:
 **Step 3: Verify TypeScript compiles**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent && npx tsc --noEmit -p apps/desktop/tsconfig.json
+cd /Users/coagent-app/AI-Projects/CoAgent && npx tsc --noEmit -p apps/desktop/tsconfig.json
 ```
 Expected: no errors
 
 **Step 4: Run all agent-core tests**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/packages/agent-core && npx vitest run
+cd /Users/coagent-app/AI-Projects/CoAgent/packages/agent-core && npx vitest run
 ```
 Expected: all tests PASS
 
@@ -736,7 +736,7 @@ git commit -m "feat: wire Settings view into Sidebar and App"
 
 ```bash
 kill $(lsof -ti :7830) 2>/dev/null; sleep 1
-cd /Users/brettponters/AI-Projects/CoAgent/packages/agent-core && npm run dev &
+cd /Users/coagent-app/AI-Projects/CoAgent/packages/agent-core && npm run dev &
 sleep 3
 ```
 

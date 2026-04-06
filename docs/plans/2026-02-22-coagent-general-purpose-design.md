@@ -89,7 +89,7 @@ The `mcp-memory` vector store is already generic. What changes is the system pro
 ## Repo Structure
 
 ```
-/Users/brettponters/AI-Projects/CoAgent/
+/Users/coagent-app/AI-Projects/CoAgent/
   apps/
     desktop/                  ← same UI, no changes
   packages/
@@ -104,13 +104,13 @@ The `mcp-memory` vector store is already generic. What changes is the system pro
 ```
 
 `mcp-rentcast` is not included. Real estate version stays frozen at:
-`/Users/brettponters/AI-Projects/Real Estate Agent/coagent/`
+`/Users/coagent-app/AI-Projects/Real Estate Agent/coagent/`
 
 ---
 
 ## Implementation Tasks
 
-1. Initialize git repo in `/Users/brettponters/AI-Projects/CoAgent/`
+1. Initialize git repo in `/Users/coagent-app/AI-Projects/CoAgent/`
 2. Remove `mcp-rentcast` from packages and all references
 3. Generalize `agent.ts` system prompt and onboarding questions
 4. Generalize queue types in `shared/index.ts`

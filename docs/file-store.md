@@ -123,7 +123,7 @@ On ingestion, Haiku:
   "path": "~/.coagent/files/johnson-contract.pdf",
   "added": "2026-02-22T14:30:00Z",
   "last_accessed": "2026-02-22T14:30:00Z",
-  "summary": "Purchase agreement for 123 Main St between Brett Ponters and Tom Johnson. Closing date March 15. Price $450k. Contingencies: inspection and financing.",
+  "summary": "Purchase agreement for 123 Main St between CoAgent Dev and Tom Johnson. Closing date March 15. Price $450k. Contingencies: inspection and financing.",
   "group": "Contracts",
   "embedding": [...],
   "size_bytes": 204800

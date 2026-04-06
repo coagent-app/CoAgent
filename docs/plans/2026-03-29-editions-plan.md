@@ -97,7 +97,7 @@ export function getPreset(vertical?: string): VerticalPreset {
 
 **Step 2: Verify it compiles**
 
-Run: `cd /Users/brettponters/AI-Projects/CoAgent && pnpm --filter agent-core build`
+Run: `cd /Users/coagent-app/AI-Projects/CoAgent && pnpm --filter agent-core build`
 Expected: PASS (no errors)
 
 **Step 3: Commit**
@@ -137,7 +137,7 @@ export function getEdition() {
 
 **Step 2: Verify it compiles**
 
-Run: `cd /Users/brettponters/AI-Projects/CoAgent && pnpm --filter agent-core build`
+Run: `cd /Users/coagent-app/AI-Projects/CoAgent && pnpm --filter agent-core build`
 Expected: PASS
 
 **Step 3: Commit**
@@ -228,7 +228,7 @@ export function getEditionInfo(): EditionInfo {
 
 **Step 3: Verify both compile**
 
-Run: `cd /Users/brettponters/AI-Projects/CoAgent && pnpm --filter agent-core build && pnpm --filter @coagent/desktop build`
+Run: `cd /Users/coagent-app/AI-Projects/CoAgent && pnpm --filter agent-core build && pnpm --filter @coagent/desktop build`
 Expected: PASS
 
 **Step 4: Commit**
@@ -287,12 +287,12 @@ This means: Team tab only shows when the edition includes team AND the user actu
 
 **Step 3: Verify it renders**
 
-Run: `cd /Users/brettponters/AI-Projects/CoAgent/apps/desktop && pnpm tauri dev`
+Run: `cd /Users/coagent-app/AI-Projects/CoAgent/apps/desktop && pnpm tauri dev`
 Expected: App opens. Title shows "CoAgent" (since default vertical is personal). No Team tab visible (since COAGENT_TEAM is not set).
 
 **Step 4: Test with team flag**
 
-Run: `COAGENT_TEAM=true cd /Users/brettponters/AI-Projects/CoAgent/apps/desktop && pnpm tauri dev`
+Run: `COAGENT_TEAM=true cd /Users/coagent-app/AI-Projects/CoAgent/apps/desktop && pnpm tauri dev`
 Expected: Team tab appears (if relay connected with a team).
 
 **Step 5: Commit**
@@ -344,7 +344,7 @@ export const DEFAULT_SETTINGS: AgentSettings = getDefaultSettings()
 
 **Step 2: Verify it compiles and defaults are correct**
 
-Run: `cd /Users/brettponters/AI-Projects/CoAgent && pnpm --filter agent-core build`
+Run: `cd /Users/coagent-app/AI-Projects/CoAgent && pnpm --filter agent-core build`
 Expected: PASS
 
 **Step 3: Commit**
@@ -398,7 +398,7 @@ function getInternalTools(context: ToolContext, activeSkillTools?: Set<string>, 
 
 **Step 3: Verify it compiles**
 
-Run: `cd /Users/brettponters/AI-Projects/CoAgent && pnpm --filter agent-core build`
+Run: `cd /Users/coagent-app/AI-Projects/CoAgent && pnpm --filter agent-core build`
 Expected: PASS
 
 **Step 4: Commit**
@@ -488,7 +488,7 @@ echo "Done! DMG at apps/desktop/src-tauri/target/release/bundle/dmg/"
 
 **Step 2: Make it executable**
 
-Run: `chmod +x /Users/brettponters/AI-Projects/CoAgent/scripts/build-edition.sh`
+Run: `chmod +x /Users/coagent-app/AI-Projects/CoAgent/scripts/build-edition.sh`
 
 **Step 3: Commit**
 
@@ -527,7 +527,7 @@ try {
 
 **Step 2: Verify it compiles**
 
-Run: `cd /Users/brettponters/AI-Projects/CoAgent && pnpm --filter agent-core build`
+Run: `cd /Users/coagent-app/AI-Projects/CoAgent && pnpm --filter agent-core build`
 Expected: PASS
 
 **Step 3: Commit**
@@ -543,7 +543,7 @@ git commit -m "feat: gate team client init on edition flag"
 
 **Step 1: Run dev with personal defaults (no flags)**
 
-Run: `cd /Users/brettponters/AI-Projects/CoAgent/apps/desktop && pnpm tauri dev`
+Run: `cd /Users/coagent-app/AI-Projects/CoAgent/apps/desktop && pnpm tauri dev`
 
 **Verify:**
 - [ ] App title shows "CoAgent" (not "Co-Agent")
@@ -554,7 +554,7 @@ Run: `cd /Users/brettponters/AI-Projects/CoAgent/apps/desktop && pnpm tauri dev`
 
 **Step 2: Run dev with sales + team flags**
 
-Run: `COAGENT_VERTICAL=sales COAGENT_TEAM=true cd /Users/brettponters/AI-Projects/CoAgent/apps/desktop && pnpm tauri dev`
+Run: `COAGENT_VERTICAL=sales COAGENT_TEAM=true cd /Users/coagent-app/AI-Projects/CoAgent/apps/desktop && pnpm tauri dev`
 
 **Verify:**
 - [ ] App title shows "CoAgent for Sales — Team"

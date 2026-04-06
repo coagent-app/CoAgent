@@ -18,14 +18,14 @@
 **Step 1: Add googleapis, google-auth-library, and keytar**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/packages/agent-core
+cd /Users/coagent-app/AI-Projects/CoAgent/packages/agent-core
 pnpm add googleapis google-auth-library keytar
 ```
 
 **Step 2: Verify installation**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent
+cd /Users/coagent-app/AI-Projects/CoAgent
 pnpm install
 ```
 
@@ -108,7 +108,7 @@ Add to WSServerMessage union:
 **Step 4: Verify types compile**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/packages/shared
+cd /Users/coagent-app/AI-Projects/CoAgent/packages/shared
 npx tsc --noEmit
 ```
 
@@ -627,7 +627,7 @@ export class GoogleCalendarService {
 **Step 2: Verify it compiles**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/packages/agent-core
+cd /Users/coagent-app/AI-Projects/CoAgent/packages/agent-core
 npx tsc --noEmit
 ```
 
@@ -737,7 +737,7 @@ Update `getAll()` sorting to include 'event' (line 97):
 **Step 2: Verify it compiles**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/packages/agent-core
+cd /Users/coagent-app/AI-Projects/CoAgent/packages/agent-core
 npx tsc --noEmit
 ```
 
@@ -896,7 +896,7 @@ The `setUpdateCallback` in Step 2 handles broadcasts, but we also need the polli
 **Step 6: Verify it compiles**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/packages/agent-core
+cd /Users/coagent-app/AI-Projects/CoAgent/packages/agent-core
 npx tsc --noEmit
 ```
 
@@ -1270,7 +1270,7 @@ git commit -m "feat: wire Google Calendar WebSocket messages to CalendarPane"
 **Step 1: Build and start**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/apps/desktop
+cd /Users/coagent-app/AI-Projects/CoAgent/apps/desktop
 pnpm tauri dev
 ```
 

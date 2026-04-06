@@ -89,8 +89,8 @@ The agent's system prompt already injects `settingsSection`. Extend it to includ
 
 ```
 Current settings:
-- Name: Brett
-- Email: brett@example.com
+- Name: Sam
+- Email: sam@example.com
 - Role: real estate agent
 - Timezone: America/Chicago
 - Active hours: 7am–midnight

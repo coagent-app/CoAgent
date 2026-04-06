@@ -20,7 +20,7 @@
 **Step 1: Install pdf-parse in agent-core**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/packages/agent-core
+cd /Users/coagent-app/AI-Projects/CoAgent/packages/agent-core
 pnpm add pdf-parse
 pnpm add -D @types/pdf-parse
 ```
@@ -59,7 +59,7 @@ In `WSServerMessage`, add:
 **Step 4: Build shared package**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/packages/shared && npm run build
+cd /Users/coagent-app/AI-Projects/CoAgent/packages/shared && npm run build
 ```
 
 Expected: no TypeScript errors, `dist/` updated.
@@ -126,7 +126,7 @@ describe('deleteFileEntry', () => {
 **Step 2: Run test to verify it fails**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/packages/agent-core
+cd /Users/coagent-app/AI-Projects/CoAgent/packages/agent-core
 pnpm test -- --reporter=verbose 2>&1 | head -30
 ```
 
@@ -406,7 +406,7 @@ export async function getStorageStats(dataDir: string): Promise<{
 **Step 4: Run tests**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/packages/agent-core
+cd /Users/coagent-app/AI-Projects/CoAgent/packages/agent-core
 pnpm test -- --reporter=verbose 2>&1 | grep -E "PASS|FAIL|✓|✗"
 ```
 
@@ -887,7 +887,7 @@ After the `{view === 'done' && ...}` block, add:
 **Step 3: Verify the app compiles**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/apps/desktop
+cd /Users/coagent-app/AI-Projects/CoAgent/apps/desktop
 pnpm build 2>&1 | tail -20
 ```
 

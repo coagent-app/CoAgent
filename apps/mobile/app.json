@@ -37,11 +37,7 @@
     "extra": {
       "router": {
         "origin": false
-      },
-      "eas": {
-        "projectId": "427fb8aa-cc70-41e2-b658-b01d47c4062a"
       }
-    },
-    "owner": "brettponters"
+    }
   }
 }

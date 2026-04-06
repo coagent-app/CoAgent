@@ -30,7 +30,7 @@ Example follow-up entry the agent creates:
   "label": "Follow up: Alex — website quote",
   "due": "2026-03-31T09:00:00",
   "stage": 1,
-  "instruction": "Check Gmail for reply from alex@fanaticaldetailing.com about the website quote sent 03-28. If replied, mark done. If no reply, notify Brett and ask if he wants to send a follow-up.",
+  "instruction": "Check Gmail for reply from alex@fanaticaldetailing.com about the website quote sent 03-28. If replied, mark done. If no reply, notify Sam and ask if he wants to send a follow-up.",
   "notes": "Original quote: $5k for website redesign"
 }
 ```

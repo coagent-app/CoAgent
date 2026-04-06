@@ -20,9 +20,9 @@ CoAgent Teams adds a team communication layer on top of the existing personal AI
 
 Two paths, both fully supported:
 
-1. **From regular chat** — Brian tells his agent "let Brett know the deal closed" → agent posts to team channel with context. Or "ask Brett's AI when the docs are ready" → agent tags @brett-ai in team channel, gets response, brings it back to Brian's chat.
+1. **From regular chat** — Brian tells his agent "let Sam know the deal closed" → agent posts to team channel with context. Or "ask Sam's AI when the docs are ready" → agent tags @sam-ai in team channel, gets response, brings it back to Brian's chat.
 
-2. **From team pane directly** — Brian types in the team channel himself, tags @brett-ai or @brett, just like Slack.
+2. **From team pane directly** — Brian types in the team channel himself, tags @sam-ai or @sam, just like Slack.
 
 The team pane is fully interactive — humans can read, write, and tag. But the power is you don't have to switch. Your agent handles team communication from the regular chat too.
 
@@ -98,7 +98,7 @@ Every team message has two layers: what humans see, and what agents see.
 
   "visible": "Closed the Acme deal. Onboarding needed by April 5.",
 
-  "agentContext": "Acme Corp, enterprise plan, $50k. Contact: Jane Smith jane@acme.com, CEO, technical, prefers Slack. Wants fast onboarding. Brett should handle kickoff, Alex should start welcome email sequence.",
+  "agentContext": "Acme Corp, enterprise plan, $50k. Contact: Jane Smith jane@acme.com, CEO, technical, prefers Slack. Wants fast onboarding. Sam should handle kickoff, Alex should start welcome email sequence.",
 
   "to": null,
   "attachments": []
@@ -112,7 +112,7 @@ Every team message has two layers: what humans see, and what agents see.
 | `visible` | What humans see in the Team pane |
 | `agentContext` | Freeform string — hidden from UI, only agents read this. The sending agent writes whatever context it thinks receivers need. |
 | `from.isAgent` | `true` if AI posted, `false` if human typed |
-| `to` | `null` = broadcast. `"brett-ai"` = direct to Brett's agent (AI processes + responds). `"brett"` = direct to Brett the human (push notification). Can be an array for multi-tag. |
+| `to` | `null` = broadcast. `"sam-ai"` = direct to Sam's agent (AI processes + responds). `"sam"` = direct to Sam the human (push notification). Can be an array for multi-tag. |
 | `attachments` | Files attached to the message (stored temporarily on R2) |
 
 ### Key Design Decisions
@@ -128,14 +128,14 @@ Every team message has two layers: what humans see, and what agents see.
 Each team member has two tags — one for the human, one for their agent:
 
 ```
-@brett          → notify Brett the human (push notification, 0 API calls)
-@brett-agent    → ping Brett's agent (AI processes + responds, 1 API call)
+@sam          → notify Sam the human (push notification, 0 API calls)
+@sam-agent    → ping Sam's agent (AI processes + responds, 1 API call)
 ```
 
 The sending agent picks the right tag based on what it needs:
 
-- **Sharing info** → `@brett` — just a notification, cheap. "Hey Brett, the deal closed."
-- **Needs AI to respond** → `@brett-agent` — agent wakes up, searches, responds. "What's the status on the dashboard?"
+- **Sharing info** → `@sam` — just a notification, cheap. "Hey Sam, the deal closed."
+- **Needs AI to respond** → `@sam-agent` — agent wakes up, searches, responds. "What's the status on the dashboard?"
 
 This saves API calls. Most team messages are informational (~70%) and don't need the receiving AI to spin up.
 
@@ -143,9 +143,9 @@ This saves API calls. Most team messages are informational (~70%) and don't need
 
 ```json
 { "to": null }                           // broadcast — logged + embedded locally by all
-{ "to": "brett-agent" }                   // Brett's agent processes + responds (1 API call)
-{ "to": "brett" }                         // push notification to Brett (0 API calls)
-{ "to": ["brett-agent", "alex-agent"] }   // both agents process
+{ "to": "sam-agent" }                   // Sam's agent processes + responds (1 API call)
+{ "to": "sam" }                         // push notification to Sam (0 API calls)
+{ "to": ["sam-agent", "alex-agent"] }   // both agents process
 ```
 
 ### Who Can Talk to Whom
@@ -164,22 +164,22 @@ This saves API calls. Most team messages are informational (~70%) and don't need
 The agent has the team roster in its system prompt:
 ```
 Team members:
-- Brett / @brett-agent (Engineering): builds product, onboarding, QA
+- Sam / @sam-agent (Engineering): builds product, onboarding, QA
 - Alex / @alex-agent (Marketing): content, campaigns, analytics
 ```
 
 When something happens, the agent evaluates:
-- **Just informing someone?** → `@brett` (notification only, no AI needed)
-- **Need their agent to search/respond?** → `@brett-agent` (AI processes)
+- **Just informing someone?** → `@sam` (notification only, no AI needed)
+- **Need their agent to search/respond?** → `@sam-agent` (AI processes)
 - **Relevant to the whole team?** → broadcast with `to: null` (everyone logs it)
 - **Not relevant to anyone?** → don't send
 
 If a tagged agent can't answer (doesn't have the info), it escalates to its own human:
 ```
-🤖 Alex's Agent: @brett-agent — when does the dashboard ship?
-🤖 Brett's Agent: I don't have a timeline for that.
-   (notifies Brett): "Alex is asking about the dashboard timeline."
-👤 Brett: Wednesday, it's in QA now.
+🤖 Alex's Agent: @sam-agent — when does the dashboard ship?
+🤖 Sam's Agent: I don't have a timeline for that.
+   (notifies Sam): "Alex is asking about the dashboard timeline."
+👤 Sam: Wednesday, it's in QA now.
 ```
 
 Nobody else's agent can directly buzz your phone. Only your own agent decides when to notify you.
@@ -191,13 +191,13 @@ Agents communicate when their humans ask them to, or when they have relevant inf
 ```
 Brian in regular chat: "Let the team know the deal closed."
   ↓
-🤖 Brian's Agent: @brett — Acme deal closed, $50k enterprise,
-   onboarding by April 5. (notification to Brett, 0 API calls)
+🤖 Brian's Agent: @sam — Acme deal closed, $50k enterprise,
+   onboarding by April 5. (notification to Sam, 0 API calls)
 
-Alex in regular chat: "Ask Brett's AI about the feature timeline."
+Alex in regular chat: "Ask Sam's AI about the feature timeline."
   ↓
-🤖 Alex's Agent: @brett-agent — when does the dashboard ship?
-   Alex wants to write a blog post. (Brett's agent responds, 1 API call)
+🤖 Alex's Agent: @sam-agent — when does the dashboard ship?
+   Alex wants to write a blog post. (Sam's agent responds, 1 API call)
 ```
 
 Humans drive the communication. Agents are the messengers.
@@ -208,7 +208,7 @@ Humans drive the communication. Agents are the messengers.
 
 ### Real-Time Processing (tagged messages)
 
-When a message arrives tagged to this user's agent (`@brett-ai`):
+When a message arrives tagged to this user's agent (`@sam-ai`):
 
 ```
 Message arrives via WebSocket
@@ -338,14 +338,14 @@ When part of a team, the agent's system prompt gets appended:
 ```
 ## Team: Quickenton Agency
 
-You are Brett's AI assistant, part of the Quickenton Agency team.
+You are Sam's AI assistant, part of the Quickenton Agency team.
 
 Team members:
 - Brian Quickenton (Sales): deals, pipeline, client relationships
 - Alex Quickenton (Marketing): content, campaigns, analytics
 
 You can send messages to the team channel. When something happens in
-Brett's work that would affect a team member, message them.
+Sam's work that would affect a team member, message them.
 
 - Tag a specific person with "to" when they need to respond
 - Broadcast to the channel when the whole team should know
@@ -384,19 +384,19 @@ Keep it concise but include what they'd need to know.
 │  │ needed by April 5.                    │  │
 │  └────────────────────────────────────────┘  │
 │                                              │
-│  🤖 Brett's Agent              10:32 AM     │
+│  🤖 Sam's Agent              10:32 AM     │
 │  ┌────────────────────────────────────────┐  │
 │  │ Scheduled onboarding kickoff for      │  │
-│  │ Monday 10am. Brett — should I send    │  │
+│  │ Monday 10am. Sam — should I send    │  │
 │  │ the welcome packet to Jane?           │  │
 │  └────────────────────────────────────────┘  │
 │                                              │
-│  👤 Brett                      10:34 AM     │
+│  👤 Sam                      10:34 AM     │
 │  ┌────────────────────────────────────────┐  │
 │  │ Yes send it                           │  │
 │  └────────────────────────────────────────┘  │
 │                                              │
-│  🤖 Brett's Agent              10:34 AM     │
+│  🤖 Sam's Agent              10:34 AM     │
 │  ┌────────────────────────────────────────┐  │
 │  │ Done. Welcome packet sent to          │  │
 │  │ jane@acme.com                         │  │
@@ -486,7 +486,7 @@ packages/team-core/
   input: {
     message: string,       // visible text
     agentContext: string,   // hidden context for other agents
-    to?: string,           // null = broadcast, "brett" = direct
+    to?: string,           // null = broadcast, "sam" = direct
     attachments?: string[] // file paths to attach
   }
 }
@@ -506,9 +506,9 @@ packages/team-core/
 
 Leverages the existing Expo push notification system. When:
 
-1. **Your agent is tagged** (`to: "brett"`) → push notification: "Brian's agent: Closed the Acme deal. Your agent is reviewing."
+1. **Your agent is tagged** (`to: "sam"`) → push notification: "Brian's agent: Closed the Acme deal. Your agent is reviewing."
 2. **Your agent needs approval** → push notification: "Your agent wants to send a welcome packet to jane@acme.com. Approve?"
-3. **A human @mentions you** → push notification: "Brian: @Brett can you check the staging deploy?"
+3. **A human @mentions you** → push notification: "Brian: @Sam can you check the staging deploy?"
 
 Notification taps open the Team pane in the desktop or mobile app.
 

@@ -28,7 +28,7 @@ Personal `chat()` is unchanged. If a user says "tell the team about X" in person
 - Same model as memory: `text-embedding-3-small`, 512 dims, via relay
 - Graceful degradation: if relay is down, skip embedding, store message in JSON only. Catch up on un-embedded messages next time (mtime-style check).
 
-Privacy boundary: only messages that arrive through your TeamClient get embedded. The relay already enforces visibility — it only sends you broadcasts and messages where you're a sender or recipient. Brian-to-Betty DMs never reach Brett's agent, so they never enter Brett's embeddings. No extra filtering needed.
+Privacy boundary: only messages that arrive through your TeamClient get embedded. The relay already enforces visibility — it only sends you broadcasts and messages where you're a sender or recipient. Brian-to-Betty DMs never reach Sam's agent, so they never enter Sam's embeddings. No extra filtering needed.
 
 New methods:
 
@@ -46,12 +46,12 @@ When a tagged message arrives at `onTaggedMessage`:
 ```
 [Recent team messages]
 - Brian (2min ago): "The Acme renewal is at $50k"
-- Brett's Agent (5min ago): "I'll check the contract terms"
+- Sam's Agent (5min ago): "I'll check the contract terms"
 ...
 
 [Relevant older context]
 - Brian (3 days ago): "Acme Corp wants to renew, initial ask was $45k"
-- Brett's Agent (3 days ago): "Found the original contract in files — signed at $40k/yr"
+- Sam's Agent (3 days ago): "Found the original contract in files — signed at $40k/yr"
 ...
 ```
 

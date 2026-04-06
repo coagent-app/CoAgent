@@ -456,7 +456,7 @@ new_sqlite_classes = ["TeamChannel"]
 **Step 5: Deploy and test**
 
 Run: `cd relay && wrangler deploy`
-Test: `curl -H "Authorization: Bearer YOUR_TOKEN" https://coagent-relay.brettponters.workers.dev/team/roster`
+Test: `curl -H "Authorization: Bearer YOUR_TOKEN" https://coagent-relay.coagent-app.workers.dev/team/roster`
 Expected: `{"team":null}` (not in a team yet)
 
 **Step 6: Commit**
@@ -1221,7 +1221,7 @@ git commit -m "feat(teams): add TeamPane and team UI to desktop app"
  * Usage: RELAY_URL=... RELAY_TOKEN=... USER_ID=brian tsx scripts/test-team-agent.ts
  */
 
-const RELAY_URL = process.env.RELAY_URL || 'https://coagent-relay.brettponters.workers.dev'
+const RELAY_URL = process.env.RELAY_URL || 'https://coagent-relay.coagent-app.workers.dev'
 const RELAY_TOKEN = process.env.RELAY_TOKEN!
 const USER_ID = process.env.USER_ID || 'brian'
 const USER_NAME = process.env.USER_NAME || 'Brian'
@@ -1301,7 +1301,7 @@ main()
 
 **Step 2: Test the full flow**
 
-1. Create a second test token: `curl -X POST -H "Authorization: Bearer YOUR_ADMIN_TOKEN" -H "Content-Type: application/json" -d '{"email":"test-brian@test.com"}' https://coagent-relay.brettponters.workers.dev/admin/create-token`
+1. Create a second test token: `curl -X POST -H "Authorization: Bearer YOUR_ADMIN_TOKEN" -H "Content-Type: application/json" -d '{"email":"test-brian@test.com"}' https://coagent-relay.coagent-app.workers.dev/admin/create-token`
 2. Create team from your CoAgent Settings or via curl
 3. Join team with the test token
 4. Run the test script: `RELAY_TOKEN=<brian-token> USER_ID=brian tsx scripts/test-team-agent.ts`

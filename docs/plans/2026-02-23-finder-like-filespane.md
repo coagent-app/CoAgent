@@ -161,8 +161,8 @@ import { listFiles, listFolders, ingestFile, deleteFileEntry, createFolder, move
 **Step 6: Build and verify types compile**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/packages/shared && pnpm build
-cd /Users/brettponters/AI-Projects/CoAgent/packages/agent-core && pnpm build 2>&1 | tail -20
+cd /Users/coagent-app/AI-Projects/CoAgent/packages/shared && pnpm build
+cd /Users/coagent-app/AI-Projects/CoAgent/packages/agent-core && pnpm build 2>&1 | tail -20
 ```
 
 Expected: no TypeScript errors.
@@ -170,7 +170,7 @@ Expected: no TypeScript errors.
 **Step 7: Commit**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent
+cd /Users/coagent-app/AI-Projects/CoAgent
 git add packages/shared/src/index.ts packages/agent-core/src/file-store.ts
 git commit -m "feat: add nested folder support and moveFolder to file-store"
 ```
@@ -232,8 +232,8 @@ And destructure it in the component signature.
 **Step 5: Build and verify**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/packages/agent-core && pnpm build 2>&1 | tail -5
-cd /Users/brettponters/AI-Projects/CoAgent/apps/desktop && pnpm tsc --noEmit 2>&1 | tail -20
+cd /Users/coagent-app/AI-Projects/CoAgent/packages/agent-core && pnpm build 2>&1 | tail -5
+cd /Users/coagent-app/AI-Projects/CoAgent/apps/desktop && pnpm tsc --noEmit 2>&1 | tail -20
 ```
 
 Expected: no errors.
@@ -241,7 +241,7 @@ Expected: no errors.
 **Step 6: Commit**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent
+cd /Users/coagent-app/AI-Projects/CoAgent
 git add packages/agent-core/src/server.ts apps/desktop/src/hooks/useAgent.ts apps/desktop/src/App.tsx apps/desktop/src/components/FilesPane.tsx
 git commit -m "feat: wire move_folder through server, useAgent, and App"
 ```
@@ -540,11 +540,11 @@ This stays the same — `visibleFolders` now uses `directChildFolders` which ret
 **Step 12: Type-check and commit**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/apps/desktop && pnpm tsc --noEmit 2>&1 | tail -20
+cd /Users/coagent-app/AI-Projects/CoAgent/apps/desktop && pnpm tsc --noEmit 2>&1 | tail -20
 ```
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent
+cd /Users/coagent-app/AI-Projects/CoAgent
 git add apps/desktop/src/components/FilesPane.tsx
 git commit -m "feat: nested folder navigation and drag-to-nest in FilesPane"
 ```
@@ -579,7 +579,7 @@ Replace the file contents with:
 **Step 2: Build and verify**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/apps/desktop && pnpm tauri build --no-bundle 2>&1 | grep -i "error\|warn" | head -20
+cd /Users/coagent-app/AI-Projects/CoAgent/apps/desktop && pnpm tauri build --no-bundle 2>&1 | grep -i "error\|warn" | head -20
 ```
 
 If the permission name is wrong, open `apps/desktop/src-tauri/gen/schemas/desktop-schema.json`, search for `asset`, and use the correct identifier. Common alternatives:
@@ -589,7 +589,7 @@ If the permission name is wrong, open `apps/desktop/src-tauri/gen/schemas/deskto
 **Step 3: Commit**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent
+cd /Users/coagent-app/AI-Projects/CoAgent
 git add apps/desktop/src-tauri/capabilities/default.json
 git commit -m "feat: add asset protocol permission for local file thumbnails"
 ```
@@ -687,13 +687,13 @@ Replace with:
 **Step 5: Type-check**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/apps/desktop && pnpm tsc --noEmit 2>&1 | tail -10
+cd /Users/coagent-app/AI-Projects/CoAgent/apps/desktop && pnpm tsc --noEmit 2>&1 | tail -10
 ```
 
 **Step 6: Commit**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent
+cd /Users/coagent-app/AI-Projects/CoAgent
 git add apps/desktop/src/components/FilesPane.tsx
 git commit -m "feat: add image thumbnail preview using convertFileSrc"
 ```
@@ -709,7 +709,7 @@ git commit -m "feat: add image thumbnail preview using convertFileSrc"
 **Step 1: Install pdfjs-dist**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/apps/desktop && pnpm add pdfjs-dist
+cd /Users/coagent-app/AI-Projects/CoAgent/apps/desktop && pnpm add pdfjs-dist
 ```
 
 **Step 2: Add `PdfThumbnail` component**
@@ -830,13 +830,13 @@ In the icon container inside `renderFileGrid`, update the conditional:
 **Step 6: Type-check**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/apps/desktop && pnpm tsc --noEmit 2>&1 | tail -10
+cd /Users/coagent-app/AI-Projects/CoAgent/apps/desktop && pnpm tsc --noEmit 2>&1 | tail -10
 ```
 
 **Step 7: Commit**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent
+cd /Users/coagent-app/AI-Projects/CoAgent
 git add apps/desktop/package.json apps/desktop/src/components/FilesPane.tsx
 git commit -m "feat: add PDF first-page thumbnail preview using pdfjs-dist"
 ```
@@ -947,13 +947,13 @@ function fileIconColor(filename: string): string {
 **Step 8: Type-check and verify**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/apps/desktop && pnpm tsc --noEmit 2>&1 | tail -10
+cd /Users/coagent-app/AI-Projects/CoAgent/apps/desktop && pnpm tsc --noEmit 2>&1 | tail -10
 ```
 
 **Step 9: Commit**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent
+cd /Users/coagent-app/AI-Projects/CoAgent
 git add apps/desktop/src/components/FilesPane.tsx
 git commit -m "feat: fluid animations and colored file type icons in FilesPane"
 ```
@@ -963,7 +963,7 @@ git commit -m "feat: fluid animations and colored file type icons in FilesPane"
 ### Final: Launch and smoke test
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent && pnpm tauri dev
+cd /Users/coagent-app/AI-Projects/CoAgent && pnpm tauri dev
 ```
 
 Smoke test checklist:

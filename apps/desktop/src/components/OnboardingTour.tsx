@@ -181,7 +181,7 @@ export function OnboardingTour({ settings, onUpdate, onOpenIntegrations, onNavig
                     onKeyDown={e => {
                       if (e.key === 'Enter' && activationCode.trim()) {
                         setActivating(true)
-                        onActivate?.(activationCode.trim(), 'https://coagent-relay.brettponters.workers.dev')
+                        onActivate?.(activationCode.trim(), (import.meta.env.VITE_RELAY_URL as string))
                         setTimeout(() => setActivating(false), 3000)
                       }
                     }}
@@ -194,7 +194,7 @@ export function OnboardingTour({ settings, onUpdate, onOpenIntegrations, onNavig
                     onClick={() => {
                       if (!activationCode.trim()) { setActivationError('Enter your activation code'); return }
                       setActivating(true)
-                      onActivate?.(activationCode.trim(), 'https://coagent-relay.brettponters.workers.dev')
+                      onActivate?.(activationCode.trim(), (import.meta.env.VITE_RELAY_URL as string))
                       setTimeout(() => setActivating(false), 3000)
                     }}
                     disabled={activating}

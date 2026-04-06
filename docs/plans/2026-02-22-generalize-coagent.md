@@ -21,7 +21,7 @@
 **Step 1: Delete the rentcast package**
 
 ```bash
-rm -rf /Users/brettponters/AI-Projects/CoAgent/packages/mcp-rentcast
+rm -rf /Users/coagent-app/AI-Projects/CoAgent/packages/mcp-rentcast
 ```
 
 **Step 2: Remove rentcast from server.ts**
@@ -48,7 +48,7 @@ Open `pnpm-workspace.yaml`. Remove `packages/mcp-rentcast` from the packages lis
 **Step 4: Build to verify no errors**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/packages/agent-core
+cd /Users/coagent-app/AI-Projects/CoAgent/packages/agent-core
 npm run build 2>&1
 ```
 
@@ -57,7 +57,7 @@ Expected: clean build, no TypeScript errors.
 **Step 5: Commit**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent
+cd /Users/coagent-app/AI-Projects/CoAgent
 git add -A
 git commit -m "chore: remove mcp-rentcast (real estate specific)"
 ```
@@ -86,7 +86,7 @@ type: 'task' | 'document' | 'message' | 'request' | 'other'
 **Step 2: Build shared**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/packages/shared
+cd /Users/coagent-app/AI-Projects/CoAgent/packages/shared
 npm run build 2>&1
 ```
 
@@ -95,7 +95,7 @@ Expected: clean build.
 **Step 3: Build agent-core (catches type mismatches)**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/packages/agent-core
+cd /Users/coagent-app/AI-Projects/CoAgent/packages/agent-core
 npm run build 2>&1
 ```
 
@@ -111,7 +111,7 @@ type: { type: 'string', enum: ['task', 'document', 'message', 'request', 'other'
 **Step 4: Commit**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent
+cd /Users/coagent-app/AI-Projects/CoAgent
 git add -A
 git commit -m "feat: generalize queue approval types"
 ```
@@ -140,7 +140,7 @@ const MCP_CONFIG_NAME = 'coagent'
 **Step 2: Build to verify**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/packages/agent-core
+cd /Users/coagent-app/AI-Projects/CoAgent/packages/agent-core
 npm run build 2>&1
 ```
 
@@ -149,7 +149,7 @@ Expected: clean build.
 **Step 3: Commit**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent
+cd /Users/coagent-app/AI-Projects/CoAgent
 git add packages/agent-core/src/composio-setup.ts
 git commit -m "chore: rename composio MCP config from coagent-real-estate to coagent"
 ```
@@ -271,7 +271,7 @@ if (trigger.source === 'memory_cleanup') return `[Memory cleanup — ${time}] Re
 **Step 5: Build**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/packages/agent-core
+cd /Users/coagent-app/AI-Projects/CoAgent/packages/agent-core
 npm run build 2>&1
 ```
 
@@ -280,7 +280,7 @@ Expected: clean build.
 **Step 6: Commit**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent
+cd /Users/coagent-app/AI-Projects/CoAgent
 git add packages/agent-core/src/agent.ts
 git commit -m "feat: generalize agent system prompt and adaptive onboarding"
 ```
@@ -294,7 +294,7 @@ git commit -m "feat: generalize agent system prompt and adaptive onboarding"
 
 **Step 1: Create the file**
 
-Create `/Users/brettponters/AI-Projects/CoAgent/docs/INTEGRATIONS.md` with this content:
+Create `/Users/coagent-app/AI-Projects/CoAgent/docs/INTEGRATIONS.md` with this content:
 
 ```markdown
 # CoAgent Integrations
@@ -382,7 +382,7 @@ Have an integration you need? [Open an issue](https://github.com/your-org/coagen
 **Step 2: Commit**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent
+cd /Users/coagent-app/AI-Projects/CoAgent
 git add docs/INTEGRATIONS.md
 git commit -m "docs: add INTEGRATIONS.md with all Composio integrations"
 ```
@@ -394,22 +394,22 @@ git commit -m "docs: add INTEGRATIONS.md with all Composio integrations"
 **Step 1: Install all dependencies**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent
+cd /Users/coagent-app/AI-Projects/CoAgent
 pnpm install 2>&1
 ```
 
 If pnpm is not available, use npm workspaces:
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent
+cd /Users/coagent-app/AI-Projects/CoAgent
 npm install 2>&1
 ```
 
 **Step 2: Build all packages in order**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/packages/shared && npm run build 2>&1
-cd /Users/brettponters/AI-Projects/CoAgent/packages/mcp-memory && npm run build 2>&1
-cd /Users/brettponters/AI-Projects/CoAgent/packages/agent-core && npm run build 2>&1
+cd /Users/coagent-app/AI-Projects/CoAgent/packages/shared && npm run build 2>&1
+cd /Users/coagent-app/AI-Projects/CoAgent/packages/mcp-memory && npm run build 2>&1
+cd /Users/coagent-app/AI-Projects/CoAgent/packages/agent-core && npm run build 2>&1
 ```
 
 Expected: all three build clean with no TypeScript errors.
@@ -417,7 +417,7 @@ Expected: all three build clean with no TypeScript errors.
 **Step 3: Run existing tests**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/packages/agent-core && npm test 2>&1
+cd /Users/coagent-app/AI-Projects/CoAgent/packages/agent-core && npm test 2>&1
 ```
 
 Expected: all tests pass. The queue test may need updating — if it references `type: 'contract'` or `type: 'cma'`, update those to `type: 'task'` or `type: 'document'`.
@@ -425,7 +425,7 @@ Expected: all tests pass. The queue test may need updating — if it references 
 **Step 4: Commit**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent
+cd /Users/coagent-app/AI-Projects/CoAgent
 git add -A
 git commit -m "chore: install deps and verify full build passes"
 ```
@@ -439,7 +439,7 @@ git commit -m "chore: install deps and verify full build passes"
 
 **Step 1: Write README**
 
-Create `/Users/brettponters/AI-Projects/CoAgent/README.md`:
+Create `/Users/coagent-app/AI-Projects/CoAgent/README.md`:
 
 ```markdown
 # CoAgent
@@ -480,7 +480,7 @@ MIT License.
 **Step 2: Commit**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent
+cd /Users/coagent-app/AI-Projects/CoAgent
 git add README.md
 git commit -m "docs: add README for open source CoAgent"
 ```

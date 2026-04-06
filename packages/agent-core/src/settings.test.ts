@@ -78,18 +78,18 @@ describe('settings', () => {
   })
 
   it('persists and reads back profile fields', async () => {
-    await writeSettings(tmpDir, { name: 'Brett', email: 'brett@example.com', role: 'real estate agent' })
+    await writeSettings(tmpDir, { name: 'Sam', email: 'sam@example.com', role: 'real estate agent' })
     const s = await readSettings(tmpDir)
-    expect(s.name).toBe('Brett')
-    expect(s.email).toBe('brett@example.com')
+    expect(s.name).toBe('Sam')
+    expect(s.email).toBe('sam@example.com')
     expect(s.role).toBe('real estate agent')
   })
 
   it('partial profile update does not clobber other fields', async () => {
-    await writeSettings(tmpDir, { name: 'Brett', email: 'brett@example.com' })
-    await writeSettings(tmpDir, { name: 'Brett P' })
+    await writeSettings(tmpDir, { name: 'Sam', email: 'sam@example.com' })
+    await writeSettings(tmpDir, { name: 'Sam P' })
     const s = await readSettings(tmpDir)
-    expect(s.name).toBe('Brett P')
-    expect(s.email).toBe('brett@example.com')
+    expect(s.name).toBe('Sam P')
+    expect(s.email).toBe('sam@example.com')
   })
 })

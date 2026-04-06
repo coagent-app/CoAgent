@@ -149,7 +149,7 @@ Remove `useState`, `ChevronDown` from imports if no longer used.
 **Step 6: Verify TypeScript compiles**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/apps/desktop && npx tsc --noEmit
+cd /Users/coagent-app/AI-Projects/CoAgent/apps/desktop && npx tsc --noEmit
 ```
 Expected: no errors (App.tsx will error until Task 4 — that's fine, fix in Task 4).
 
@@ -274,7 +274,7 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
           <p className="text-[12px] text-neutral-400">
             Need something else?{' '}
             <a
-              href="https://github.com/brettponters/coagent/issues"
+              href="https://github.com/coagent-app/coagent/issues"
               target="_blank"
               rel="noreferrer"
               className="text-neutral-600 hover:underline"
@@ -292,7 +292,7 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
 **Step 2: Verify TypeScript**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/apps/desktop && npx tsc --noEmit
+cd /Users/coagent-app/AI-Projects/CoAgent/apps/desktop && npx tsc --noEmit
 ```
 Expected: no errors for this file (App.tsx may still error until Task 4).
 
@@ -354,7 +354,7 @@ Inside the `<>` fragment, after the `<div className="app-body">` block:
 **Step 4: Verify TypeScript**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/apps/desktop && npx tsc --noEmit
+cd /Users/coagent-app/AI-Projects/CoAgent/apps/desktop && npx tsc --noEmit
 ```
 Expected: clean — no errors.
 

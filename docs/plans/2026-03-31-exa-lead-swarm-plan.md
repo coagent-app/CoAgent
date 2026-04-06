@@ -340,7 +340,7 @@ git commit -m "feat: add Lead Swarm Protocol to agent system prompt"
 **Step 1: Restart the dev server**
 
 ```bash
-cd /Users/brettponters/AI-Projects/CoAgent/apps/desktop && pkill -f "coagent-desktop"; pkill -f "server.js"; sleep 2 && pnpm tauri dev
+cd /Users/coagent-app/AI-Projects/CoAgent/apps/desktop && pkill -f "coagent-desktop"; pkill -f "server.js"; sleep 2 && pnpm tauri dev
 ```
 
 **Step 2: Test in chat**
