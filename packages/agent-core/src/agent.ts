@@ -978,7 +978,7 @@ const HEARTBEAT_BLOCKED_PATTERNS = [
 ]
 
 // Tools gated behind a skill — only included when the skill has been activated
-const SKILL_GATED_TOOLS = new Set(['create_custom_integration'])
+const SKILL_GATED_TOOLS = new Set<string>()
 
 // Team-only tools — excluded when agent has no team connection
 const TEAM_ONLY_TOOLS = new Set(['send_team_message', 'read_team', 'team_notes'])
@@ -1577,7 +1577,7 @@ Rules:
     const KIMI = 'kimi-k2.5'
     const currentModel = (context === 'heartbeat' || context === 'team') ? KIMI : settings.powerModel
     const isClaudeModel = isAnthropicModel(currentModel)
-    const maxTokens = context === 'heartbeat' ? 4096 : 16000
+    const maxTokens = context === 'heartbeat' ? 4096 : 8192
 
     console.log(`[Agent] Starting ${context} on ${currentModel} (max_tokens: ${maxTokens})`)
 
