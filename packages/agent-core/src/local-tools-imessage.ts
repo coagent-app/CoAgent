@@ -152,54 +152,60 @@ function coreDataToISO(ts: number | null): string | null {
  * `text` column NULL for locally-sent/newer messages and puts the text here
  * instead.
  *
- * The typedstream format embeds strings after a `\x01\x2b` marker followed by
- * a length prefix (literal < 0x81, or 0x81 = u16 LE, 0x82 = u32 LE) and then
- * UTF-8 bytes. Class names (NSString, NSObject, …) are stored the same way,
- * so we skip any decoded run that looks like a class name and return the first
- * real payload string.
+ * Format: NeXTSTEP/Apple `typedstream` (legacy NSArchiver, NOT NSKeyedArchiver).
+ * The first `0x01 0x2b` byte pair after the header is the type-tag for "1 type
+ * follows, the tag is `+` (UTF-8 C-string)" and immediately precedes the message
+ * body. The next 1, 3, or 5 bytes are a length prefix:
+ *   - 0x00..0x80      → length is the byte itself
+ *   - 0x81 LL LL      → length is u16 LE
+ *   - 0x82 LL LL LL LL → length is u32 LE
+ * followed by `length` UTF-8 bytes.
+ *
+ * Modeled after ReagentX/imessage-exporter's streamtyped.rs legacy parser, which
+ * is shipped in production with a comprehensive test suite (ASCII, Unicode,
+ * 2359-byte long messages, attachments, URLs, mathematical script).
  */
 function parseAttributedBody(blob: Uint8Array | Buffer | null | undefined): string | null {
   if (!blob || blob.length === 0) return null
   const buf: Uint8Array = blob instanceof Uint8Array ? blob : new Uint8Array(blob as any)
-  const decoder = new TextDecoder('utf-8', { fatal: true })
 
-  const findMarker = (from: number): number => {
-    for (let i = from; i < buf.length - 1; i++) {
-      if (buf[i] === 0x01 && buf[i + 1] === 0x2b) return i
-    }
-    return -1
+  // 1. Find the FIRST 0x01 0x2b marker. Class names like "NSString" use a
+  //    different shape (0x84 [len] name 0x00) and never appear here.
+  let i = -1
+  for (let k = 0; k < buf.length - 1; k++) {
+    if (buf[k] === 0x01 && buf[k + 1] === 0x2b) { i = k; break }
   }
+  if (i < 0) return null
 
-  let idx = findMarker(0)
-  while (idx >= 0) {
-    const lenPos = idx + 2
-    if (lenPos >= buf.length) break
-    const marker = buf[lenPos]
-    let len = -1
-    let start = -1
-    if (marker < 0x81) {
-      len = marker
-      start = lenPos + 1
-    } else if (marker === 0x81 && lenPos + 2 < buf.length) {
-      len = buf[lenPos + 1] | (buf[lenPos + 2] << 8)
-      start = lenPos + 3
-    } else if (marker === 0x82 && lenPos + 4 < buf.length) {
-      len = buf[lenPos + 1] | (buf[lenPos + 2] << 8) | (buf[lenPos + 3] << 16) | (buf[lenPos + 4] << 24)
-      start = lenPos + 5
-    }
-
-    if (len > 0 && start > 0 && start + len <= buf.length) {
-      try {
-        const text = decoder.decode(buf.subarray(start, start + len))
-        // Skip class names encoded inline in the typedstream
-        if (!text.startsWith('NS') && !text.startsWith('__kIM')) {
-          return text
-        }
-      } catch { /* not valid UTF-8, try next marker */ }
-    }
-    idx = findMarker(idx + 1)
+  // 2. Decode the length prefix that immediately follows the type tag.
+  const p = i + 2
+  if (p >= buf.length) return null
+  const tag = buf[p]
+  let len: number
+  let start: number
+  if (tag <= 0x80) {
+    len = tag
+    start = p + 1
+  } else if (tag === 0x81 && p + 2 < buf.length) {
+    len = buf[p + 1] | (buf[p + 2] << 8)
+    start = p + 3
+  } else if (tag === 0x82 && p + 4 < buf.length) {
+    len = buf[p + 1] | (buf[p + 2] << 8) | (buf[p + 3] << 16) | (buf[p + 4] << 24)
+    start = p + 5
+  } else {
+    return null
   }
-  return null
+  if (len <= 0 || start + len > buf.length) return null
+
+  // 3. Non-fatal UTF-8 decode so a corrupted byte yields U+FFFD instead of
+  //    throwing — Apple has been known to ship invalid sequences in old rows.
+  const text = new TextDecoder('utf-8').decode(buf.subarray(start, start + len))
+  if (!text) return null
+
+  // 4. Defensive backstop: a real message body never equals a known class name.
+  if (/^(NS|__kIM)/.test(text)) return null
+
+  return text
 }
 
 function openDb(): any {

@@ -235,7 +235,7 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
               {/* Capabilities */}
               {detailIntegration.capabilities && (
                 <div className="mb-5">
-                  <p className="text-[11px] font-semibold text-neutral-400 dark:text-neutral-500 uppercase tracking-wider mb-2">What the agent can do</p>
+                  <p className="text-[11px] font-semibold text-neutral-400 dark:text-neutral-500 tracking-wider mb-2">What the agent can do</p>
                   <ul className="flex flex-col gap-1.5">
                     {detailIntegration.capabilities.split(', ').map((cap, i) => (
                       <li key={i} className="flex items-start gap-2">
