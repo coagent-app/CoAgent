@@ -37,6 +37,44 @@ jobs:
           node-version: 20
           cache: pnpm
 
+      # Download standalone Node.js binary to bundle with the app.
+      # This lets custom integrations run even when users don't have Node installed.
+      - name: Download bundled Node.js
+        run: |
+          NODE_VERSION="v22.12.0"
+          case "${{ matrix.rust-target }}" in
+            aarch64-apple-darwin) NODE_ARCH="darwin-arm64" ;;
+            x86_64-apple-darwin)  NODE_ARCH="darwin-x64"  ;;
+          esac
+          echo "Downloading node ${NODE_VERSION} for ${NODE_ARCH}"
+          curl -fsSL "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-${NODE_ARCH}.tar.gz" -o /tmp/node.tar.gz
+          rm -rf /tmp/node-extract
+          mkdir -p /tmp/node-extract
+          tar -xzf /tmp/node.tar.gz -C /tmp/node-extract --strip-components=1
+          mkdir -p apps/desktop/src-tauri/binaries
+          cp /tmp/node-extract/bin/node "apps/desktop/src-tauri/binaries/node-${{ matrix.rust-target }}"
+          chmod +x "apps/desktop/src-tauri/binaries/node-${{ matrix.rust-target }}"
+          ls -la "apps/desktop/src-tauri/binaries/node-${{ matrix.rust-target }}"
+
+      # Pre-install @modelcontextprotocol/sdk so custom integrations don't need
+      # to run `npm install` at runtime on the user's machine.
+      - name: Vendor MCP SDK
+        run: |
+          mkdir -p apps/desktop/src-tauri/vendor
+          cd apps/desktop/src-tauri/vendor
+          cat > package.json <<'EOF'
+          {
+            "name": "coagent-vendor",
+            "version": "0.0.0",
+            "private": true,
+            "dependencies": {
+              "@modelcontextprotocol/sdk": "^1.0.0"
+            }
+          }
+          EOF
+          npm install --production --ignore-scripts
+          ls node_modules/@modelcontextprotocol/sdk/package.json
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
 
@@ -90,7 +128,12 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           ENTITLEMENTS="apps/desktop/src-tauri/Entitlements.plist"
-          for bin in apps/desktop/src-tauri/binaries/coagent-*-${{ matrix.rust-target }}; do
+          # Sign coagent-server, coagent-memory, and bundled node for this target
+          for bin in \
+            apps/desktop/src-tauri/binaries/coagent-server-${{ matrix.rust-target }} \
+            apps/desktop/src-tauri/binaries/coagent-memory-${{ matrix.rust-target }} \
+            apps/desktop/src-tauri/binaries/node-${{ matrix.rust-target }}; do
+            if [ ! -f "$bin" ]; then continue; fi
             echo "Signing $bin"
             codesign --force --options runtime --entitlements "$ENTITLEMENTS" \
               --sign "$APPLE_SIGNING_IDENTITY" "$bin"

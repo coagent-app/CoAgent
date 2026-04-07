@@ -445,6 +445,20 @@ fn find_server_binary() -> Option<std::path::PathBuf> {
     None
 }
 
+fn find_node_binary() -> Option<std::path::PathBuf> {
+    // Bundled node sidecar — sits next to coagent-server in Contents/MacOS/
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let name = if cfg!(target_os = "windows") { "node.exe" } else { "node" };
+            let candidate = dir.join(name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
 /// Start the CGEventTap + channel reader threads for fn-key voice input.
 /// Called lazily on first voice-mode enable so we never prompt for accessibility on launch.
 #[cfg(target_os = "macos")]
@@ -604,10 +618,35 @@ fn main() {
                 // Brief pause to let the port release
                 std::thread::sleep(std::time::Duration::from_millis(300));
 
+                // Locate bundled node + vendor dir so we can pass them to the
+                // server sidecar. This lets custom integrations run without
+                // requiring the user to have Node.js installed.
+                let node_path: Option<std::path::PathBuf> = find_node_binary();
+                let vendor_dir: Option<std::path::PathBuf> = app
+                    .path()
+                    .resource_dir()
+                    .ok()
+                    .map(|d| d.join("vendor").join("node_modules"))
+                    .filter(|p| p.exists());
+                if let Some(n) = &node_path {
+                    log(&format!("[Tauri] Bundled node: {}", n.display()));
+                } else {
+                    log("[Tauri] Bundled node NOT found next to executable");
+                }
+                if let Some(v) = &vendor_dir {
+                    log(&format!("[Tauri] Vendor dir: {}", v.display()));
+                } else {
+                    log("[Tauri] Vendor dir NOT found in resources");
+                }
+
                 if let Some(server_path) = find_server_binary() {
                     let path = server_path.clone();
-                    // Initial launch
-                    match Command::new(&path).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+                    // Initial launch — pass bundled node + vendor as env vars
+                    let mut cmd = Command::new(&path);
+                    cmd.stdout(Stdio::null()).stderr(Stdio::null());
+                    if let Some(n) = &node_path { cmd.env("COAGENT_NODE_PATH", n); }
+                    if let Some(v) = &vendor_dir { cmd.env("COAGENT_VENDOR_DIR", v); }
+                    match cmd.spawn() {
                         Ok(child) => {
                             log(&format!("[Tauri] Server started (pid: {})", child.id()));
                             *state_handle.lock().unwrap() = Some(child);
@@ -616,6 +655,8 @@ fn main() {
                     }
                     // Watchdog thread — checks every 5s, restarts if dead
                     let watchdog_state = state_handle.clone();
+                    let watchdog_node = node_path.clone();
+                    let watchdog_vendor = vendor_dir.clone();
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_secs(5));
                         let mut consecutive_failures = 0u32;
@@ -647,7 +688,11 @@ fn main() {
                                 let backoff = std::time::Duration::from_secs(2u64.pow(consecutive_failures));
                                 log(&format!("[Tauri] Restarting server (attempt {}, backoff {:?})", consecutive_failures + 1, backoff));
                                 std::thread::sleep(backoff);
-                                match Command::new(&path).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+                                let mut cmd = Command::new(&path);
+                                cmd.stdout(Stdio::null()).stderr(Stdio::null());
+                                if let Some(n) = &watchdog_node { cmd.env("COAGENT_NODE_PATH", n); }
+                                if let Some(v) = &watchdog_vendor { cmd.env("COAGENT_VENDOR_DIR", v); }
+                                match cmd.spawn() {
                                     Ok(child) => {
                                         log(&format!("[Tauri] Server restarted (pid: {})", child.id()));
                                         *watchdog_state.lock().unwrap() = Some(child);

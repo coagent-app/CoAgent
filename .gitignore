@@ -11,3 +11,4 @@ target/
 .dev.vars
 *.tsbuildinfo
 binaries/
+apps/desktop/src-tauri/vendor/

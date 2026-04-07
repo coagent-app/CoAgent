@@ -974,6 +974,59 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
   initGoogleCalendar(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET)
 }
 
+/**
+ * Install dependencies for a custom MCP.
+ *
+ * Preferred path: if the app shipped with a vendored @modelcontextprotocol/sdk
+ * (COAGENT_VENDOR_DIR set by the Tauri host), symlink it into the custom MCP
+ * directory. This lets custom integrations work on machines without Node.js
+ * installed — the app also ships a standalone `node` binary.
+ *
+ * Fallback: if no vendor dir is available (e.g. dev mode), run `npm install`.
+ */
+async function installCustomMcpDeps(dir: string): Promise<void> {
+  const vendorDir = process.env.COAGENT_VENDOR_DIR
+  if (vendorDir && existsSync(vendorDir)) {
+    const { symlinkSync, unlinkSync, lstatSync } = await import('fs')
+    const linkPath = join(dir, 'node_modules')
+    try {
+      if (existsSync(linkPath) || lstatSync(linkPath).isSymbolicLink()) {
+        unlinkSync(linkPath)
+      }
+    } catch { /* path doesn't exist */ }
+    try {
+      symlinkSync(vendorDir, linkPath, 'dir')
+      console.log(`[Custom MCP] Linked bundled node_modules: ${linkPath} -> ${vendorDir}`)
+      return
+    } catch (err: any) {
+      console.error(`[Custom MCP] Failed to symlink vendor dir, falling back to npm: ${err.message}`)
+    }
+  }
+
+  // Fallback: run npm install (requires Node.js on the user's machine)
+  const { execSync } = await import('child_process')
+  console.log(`[Custom MCP] Running npm install in ${dir}...`)
+  try {
+    execSync('npm install --production --ignore-scripts', {
+      cwd: dir,
+      stdio: 'pipe',
+      timeout: 60000,
+      env: { ...process.env, PATH: process.env.PATH || '' },
+    })
+    console.log(`[Custom MCP] Dependencies installed via npm`)
+  } catch (installErr: any) {
+    const stderr = installErr.stderr?.toString?.() || installErr.message || ''
+    const isMissing = /not found|ENOENT|command not found/i.test(stderr)
+    if (isMissing) {
+      throw new Error(
+        'npm was not found on your system. This build of Co-Agent does not include bundled Node.js — ' +
+        'please update to the latest version, or install Node.js from https://nodejs.org.'
+      )
+    }
+    throw new Error(`npm install failed: ${stderr.slice(0, 500)}`)
+  }
+}
+
 agent.onCustomIntegration = async (action, data) => {
   if (action === 'propose') {
     // Normalize capabilities — agent may send array, object, or JSON string
@@ -1046,29 +1099,9 @@ agent.onCustomIntegration = async (action, data) => {
         ...(data.domain ? { domain: data.domain } : {})
       }, data.code, pkg)
 
-      // Run npm install
-      const { execSync } = await import('child_process')
+      // Install dependencies (vendor symlink if bundled, otherwise npm install)
       const dir = getCustomMcpDir(name)
-      console.log(`[Custom MCP] Installing dependencies in ${dir}...`)
-      try {
-        execSync('npm install --production --ignore-scripts', {
-          cwd: dir,
-          stdio: 'pipe',
-          timeout: 60000,
-          env: { ...process.env, PATH: process.env.PATH || '' },
-        })
-        console.log(`[Custom MCP] Dependencies installed for ${name}`)
-      } catch (installErr: any) {
-        const stderr = installErr.stderr?.toString?.() || installErr.message || ''
-        const isMissing = /not found|ENOENT|command not found/i.test(stderr)
-        if (isMissing) {
-          throw new Error(
-            'npm was not found on your system. Co-Agent needs Node.js + npm installed to build custom integrations. ' +
-            'Install from https://nodejs.org (or via Homebrew: `brew install node`), then try again.'
-          )
-        }
-        throw new Error(`npm install failed: ${stderr.slice(0, 500)}`)
-      }
+      await installCustomMcpDeps(dir)
 
       // Send credential form to frontend
       if (authFields.length > 0) {
@@ -1099,7 +1132,7 @@ agent.onCustomIntegration = async (action, data) => {
     try {
       await updateCustomMcpCode(data.name, data.code)
 
-      // If deps changed, re-run npm install
+      // If deps changed, re-install (vendor symlink if bundled, otherwise npm)
       if (data.dependencies) {
         const { readFile, writeFile } = await import('fs/promises')
         const dir = getCustomMcpDir(data.name)
@@ -1107,8 +1140,7 @@ agent.onCustomIntegration = async (action, data) => {
         const pkg = JSON.parse(await readFile(pkgPath, 'utf-8'))
         pkg.dependencies = { '@modelcontextprotocol/sdk': '^1.0.0', ...data.dependencies }
         await writeFile(pkgPath, JSON.stringify(pkg, null, 2), 'utf-8')
-        const { execSync } = await import('child_process')
-        execSync('npm install --production --ignore-scripts', { cwd: dir, stdio: 'pipe', timeout: 60000 })
+        await installCustomMcpDeps(dir)
       }
 
       // Restart the MCP if it's currently connected

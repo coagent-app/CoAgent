@@ -133,6 +133,9 @@ export async function updateCustomMcpCode(name: string, code: string): Promise<v
 export async function getCustomMcpConfigs(): Promise<MCPServerConfig[]> {
   const registry = await readRegistry()
   const configs: MCPServerConfig[] = []
+  // Prefer the bundled node binary if the Tauri host passed its path via env.
+  // Falls back to system `node` for dev mode / unbundled runs.
+  const nodeCommand = process.env.COAGENT_NODE_PATH || 'node'
   for (const entry of registry) {
     if (!entry.connected || !hasCredentials(entry.name)) continue
     const dir = getCustomMcpDir(entry.name)
@@ -140,7 +143,7 @@ export async function getCustomMcpConfigs(): Promise<MCPServerConfig[]> {
     if (!existsSync(indexPath)) continue
     configs.push({
       name: `custom:${entry.name}`,
-      command: 'node',
+      command: nodeCommand,
       args: [indexPath],
       env: loadCustomMcpEnv(entry.name)
     })

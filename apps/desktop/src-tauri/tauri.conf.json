@@ -53,7 +53,11 @@
     "createUpdaterArtifacts": "v1Compatible",
     "externalBin": [
       "binaries/coagent-server",
-      "binaries/coagent-memory"
+      "binaries/coagent-memory",
+      "binaries/node"
+    ],
+    "resources": [
+      "vendor/**/*"
     ],
     "macOS": {
       "entitlements": "Entitlements.plist",
