@@ -222,6 +222,7 @@ export interface SchedulerCallbacks {
   onHeartbeatStream?: (type: 'start' | 'chunk' | 'tool' | 'done', data?: any) => void
   onTodoStream?: (type: 'start' | 'chunk' | 'tool' | 'done', data?: any) => void
   onNightly?: (status: 'success' | 'failed', summary?: string) => void
+  onRoutine?: (status: 'started' | 'done' | 'failed', label: string, summary?: string) => void
 }
 
 export interface SchedulerHandle {
@@ -404,18 +405,22 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
           return
         }
         console.log(`[Scheduler] Routine firing: "${routine.label}"`)
-        callbacks?.onHeartbeat?.('started', `Routine: ${routine.label}`)
+        callbacks?.onRoutine?.('started', routine.label)
         try {
+          let streamed = ''
           await keepAwakeDuring(
-            agent.handleTrigger({
-              source: 'routine' as any,
-              payload: { id: routine.id, label: routine.label, instruction: routine.instruction }
-            })
+            agent.handleTrigger(
+              {
+                source: 'routine',
+                payload: { id: routine.id, label: routine.label, instruction: routine.instruction }
+              },
+              (chunk) => { streamed += chunk }
+            )
           )
-          callbacks?.onHeartbeat?.('done', `Routine completed: ${routine.label}`)
+          callbacks?.onRoutine?.('done', routine.label, streamed.trim() || undefined)
         } catch (err: any) {
           console.error(`[Scheduler] Routine error (${routine.id}):`, err.message)
-          callbacks?.onHeartbeat?.('done')
+          callbacks?.onRoutine?.('failed', routine.label, err.message)
         }
       })
       routineJobs.set(routine.id, job)

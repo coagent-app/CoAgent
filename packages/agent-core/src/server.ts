@@ -947,6 +947,15 @@ const scheduler = startScheduler(agent, DATA_DIR, {
       : `**[Nightly · ${timeStr}]** ❌ Failed: ${summary || 'unknown error'}`
     broadcast({ type: 'chat_response', message: { role: 'assistant', content, timestamp: new Date().toISOString() } })
   },
+  onRoutine: (status, label, summary) => {
+    if (status === 'started') return // only surface completion in chat
+    console.log(`[Server] Routine callback: status=${status}, label=${label}`)
+    const timeStr = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+    const content = status === 'done'
+      ? `**[Routine · ${timeStr}] ${label}**${summary ? `\n${summary}` : ''}`
+      : `**[Routine · ${timeStr}] ${label}** ❌ Failed: ${summary || 'unknown error'}`
+    broadcast({ type: 'chat_response', message: { role: 'assistant', content, timestamp: new Date().toISOString() } })
+  },
   onHeartbeatStream: (() => {
     return (type: 'start' | 'chunk' | 'tool' | 'done', data?: any) => {
       // Heartbeat is independent — don't stream into the chat UI.

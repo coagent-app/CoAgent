@@ -287,7 +287,7 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'schedule',
-    description: 'Manage routines (recurring cron+instruction), tasks (one-time due+instruction), followups (due+instruction — check status then ask user: reschedule/nudge/done). Tasks and followups with due MUST have detailed instruction. Followup example: "Check Gmail for reply from sarah@acme.com re Q1 proposal. If replied, summarize. If not, ask user about nudge." Ask user for followup timing — never assume.',
+    description: 'Manage routines (recurring cron+instruction), tasks (one-time due+instruction), followups (due+instruction — check status then ask user: reschedule/nudge/done). Tasks and followups with due MUST have detailed instruction. Followup example: "Check Gmail for reply from sarah@acme.com re Q1 proposal. If replied, summarize. If not, ask user about nudge." Ask user for followup timing — never assume.\n\nBEFORE creating ANY routine/task/followup: search memory for the static facts the instruction will need every time it fires (recipient emails, home/work addresses, account selectors, project IDs, doc URLs, file paths) and INLINE them into the instruction. The fire-time agent should not have to re-discover these. If a required fact is missing from memory, ask the user for it BEFORE creating — do not create with placeholders.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -297,7 +297,7 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
         label: { type: 'string' },
         cron: { type: 'string', description: 'REQUIRED for routines. Standard 5-field cron: min hour dom month dow. Examples: "0 9 * * *" (daily 9am), "0 9 * * 1-5" (weekdays 9am), "0 14 * * 1,3,5" (Mon/Wed/Fri 2pm), "0 10 * * 1" (Mondays 10am)' },
         due: { type: 'string', description: 'ISO datetime for tasks/followups' },
-        instruction: { type: 'string', description: 'What agent executes when entry fires. Be specific: who/what/where/outcome.' },
+        instruction: { type: 'string', description: 'What agent executes when entry fires. Be specific: who/what/where/outcome. MUST include all static facts inlined (recipients, addresses, accounts, IDs) so the fire-time agent can execute without lookups. Only dynamic data (today\'s traffic, current calendar, recent emails) should be discovered at fire time.' },
         notes: { type: 'string' },
         enabled: { type: 'boolean' },
         filter_type: { type: 'string', enum: ['routine', 'task', 'followup'] },
@@ -2950,6 +2950,13 @@ Rules:
       const context = payload?.context ?? payload?.instruction ?? ''
       const contextSection = context ? `\n\nContext notes:\n${context}` : ''
       return `[Scheduled task — ${time}] A task is now due. Execute it.\n\nTask: ${task}\nTask ID: ${todoId}${contextSection}\n\n1. Read profile.md and any relevant memory for additional context.\n2. Carry out the task using the correct tools.\n3. When done, mark it complete with the schedule tool (action: complete).\n4. Add a done item describing what you did.\n\nDo not do anything outside the scope of this task.`
+    }
+    if (trigger.source === 'routine') {
+      const payload = trigger.payload as any
+      const label = payload?.label ?? 'Routine'
+      const instruction = payload?.instruction ?? ''
+      const instructionSection = instruction ? `\n\nInstructions:\n${instruction}` : ''
+      return `[Routine — ${time}] A scheduled routine is firing. Execute it now.\n\nRoutine: ${label}${instructionSection}\n\n1. Read profile.md and any relevant memory for additional context (e.g. the user's address, preferences, recipients).\n2. Carry out the routine using the correct tools.\n3. Add a done item describing what you did.\n\nDo not do anything outside the scope of this routine.`
     }
     if (trigger.source === 'meeting_brief') {
       const p = trigger.payload as any
