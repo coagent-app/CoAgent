@@ -240,7 +240,7 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
                     {detailIntegration.capabilities.split(', ').map((cap, i) => (
                       <li key={i} className="flex items-start gap-2">
                         <span className="mt-[5px] w-1 h-1 rounded-full bg-neutral-300 dark:bg-neutral-600 flex-shrink-0" />
-                        <span className="text-[13px] text-neutral-700 dark:text-neutral-300">{cap}</span>
+                        <span className="text-[13px] text-neutral-700 dark:text-neutral-300">{cap.charAt(0).toUpperCase() + cap.slice(1)}</span>
                       </li>
                     ))}
                   </ul>
