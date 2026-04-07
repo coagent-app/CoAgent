@@ -199,7 +199,7 @@ export async function searchToolLogs(
 const SYSTEM_PROMPT = `You are a background agent that processes tool usage logs. You have two jobs, in order:
 
 1. UPDATE MEMORY: Search existing memories, then append new entries or edit existing ones.
-   - OFF-LIMITS files (never modify): heartbeat.md, setup.md, profile.md, preferences.md
+   - OFF-LIMITS files (never modify): heartbeat.md, nightly.md, setup.md, profile.md, preferences.md
    - Use search_memory FIRST to check what already exists before writing anything.
    - Use edit_memory to update existing entries (pass exact old_content from read/search results).
    - Use append_memory to add NEW entries to existing files.
@@ -226,7 +226,7 @@ const SYSTEM_PROMPT = `You are a background agent that processes tool usage logs
    - Do NOT delete anything that is still actively useful
    - Skip this step if everything looks clean — don't make changes for the sake of it.
 
-When you are DONE with all memory tool calls, reply with "Done." and nothing else.`
+After you finish all memory tool calls, reply with a ONE-LINE summary of what you did (e.g. "Added Priya Shah to contacts.md, removed 2 stale entries from projects.md") or "Nothing to update." if you made no changes. No preamble, no explanation — just the summary line.`
 
 /**
  * Process tool logs via an agentic Haiku loop with memory tools.
@@ -238,12 +238,30 @@ export async function extractInsights(
   memoryTools: Anthropic.Tool[],
   callMemoryTool: (tool: string, args: Record<string, unknown>) => Promise<string>,
   apiKey?: string
-): Promise<void> {
+): Promise<string | undefined> {
   const logFile = logPath(dataDir)
-  if (!existsSync(logFile)) return
+  if (!existsSync(logFile)) return undefined
 
   const log: ToolLogEntry[] = JSON.parse(readFileSync(logFile, 'utf-8'))
-  if (log.length === 0) return
+  if (log.length === 0) return undefined
+
+  // Read user-editable nightly.md — additive instructions, not a replacement
+  let nightlyInstructions = ''
+  try {
+    const nightlyPath = join(dataDir, 'memory', 'nightly.md')
+    if (existsSync(nightlyPath)) {
+      const raw = readFileSync(nightlyPath, 'utf-8')
+      // Strip comment blocks and check if anything non-whitespace remains beyond section headers
+      const stripped = raw.replace(/<!--[\s\S]*?-->/g, '')
+      const hasContent = stripped
+        .split('\n')
+        .some(line => {
+          const trimmed = line.trim()
+          return trimmed.length > 0 && !trimmed.startsWith('#')
+        })
+      if (hasContent) nightlyInstructions = raw.trim()
+    }
+  } catch {}
 
   const relay = getRelayConfig()
   let openaiClient: OpenAI | null = null
@@ -273,11 +291,15 @@ export async function extractInsights(
     return `${service} (${entries.length} calls):\n${lines}`
   }).join('\n\n')
 
+  const nightlySection = nightlyInstructions
+    ? `\n\nUSER INSTRUCTIONS FROM nightly.md (follow these in addition to your default jobs):\n${nightlyInstructions}\n`
+    : ''
+
   const userMessage = `Here are today's tool usage logs grouped by integration:
 
 ${logSections}
-
-Search memory for existing entries about the people and projects mentioned. Then update memory as needed (edit existing entries, append new ones). Clean up stale entries. When done, reply "Done."`
+${nightlySection}
+Search memory for existing entries about the people and projects mentioned. Then update memory as needed (edit existing entries, append new ones). Clean up stale entries. When done, reply with a one-line summary of what changed.`
 
   // Cache system prompt + tool definitions (stable across runs)
   const cachedTools: Anthropic.Tool[] = memoryTools.map((t, i) =>
@@ -291,6 +313,8 @@ Search memory for existing entries about the people and projects mentioned. Then
   const MAX_TURNS = 15
   const useKimi = !!openaiClient
   const modelName = useKimi ? KIMI_MODEL : 'claude-haiku-4-5-20251001'
+
+  let finalSummary: string | undefined
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     let response: { content: Anthropic.ContentBlock[]; stop_reason: string | null; usage: { input_tokens: number; output_tokens: number } }
@@ -324,6 +348,12 @@ Search memory for existing entries about the people and projects mentioned. Then
     }).catch(() => {})
 
     if (response.stop_reason === 'end_turn') {
+      // Extract the final text summary from the model
+      const textBlocks = response.content.filter((b): b is Anthropic.TextBlock => b.type === 'text')
+      const text = textBlocks.map(b => b.text).join(' ').trim()
+      if (text && text.toLowerCase() !== 'done.' && text.toLowerCase() !== 'done') {
+        finalSummary = text
+      }
       console.log('[ServiceLogger] Nightly memory update complete')
       break
     }
@@ -362,4 +392,6 @@ Search memory for existing entries about the people and projects mentioned. Then
     logTable = null
   } catch {}
   console.log(`[ServiceLogger] Cleared ${log.length} processed log entries`)
+
+  return finalSummary
 }

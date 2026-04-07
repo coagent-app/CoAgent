@@ -221,6 +221,7 @@ export interface SchedulerCallbacks {
   onHeartbeat?: (status: 'started' | 'done' | 'skipped' | 'escalated' | 'scheduled', summary?: string, nextAt?: Date) => void
   onHeartbeatStream?: (type: 'start' | 'chunk' | 'tool' | 'done', data?: any) => void
   onTodoStream?: (type: 'start' | 'chunk' | 'tool' | 'done', data?: any) => void
+  onNightly?: (status: 'success' | 'failed', summary?: string) => void
 }
 
 export interface SchedulerHandle {
@@ -293,13 +294,15 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
       const memoryTools = allTools.filter(t => serverMap.get(t.name) === 'memory')
       const callMemoryTool = (tool: string, args: Record<string, unknown>) =>
         agent.mcpManager.callTool('memory', tool, args)
-      await keepAwakeDuring(extractInsights(dataDir, memoryTools, callMemoryTool))
+      const summary = await keepAwakeDuring(extractInsights(dataDir, memoryTools, callMemoryTool))
       await pruneOldEntries(dataDir)
       writeNightlyRun(dataDir, 'success')
       console.log('[Scheduler] 3 AM job complete (memory updates + cleanup)')
+      callbacks?.onNightly?.('success', summary)
     } catch (err: any) {
       writeNightlyRun(dataDir, 'failed', err.message)
       console.error('[Scheduler] 3 AM job failed:', err.message)
+      callbacks?.onNightly?.('failed', err.message)
     }
     // Schedule tomorrow's wake
     scheduleNightlyWake()

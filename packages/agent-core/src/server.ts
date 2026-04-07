@@ -317,6 +317,8 @@ CoAgent is a personal AI assistant that runs privately on your computer. Nothing
 1. **Memory updates** — New contacts, projects, and relationships from the day's tool logs are added to memory. Only durable facts (people, ongoing partnerships, recurring commitments).
 2. **Memory cleanup** — Stale entries pruned, duplicates consolidated, outdated info removed.
 
+You can steer the nightly job by editing \`nightly.md\` — extra instructions there apply on top of the defaults. After each run, a \`[Nightly · time]\` summary appears in chat.
+
 **I ask before doing anything risky.** If I'm about to do something that can't be undone — like sending an email or deleting something — I queue it for your approval first.
 
 **I keep a schedule.** Routines (recurring cron), tasks (one-time with due time), and followups (check-back reminders) all live in one schedule. Everything is managed through chat.
@@ -355,13 +357,14 @@ Notes in \`~/.coagent/memory/\` — my brain across conversations.
 - **setup.md** — this file (read-only).
 - **profile.md** — user profile: who you are, preferences, how to handle things.
 - **heartbeat.md** — what to check during heartbeats.
+- **nightly.md** — extra instructions for the 3 AM background job.
 - **preferences.md** — tone, format, behavior preferences.
 - **contacts.md** — key people and how to handle their messages.
 - **projects.md** — active projects, context, deadlines.
 
 Updated as we work together. User can edit directly.
 
-**Off-limits to the 3 AM job:** setup.md, profile.md, heartbeat.md, preferences.md — only the user or main agent edits these.
+**Off-limits to the 3 AM job:** setup.md, profile.md, heartbeat.md, nightly.md, preferences.md — only the user or main agent edits these.
 
 ## What I can always do
 
@@ -518,6 +521,28 @@ Add items under the appropriate section. Examples:
 ## Morning
 
 ## Evening
+`,
+
+  'nightly.md': `# Nightly Job
+
+<!--
+The 3 AM background job reads this file for extra instructions.
+By default it updates memory (new contacts, projects) and cleans up stale
+entries from the day's tool logs. You can add extra instructions here —
+they're applied on top of the defaults, not instead of them.
+
+Off-limits files the job cannot modify: setup.md, profile.md, heartbeat.md,
+nightly.md, preferences.md.
+
+Examples:
+  - Also check contacts.md for anyone I haven't emailed in 30+ days and note it
+  - Consolidate any duplicate entries in projects.md
+  - Remove lead entries marked as "closed" or "rejected"
+-->
+
+## Extra instructions
+
+## Skip
 `,
 
   'preferences.md': `# Preferences
@@ -913,6 +938,14 @@ const scheduler = startScheduler(agent, DATA_DIR, {
       const timeStr = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
       broadcast({ type: 'chat_response', message: { role: 'assistant', content: `**[Heartbeat · ${timeStr}]**\n${summary}`, timestamp: new Date().toISOString() } })
     }
+  },
+  onNightly: (status, summary) => {
+    console.log(`[Server] Nightly callback: status=${status}`)
+    const timeStr = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+    const content = status === 'success'
+      ? `**[Nightly · ${timeStr}]**\n${summary || 'Nothing to update.'}`
+      : `**[Nightly · ${timeStr}]** ❌ Failed: ${summary || 'unknown error'}`
+    broadcast({ type: 'chat_response', message: { role: 'assistant', content, timestamp: new Date().toISOString() } })
   },
   onHeartbeatStream: (() => {
     return (type: 'start' | 'chunk' | 'tool' | 'done', data?: any) => {
