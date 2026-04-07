@@ -1515,8 +1515,10 @@ try {
   }
 } catch {}
 
-// Sync model from relay on startup — relay is the source of truth
-// This MUST complete before any chat starts to avoid empty-model 403s
+// Sync model + runtime config from relay on startup — relay is the source of truth.
+// The relay serves per-user runtime config (model choice, Google OAuth creds, etc.)
+// so the desktop .env only needs RELAY_URL/RELAY_USER_ID/RELAY_TOKEN to bootstrap.
+// This MUST complete before any chat starts to avoid empty-model 403s.
 const relaySyncReady = (async () => {
   const relay = getRelayConfig()
   if (!relay) return
@@ -1526,14 +1528,21 @@ const relaySyncReady = (async () => {
       signal: AbortSignal.timeout(10000),
     })
     if (res.ok) {
-      const data = await res.json() as { model: string }
+      const data = await res.json() as { model: string; googleClientId?: string; googleClientSecret?: string }
       if (data.model) {
         await writeSettings(DATA_DIR, { powerModel: data.model })
         console.log(`[Server] Synced model from relay: ${data.model}`)
       }
+      // Auto-init Google Calendar from relay-served OAuth creds.
+      // This heals existing installs whose .env predates the relay serving Google creds.
+      // initGoogleCalendar is idempotent (guards on `if (googleCal) return`).
+      if (data.googleClientId && data.googleClientSecret && !googleCal) {
+        initGoogleCalendar(data.googleClientId, data.googleClientSecret)
+        console.log('[Server] Google Calendar initialized from relay config')
+      }
     }
   } catch (err: any) {
-    console.warn('[Server] Failed to sync model from relay:', err.message)
+    console.warn('[Server] Failed to sync from relay:', err.message)
   }
 })()
 
