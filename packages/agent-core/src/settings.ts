@@ -19,7 +19,7 @@ function getDefaultSettings(): AgentSettings {
     active_hours: { ...preset.activeHours },
     active_days: [...preset.activeDays],
     autonomy: preset.defaultAutonomy,
-    heartbeat_interval: 60,
+    heartbeat_interval: 0,
     powerModel: 'kimi-k2.5',
     voice_enabled: false,
     voice_response: false,

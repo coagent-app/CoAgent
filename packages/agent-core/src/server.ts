@@ -429,11 +429,29 @@ Ask follow-up questions ONE AT A TIME. Cover:
 
 Do NOT ask all questions at once. One question per message. Listen and ask smarter follow-ups — if they mention clients, ask about that. If they mention email overload, dig into that.
 
-## Step 4: Set boundaries
+## Step 4: Walk them through what you can do
 
-Be transparent: "Here's what I can do — read your emails, search the web, manage your calendar, send messages, and run automations in the background. I want to make sure you're comfortable with how I operate.
+Before setting boundaries, give them a clear picture of what you actually do. Send this as one message:
 
-What should I just handle without bothering you? And what should I always check with you first?"
+"Here's what I can do for you:
+
+- **Email & messages** — read, summarize, draft, and send across anything you connect (Gmail, Outlook, Slack, iMessage, etc.)
+- **Calendar** — check your day, schedule meetings, set reminders, prep briefings before calls
+- **Files & PDFs** — search your files, read PDFs/DOCX/XLSX, fill in forms, and create new documents (resumes, invoices, proposals, letters)
+- **Research** — search the web, find companies, qualify leads, track competitors
+- **Automations** — build custom skills, routines, and follow-ups that run in the background
+- **Memory** — I remember what you tell me across sessions, so you never have to repeat yourself
+- **Custom integrations** — connect any API with natural language and I'll wire it up
+
+Everything runs privately on your machine."
+
+Ask: "Anything there you want me to explain in more detail, or should we set some boundaries on how I operate?"
+
+If they ask about something, explain it briefly. Otherwise move on.
+
+## Step 5: Set boundaries
+
+Ask: "What should I just handle without bothering you? And what should I always check with you first?"
 
 Based on their answer, set:
 - autonomy level: update_settings({ autonomy: "ask_first" | "balanced" | "autonomous" })
@@ -441,7 +459,23 @@ Based on their answer, set:
 
 Keep the notes short — bullet points, not paragraphs. Capture their hard no's and edge cases.
 
-## Step 5: Write their profile
+## Step 6: Heartbeats
+
+Explain what heartbeats are in plain language:
+
+"One more thing — I can run on a schedule in the background. I call them 'heartbeats'. Every heartbeat I wake up and check whatever you want me to: new emails, upcoming meetings, tasks due, a specific Slack channel, anything. Then I either handle it, queue it for your approval, or just update my status line.
+
+Heartbeats are off by default. Do you want me to run them? If yes, how often — every 15 minutes, 30, an hour? And what should I check each time?"
+
+If they say no (or aren't sure):
+- update_settings({ heartbeat_interval: 0 })
+- Tell them they can turn it on later in Settings anytime.
+
+If they say yes:
+- update_settings({ heartbeat_interval: N }) with their cadence in minutes
+- Write their priorities to heartbeat.md under the "## Every heartbeat" section (and "## Morning" / "## Evening" if they mentioned anything time-specific). Use memory(action: "write", file: "heartbeat.md", content: ...).
+
+## Step 7: Write their profile
 
 When you have a clear picture, write their profile to profile.md:
 
@@ -456,7 +490,7 @@ When you have a clear picture, write their profile to profile.md:
 ## What to monitor
 - [tool]: [what to watch for]
 
-## Step 6: Wrap up
+## Step 8: Wrap up
 
 End with: "Got it. I'll run in the background and surface anything that needs you.
 
@@ -467,19 +501,23 @@ Then: update_settings({ onboarded: true }) and delete this file (onboarding.md) 
 
   'heartbeat.md': `# Heartbeat
 
+<!--
+The agent reads this file during background heartbeats to know what to check.
+Heartbeats are off by default — the user configures them during onboarding or
+in settings. If these sections are empty, the agent has nothing to do and
+exits quickly.
+
+Add items under the appropriate section. Examples:
+  - Check Gmail for new unread messages from clients
+  - Review today's calendar and flag any conflicts
+  - Check schedule for tasks due in the next hour
+-->
+
 ## Every heartbeat
-- Check calendar for upcoming events in the next 2 hours. Mention them by name, time, and attendees.
-- Check email for new unread messages. Summarize sender and subject for anything important (skip promotions/newsletters).
-- Check schedule for any tasks or followups due soon.
-- If nothing is happening, say so briefly.
 
 ## Morning
-- Summarize today's calendar: meetings, events, deadlines.
-- Flag any emails that came in overnight that need attention.
 
 ## Evening
-- Recap what happened today: meetings attended, emails received, tasks completed.
-- Preview tomorrow's calendar if there's anything scheduled.
 `,
 
   'preferences.md': `# Preferences
