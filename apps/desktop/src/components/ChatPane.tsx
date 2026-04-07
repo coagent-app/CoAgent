@@ -661,15 +661,22 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
     }
   }, [])
 
-  // Scroll to bottom on new messages / streaming
+  // Scroll to bottom on new messages / streaming.
+  // Uses 'instant' + block:'end' + double-RAF so layout has settled before we pin
+  // to the bottom. Smooth scroll is glitchy during streaming — each keystroke
+  // interrupts the previous animation, leaving the view drifting upward.
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'instant' as ScrollBehavior, block: 'end' })
+      })
+    })
   }, [messages, streamingText, thinking])
 
   // Scroll to bottom when pane mounts (e.g. navigating back to chat)
   useEffect(() => {
     requestAnimationFrame(() => {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'instant' })
+      messagesEndRef.current?.scrollIntoView({ behavior: 'instant' as ScrollBehavior, block: 'end' })
     })
   }, [])
 

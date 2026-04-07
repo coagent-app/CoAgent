@@ -236,13 +236,13 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'integration_notes',
-    description: 'Save notes for an integration (IDs, preferences, rules). Notes auto-inject on search_tools — do NOT call this to read. Only use to write/update.',
+    description: 'Persistent per-integration IDs/rules/preferences. Auto-injects on search_tools — don\'t read unless updating. WRITE when you learn: IDs to reuse (primary calendar, channel IDs, default labels), user rules ("never email X — use Slack"), workflow prefs ("tag leads 2026Q2"), corrections ("skip newsletters"). NOT for one-off facts — use memory. <500 chars, facts only, replaces prior notes.',
     input_schema: {
       type: 'object' as const,
       properties: {
-        action: { type: 'string', enum: ['read', 'write'], description: 'read = get current notes before updating. write = save new notes.' },
-        integration: { type: 'string', description: 'Integration name (e.g. "gmail", "slack")' },
-        notes: { type: 'string', description: 'New notes content (for write). Keep brief — IDs, rules, preferences only.' },
+        action: { type: 'string', enum: ['read', 'write'] },
+        integration: { type: 'string', description: 'lowercase slug e.g. "gmail", "slack"' },
+        notes: { type: 'string', description: 'New notes (write only). Replaces prior.' },
       },
       required: ['action', 'integration']
     }
@@ -1048,10 +1048,13 @@ All other tools (memory, files, schedule, skills, send_team_message, etc.) are b
 
   return `You are ${settings.agent_name || 'CoAgent'} — a private AI agent running on the user's machine. You're self-sufficient: quietly maintain your own workspace (memory, schedule, files, followups, integration notes) in the background without being asked. Help with anything asked.
 ${customInstructions ? `\n${customInstructions}\n` : ''}
-Gather context yourself BEFORE asking the user. If you don't recognize a name, email, address, or topic, don't say "I don't know" — immediately call your tools in parallel (gmail/contacts/calendar via search_tools + call_external_tool, plus memory search, files, integration notes) to look it up. That's what the tools are for. Only ask the user when no tool can find the answer.
-ALWAYS call multiple tools in one response when independent — faster and cheaper.
-NEVER say "I can't do that" without first searching for tools. Always call search_tools before concluding a capability doesn't exist.
-IMPORTANT: Every tool call costs real money. Be deliberate — don't make calls you don't need.
+Gather context BEFORE asking the user. If a name, email, topic, or "that thing" isn't obvious, look it up — don't ask. Triggers:
+- Unknown person/company/email → memory search + search_tools(gmail/contacts) in parallel
+- "Follow up on X" / "that thing we discussed" → memory search + recent tool logs + integration notes
+- Scheduling → get_current_time + schedule(list) in parallel (never guess the date)
+- Capability question ("can you…") → search_tools first, then answer
+Only ask the user when no tool can answer. Batch independent calls in one response — parallel is faster and cheaper than sequential. Deliberate ≠ shy: prefer a tool call over a guess or an uninformed question.
+Think like a context engineer — piece information together across sources into one coherent answer. Flag gaps or conflicts.
 
 ${serviceSection}
 User: ${settings.name || '?'} | ${settings.email || '?'} | ${settings.role || '?'} | ${settings.timezone || '?'}${settings.what_you_do ? `\nWhat they do: ${settings.what_you_do}` : ''}
@@ -1067,10 +1070,10 @@ Skills: skills(action: 'list') to see available, skills(action: 'execute', name:
 Integrations: create_custom_integration + @integration-builder for new API integrations.
 Approvals: queue_approval for high-stakes actions. add_done_item after routine tasks.
 Followups: after sending emails/messages/proposals, ask "Want me to follow up?" — never auto-create.
-Integration notes: save context (IDs, preferences) via integration_notes(write). Auto-injected on search_tools.
+Integration notes: when you see "[integration notes]:" in a search_tools result, those are YOUR saved rules — follow them without asking. Write new notes after learning a reusable ID, a user preference/rule, or a correction you'd otherwise repeat. Not for one-off facts (use memory).
 
 Keep responses short and direct — lead with the answer, skip filler and preamble. No emojis. Markdown only when it adds clarity.
-NEVER expose internal reasoning. Do not output text like "I should...", "The user wants me to...", "Let me think about...", or any chain-of-thought. Go straight to the answer or action.
+No markdown in call_external_tool content (emails, messages, notes) — plain text only, it renders literally in Gmail.
 ${connectedServices.includes('coagent:imessage') ? `iMessage connected. Queue sends for approval unless autonomous.` : ''}
 ${connectedServices.includes('coagent:contacts') ? `Contacts connected via search_tools.` : ''}
 VOICE MODE: When the user's message ends with [voice], this is spoken input. Your ENTIRE response must be 1-2 short sentences MAX — under 30 words total. No markdown, no lists, no code, no bullet points. Talk like a person, not a document. NEVER write "[voice]" anywhere in your response — it is a marker on the user's message only, never yours. Violating the length limit ruins the voice experience.
@@ -1217,9 +1220,11 @@ export class Agent {
     try {
       const raw = await readFile(this.historyPath, 'utf-8')
       this.conversationHistory = JSON.parse(raw)
-      // Sanitize on load — strip orphaned tool_use/tool_result blocks left by unclean stops
+      // Sanitize on load — strip orphaned tool_use/tool_result blocks left by unclean stops.
+      // preserveTail=true so the final assistant response (trailing non-user) is NOT dropped.
+      // runLoop re-sanitizes WITHOUT preserveTail when preparing API messages.
       const before = this.conversationHistory.length
-      this.conversationHistory = this.sanitizeHistory(this.conversationHistory)
+      this.conversationHistory = this.sanitizeHistory(this.conversationHistory, { preserveTail: true })
       if (this.conversationHistory.length !== before) {
         console.log(`[Agent] Sanitized history on load: ${before} → ${this.conversationHistory.length} messages`)
         await this.saveHistory()
@@ -3144,7 +3149,7 @@ Rules:
    *    different API calls. Uses cardinality counting (not just Set membership)
    *    to ensure each tool_use has exactly one matching tool_result.
    */
-  private sanitizeHistory(messages: typeof this.conversationHistory): typeof this.conversationHistory {
+  private sanitizeHistory(messages: typeof this.conversationHistory, opts: { preserveTail?: boolean } = {}): typeof this.conversationHistory {
     let result = [...messages]
 
     // ── Deduplicate tool_call IDs (Kimi K2.5 reuses IDs across responses) ──
@@ -3245,10 +3250,14 @@ Rules:
         changed = true
       }
 
-      // Drop trailing non-user messages (API requires last message = user)
-      while (trimmed.length > 0 && trimmed[trimmed.length - 1].role !== 'user') {
-        trimmed = trimmed.slice(0, -1)
-        changed = true
+      // Drop trailing non-user messages (API requires last message = user).
+      // Skipped when preserveTail=true (e.g., loading from disk, where the
+      // final assistant text response must NOT be deleted).
+      if (!opts.preserveTail) {
+        while (trimmed.length > 0 && trimmed[trimmed.length - 1].role !== 'user') {
+          trimmed = trimmed.slice(0, -1)
+          changed = true
+        }
       }
 
       if (trimmed.length !== result.length) changed = true
