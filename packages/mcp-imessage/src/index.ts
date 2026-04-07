@@ -17,6 +17,55 @@ function coreDataToISO(ts: number | null): string | null {
   return new Date((ts / 1000000000 + 978307200) * 1000).toISOString()
 }
 
+/**
+ * Parse the NSAttributedString typedstream blob stored in message.attributedBody
+ * and return the plain text. Starting with macOS Ventura, Messages leaves the
+ * `text` column NULL for locally-sent/newer messages and puts the text here
+ * instead.
+ */
+function parseAttributedBody(blob: Uint8Array | Buffer | null | undefined): string | null {
+  if (!blob || blob.length === 0) return null
+  const buf: Uint8Array = blob instanceof Uint8Array ? blob : new Uint8Array(blob as any)
+  const decoder = new TextDecoder('utf-8', { fatal: true })
+
+  const findMarker = (from: number): number => {
+    for (let i = from; i < buf.length - 1; i++) {
+      if (buf[i] === 0x01 && buf[i + 1] === 0x2b) return i
+    }
+    return -1
+  }
+
+  let idx = findMarker(0)
+  while (idx >= 0) {
+    const lenPos = idx + 2
+    if (lenPos >= buf.length) break
+    const marker = buf[lenPos]
+    let len = -1
+    let start = -1
+    if (marker < 0x81) {
+      len = marker
+      start = lenPos + 1
+    } else if (marker === 0x81 && lenPos + 2 < buf.length) {
+      len = buf[lenPos + 1] | (buf[lenPos + 2] << 8)
+      start = lenPos + 3
+    } else if (marker === 0x82 && lenPos + 4 < buf.length) {
+      len = buf[lenPos + 1] | (buf[lenPos + 2] << 8) | (buf[lenPos + 3] << 16) | (buf[lenPos + 4] << 24)
+      start = lenPos + 5
+    }
+
+    if (len > 0 && start > 0 && start + len <= buf.length) {
+      try {
+        const text = decoder.decode(buf.subarray(start, start + len))
+        if (!text.startsWith('NS') && !text.startsWith('__kIM')) {
+          return text
+        }
+      } catch { /* not valid UTF-8, try next marker */ }
+    }
+    idx = findMarker(idx + 1)
+  }
+  return null
+}
+
 function openDb(): Database {
   return new Database(CHAT_DB, { readonly: true })
 }
@@ -128,6 +177,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             c.display_name,
             h.id             AS handle_id,
             m.text           AS last_text,
+            m.attributedBody AS last_attributed_body,
             m.date           AS last_date,
             m.is_from_me
           FROM chat c
@@ -148,6 +198,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           display_name: string | null
           handle_id: string | null
           last_text: string | null
+          last_attributed_body: Uint8Array | null
           last_date: number | null
           is_from_me: number
         }>
@@ -155,7 +206,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const conversations = rows.map((row) => ({
           chat_identifier: row.chat_identifier,
           display_name: row.display_name || row.handle_id || row.chat_identifier,
-          last_message: row.last_text,
+          last_message: row.last_text ?? parseAttributedBody(row.last_attributed_body),
           last_message_date: coreDataToISO(row.last_date),
           is_from_me: row.is_from_me === 1,
         }))
@@ -178,6 +229,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           SELECT
             m.ROWID,
             m.text,
+            m.attributedBody,
             m.date,
             m.is_from_me,
             h.id AS sender_handle
@@ -191,6 +243,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         `).all(`%${identifier}%`, limit) as Array<{
           ROWID: number
           text: string | null
+          attributedBody: Uint8Array | null
           date: number | null
           is_from_me: number
           sender_handle: string | null
@@ -198,7 +251,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const messages = rows.reverse().map((row) => ({
           id: row.ROWID,
-          text: row.text,
+          text: row.text ?? parseAttributedBody(row.attributedBody),
           date: coreDataToISO(row.date),
           is_from_me: row.is_from_me === 1,
           sender: row.is_from_me === 1 ? 'me' : (row.sender_handle ?? 'unknown'),
@@ -222,47 +275,67 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         let sql: string
         let params: (string | number)[]
 
+        // Pre-filter by LIKE against both m.text and m.attributedBody. SQLite's
+        // LIKE operator works byte-wise on BLOBs, so an ASCII query matches the
+        // UTF-8 bytes embedded in the typedstream. We still re-check in JS after
+        // parsing to ensure accuracy and apply the final limit.
+        const prefetch = limit * 4
         if (contact) {
           sql = `
-            SELECT m.ROWID, m.text, m.date, m.is_from_me, c.chat_identifier, h.id AS sender_handle
+            SELECT m.ROWID, m.text, m.attributedBody, m.date, m.is_from_me, c.chat_identifier, h.id AS sender_handle
             FROM message m
             JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
             JOIN chat c ON c.ROWID = cmj.chat_id
             LEFT JOIN handle h ON h.ROWID = m.handle_id
-            WHERE m.text LIKE ? AND c.chat_identifier LIKE ?
+            WHERE (m.text LIKE ? OR m.attributedBody LIKE ?) AND c.chat_identifier LIKE ?
             ORDER BY m.date DESC LIMIT ?
           `
-          params = [`%${query}%`, `%${contact}%`, limit]
+          params = [`%${query}%`, `%${query}%`, `%${contact}%`, prefetch]
         } else {
           sql = `
-            SELECT m.ROWID, m.text, m.date, m.is_from_me, c.chat_identifier, h.id AS sender_handle
+            SELECT m.ROWID, m.text, m.attributedBody, m.date, m.is_from_me, c.chat_identifier, h.id AS sender_handle
             FROM message m
             JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
             JOIN chat c ON c.ROWID = cmj.chat_id
             LEFT JOIN handle h ON h.ROWID = m.handle_id
-            WHERE m.text LIKE ?
+            WHERE m.text LIKE ? OR m.attributedBody LIKE ?
             ORDER BY m.date DESC LIMIT ?
           `
-          params = [`%${query}%`, limit]
+          params = [`%${query}%`, `%${query}%`, prefetch]
         }
 
         const rows = db.query(sql).all(...params) as Array<{
           ROWID: number
           text: string | null
+          attributedBody: Uint8Array | null
           date: number | null
           is_from_me: number
           chat_identifier: string
           sender_handle: string | null
         }>
 
-        const results = rows.map((row) => ({
-          id: row.ROWID,
-          text: row.text,
-          date: coreDataToISO(row.date),
-          is_from_me: row.is_from_me === 1,
-          chat_identifier: row.chat_identifier,
-          sender: row.is_from_me === 1 ? 'me' : (row.sender_handle ?? 'unknown'),
-        }))
+        const needle = query.toLowerCase()
+        const results: Array<{
+          id: number
+          text: string | null
+          date: string | null
+          is_from_me: boolean
+          chat_identifier: string
+          sender: string
+        }> = []
+        for (const row of rows) {
+          const text = row.text ?? parseAttributedBody(row.attributedBody)
+          if (!text || !text.toLowerCase().includes(needle)) continue
+          results.push({
+            id: row.ROWID,
+            text,
+            date: coreDataToISO(row.date),
+            is_from_me: row.is_from_me === 1,
+            chat_identifier: row.chat_identifier,
+            sender: row.is_from_me === 1 ? 'me' : (row.sender_handle ?? 'unknown'),
+          })
+          if (results.length >= limit) break
+        }
 
         return {
           content: [{ type: 'text', text: JSON.stringify(results, null, 2) }],
