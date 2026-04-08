@@ -593,9 +593,17 @@ export async function ingestFile(
   const ext = extname(filename).toLowerCase()
   const mediaExts = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v', '.wmv', '.flv', '.mp3', '.m4a', '.wav', '.aac', '.ogg']
   const isMedia = mediaExts.includes(ext) || mimeType.startsWith('video/') || mimeType.startsWith('audio/')
-  const summary = isMedia && sample.type === 'text'
-    ? sample.text
-    : await generateSummary(dataDir, filename, sample)
+  let summary: string
+  if (isMedia && sample.type === 'text') {
+    summary = sample.text
+  } else {
+    try {
+      summary = await generateSummary(dataDir, filename, sample)
+    } catch (err) {
+      console.warn(`[FileStore] generateSummary failed for ${filename}, continuing without summary:`, (err as Error).message)
+      summary = sample.type === 'text' ? sample.text.slice(0, 500) : filename
+    }
+  }
 
   // Save file to the target folder (or root if no group)
   const safeFilename = basename(filename)

@@ -3233,30 +3233,25 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
             const buffer = Buffer.from(msg.base64, 'base64')
             const safeTitle = (doc.title || 'Document').trim().replace(/[^\w\s-]/g, '').replace(/\s+/g, '_').slice(0, 60) || 'Document'
             const filename = `${safeTitle}.pdf`
-            // Agent-initiated exports (requestId present): dedupe by docId.
+            // Dedupe by docId for BOTH user- and agent-initiated saves.
             // If we already have a fileId for this doc and the file still exists
             // on disk, overwrite it in place so Files pane doesn't accumulate
             // stale entries. Otherwise ingest fresh and record the mapping.
             let entry: { id: string; filename: string }
-            if (msg.requestId) {
-              const existingFileId = docIdToExportedFileId.get(msg.docId)
-              if (existingFileId) {
-                const overwritten = await overwriteFile(DATA_DIR, existingFileId, buffer, filename)
-                if (overwritten) {
-                  entry = { id: overwritten.id, filename: overwritten.filename }
-                } else {
-                  // File was deleted or moved — ingest fresh
-                  const fresh = await ingestFile(DATA_DIR, filename, buffer, 'application/pdf')
-                  docIdToExportedFileId.set(msg.docId, fresh.id)
-                  entry = { id: fresh.id, filename: fresh.filename }
-                }
+            const existingFileId = docIdToExportedFileId.get(msg.docId)
+            if (existingFileId) {
+              const overwritten = await overwriteFile(DATA_DIR, existingFileId, buffer, filename)
+              if (overwritten) {
+                entry = { id: overwritten.id, filename: overwritten.filename }
               } else {
                 const fresh = await ingestFile(DATA_DIR, filename, buffer, 'application/pdf')
                 docIdToExportedFileId.set(msg.docId, fresh.id)
                 entry = { id: fresh.id, filename: fresh.filename }
               }
             } else {
-              entry = await ingestFile(DATA_DIR, filename, buffer, 'application/pdf')
+              const fresh = await ingestFile(DATA_DIR, filename, buffer, 'application/pdf')
+              docIdToExportedFileId.set(msg.docId, fresh.id)
+              entry = { id: fresh.id, filename: fresh.filename }
             }
             if (pending) {
               clearTimeout(pending.timer)

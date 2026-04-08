@@ -6,7 +6,7 @@
 // to the server for persistence.
 
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
-import { X, Download, Loader2 } from 'lucide-react'
+import { X, Download, Loader2, Save } from 'lucide-react'
 import type { BlockDocument, DocumentBlock, DocumentUpdateOp } from '@coagent/shared'
 import { BlockRenderer } from '@/components/blocks/BlockRenderer'
 import { BlockEditor } from '@/components/blocks/editors/BlockEditor'
@@ -29,6 +29,7 @@ interface Props {
   brand?: BrandKit
   onClose: () => void
   onExportPdf?: () => void
+  onSaveToFiles?: () => void
   exporting?: boolean
   onDocumentChange?: (next: BlockDocument) => void
   onEmit?: (docId: string, ops: DocumentUpdateOp[]) => void
@@ -36,7 +37,7 @@ interface Props {
 
 const isSet = (c?: string) => typeof c === 'string' && c.trim() !== ''
 
-export function CanvasPane({ doc, streaming, brand, onClose, onExportPdf, exporting, onDocumentChange, onEmit }: Props) {
+export function CanvasPane({ doc, streaming, brand, onClose, onExportPdf, onSaveToFiles, exporting, onDocumentChange, onEmit }: Props) {
   const primary = brand?.primary || '#1a2744'
   const secondary = brand?.secondary || ''
   const tertiary = brand?.tertiary || ''
@@ -76,13 +77,17 @@ export function CanvasPane({ doc, streaming, brand, onClose, onExportPdf, export
     onEmit?.(docId, ops)
   }, [onEmit])
 
-  const editor = useCanvasEditor(doc, handleEmit)
+  const editor = useCanvasEditor(doc, handleEmit, streaming)
 
   // Notify parent when local doc state changes so App.tsx / useAgent can
   // keep canvasDocRef in sync (needed for accurate agent-export snapshots).
+  // CRITICAL: skip this during streaming, otherwise we race the opDrain
+  // timer in useAgent — the feedback loop can overwrite a just-applied
+  // insert with a stale snapshot, causing blocks to visibly disappear.
   useEffect(() => {
+    if (streaming) return
     onDocumentChange?.(editor.doc)
-  }, [editor.doc, onDocumentChange])
+  }, [editor.doc, onDocumentChange, streaming])
 
   // Selection: which block id is currently "active" for editing.
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null)
@@ -190,15 +195,26 @@ export function CanvasPane({ doc, streaming, brand, onClose, onExportPdf, export
           {streaming && <div className="text-[10.5px] text-neutral-400 dark:text-neutral-500">drafting…</div>}
         </div>
         <div className="flex items-center gap-1 flex-shrink-0">
+          {onSaveToFiles && (
+            <button
+              onClick={onSaveToFiles}
+              disabled={exporting}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11.5px] font-medium text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors disabled:opacity-50"
+              title="Save PDF to Files (in-app)"
+            >
+              {exporting ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+              Save to Files
+            </button>
+          )}
           {onExportPdf && (
             <button
               onClick={onExportPdf}
               disabled={exporting}
               className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11.5px] font-medium text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors disabled:opacity-50"
-              title="Save PDF to disk"
+              title="Export PDF to a location on disk"
             >
               {exporting ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
-              Save PDF…
+              Export…
             </button>
           )}
           <button

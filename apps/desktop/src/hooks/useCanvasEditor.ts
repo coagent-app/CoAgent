@@ -42,19 +42,30 @@ export interface UseCanvasEditorResult {
 export function useCanvasEditor(
   initialDoc: BlockDocument,
   onEmit: (docId: string, ops: DocumentUpdateOp[]) => void,
+  streaming: boolean = false,
 ): UseCanvasEditorResult {
   const [doc, setDoc] = useState<BlockDocument>(initialDoc)
   const [history, setHistory] = useState<HistoryEntry[]>([])
   const [future, setFuture] = useState<HistoryEntry[]>([])
 
-  // When the parent pushes a fresh doc (e.g. from streaming), replace our
-  // local state wholesale and discard history so we don't undo over server
-  // changes we didn't author.
+  // When the doc id changes, reset everything.
   useEffect(() => {
     setDoc(initialDoc)
     setHistory([])
     setFuture([])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialDoc.id])
+
+  // While the agent is streaming, always mirror the parent doc so new blocks
+  // arrive in real time. User edits are blocked during streaming, so there's
+  // no local state to preserve.
+  useEffect(() => {
+    if (streaming) {
+      setDoc(initialDoc)
+      setHistory([])
+      setFuture([])
+    }
+  }, [streaming, initialDoc])
 
   // Apply ops locally + persist + record history.
   const emit = useCallback((ops: DocumentUpdateOp[]) => {

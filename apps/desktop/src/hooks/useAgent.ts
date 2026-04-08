@@ -923,11 +923,34 @@ export function useAgent() {
     }
   }, [canvasDoc, settings])
 
+  // User-initiated "Save to Files" — renders PDF via hidden WKWebView and
+  // sends it to the server via canvas_save_pdf (no requestId). Server
+  // dedupes by docId so re-clicking overwrites the existing Files entry.
+  const saveCanvasToFiles = useCallback(async () => {
+    if (!canvasDoc) return
+    setCanvasExporting(true)
+    try {
+      const { base64 } = await exportDocumentPdfViaTauri(canvasDoc, brandFromSettings(settings))
+      const ws = wsRef.current
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'canvas_save_pdf', docId: canvasDoc.id, base64 }))
+      } else {
+        throw new Error('Not connected')
+      }
+    } catch (err: any) {
+      console.error('[Canvas] Save to Files failed:', err)
+      setError(`Save failed: ${err?.message || String(err)}`)
+      setTimeout(() => setError(null), 5000)
+    } finally {
+      setCanvasExporting(false)
+    }
+  }, [canvasDoc, settings])
+
   const dismissExportToast = useCallback(() => setExportToast(null), [])
 
   const triggerHeartbeat = useCallback(() => {
     send({ type: 'trigger_heartbeat' })
   }, [send])
 
-  return { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, pendingFields, setPendingFields, setModel, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, getTeamInfo, getTeamHistory, triggerPrompt, setTriggerPrompt, canvasDoc, canvasStreaming, canvasExporting, canvasVisible, openCanvasDoc, closeCanvas, reopenCanvas, exportCanvasPdf, exportToast, dismissExportToast, sendCanvasClientOps, setCanvasDocFromClient }
+  return { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, pendingFields, setPendingFields, setModel, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, getTeamInfo, getTeamHistory, triggerPrompt, setTriggerPrompt, canvasDoc, canvasStreaming, canvasExporting, canvasVisible, openCanvasDoc, closeCanvas, reopenCanvas, exportCanvasPdf, saveCanvasToFiles, exportToast, dismissExportToast, sendCanvasClientOps, setCanvasDocFromClient }
 }
