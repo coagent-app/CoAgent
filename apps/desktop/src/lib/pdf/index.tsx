@@ -9,7 +9,6 @@ import { buildBrandPalette, type BrandInput } from './theme'
 
 export interface RenderedPdf {
   base64: string
-  pageCount: number
 }
 
 export interface RenderCanvasPdfOptions {
@@ -55,5 +54,5 @@ export async function renderCanvasDocumentToPdf(opts: RenderCanvasPdfOptions): P
   )
   const blob = await instance.toBlob()
   const base64 = await blobToBase64(blob)
-  return { base64, pageCount: 0 }
+  return { base64 }
 }

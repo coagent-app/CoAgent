@@ -4,6 +4,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Input } from '@/components/ui/input'
 import { Separator } from '@/components/ui/separator'
 import { cn } from '@/lib/utils'
+import { hexToRgba } from '@/lib/colors'
 import type { AgentSettings, DayName, Autonomy, RelayUsage, UsageSummary, AdminUser, DocumentBlock } from '@coagent/shared'
 import { BlockRenderer } from '@/components/blocks/BlockRenderer'
 
@@ -767,12 +768,6 @@ function BrandTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate: (
     const primary = settings.brand_primary || '#1a2744'
     const secondary = settings.brand_secondary || primary
     const tertiary = settings.brand_tertiary || secondary
-    const hexToRgba = (hex: string, a: number) => {
-      const h = hex.replace('#', '')
-      const f = h.length === 3 ? h.split('').map(c => c + c).join('') : h
-      const r = parseInt(f.slice(0, 2), 16), g = parseInt(f.slice(2, 4), 16), b = parseInt(f.slice(4, 6), 16)
-      return [r, g, b].some(Number.isNaN) ? `rgba(26, 39, 68, ${a})` : `rgba(${r}, ${g}, ${b}, ${a})`
-    }
     return {
       ['--canvas-primary' as any]: primary,
       ['--canvas-primary-soft' as any]: hexToRgba(primary, 0.25),
