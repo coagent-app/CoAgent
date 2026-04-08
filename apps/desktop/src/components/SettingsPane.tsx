@@ -1,10 +1,11 @@
 // apps/desktop/src/components/SettingsPane.tsx
-import React, { useState, useEffect, useRef, useCallback } from 'react'
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Input } from '@/components/ui/input'
 import { Separator } from '@/components/ui/separator'
 import { cn } from '@/lib/utils'
-import type { AgentSettings, DayName, Autonomy, RelayUsage, UsageSummary, AdminUser } from '@coagent/shared'
+import type { AgentSettings, DayName, Autonomy, RelayUsage, UsageSummary, AdminUser, DocumentBlock } from '@coagent/shared'
+import { BlockRenderer } from '@/components/blocks/BlockRenderer'
 
 type SettingsTab = 'general' | 'model' | 'brand' | 'usage' | 'admin'
 
@@ -736,6 +737,55 @@ function BrandTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate: (
     reader.readAsDataURL(file)
   }
 
+  const sampleDoc: DocumentBlock[] = useMemo(() => [
+    {
+      id: 's1',
+      type: 'header',
+      eyebrow: 'PREVIEW',
+      title: settings.brand_company || 'Sample Document',
+      subtitle: 'How your branded documents will look',
+    },
+    {
+      id: 's2',
+      type: 'kpis',
+      items: [
+        { label: 'Revenue', value: '$48.2K', delta: '▲ 12%' },
+        { label: 'Churn', value: '2.1%', delta: '▼ 0.4%' },
+        { label: 'NPS', value: '72', delta: '+3' },
+      ],
+    },
+    {
+      id: 's3',
+      type: 'callout',
+      variant: 'info',
+      title: 'Callouts stay semantic',
+      markdown: 'Info, warning, success, and tip callouts keep their own colors by design — they carry meaning, not brand.',
+    },
+  ], [settings.brand_company])
+
+  const previewCssVars = useMemo<React.CSSProperties>(() => {
+    const primary = settings.brand_primary || '#1a2744'
+    const secondary = settings.brand_secondary || primary
+    const tertiary = settings.brand_tertiary || secondary
+    const hexToRgba = (hex: string, a: number) => {
+      const h = hex.replace('#', '')
+      const f = h.length === 3 ? h.split('').map(c => c + c).join('') : h
+      const r = parseInt(f.slice(0, 2), 16), g = parseInt(f.slice(2, 4), 16), b = parseInt(f.slice(4, 6), 16)
+      return [r, g, b].some(Number.isNaN) ? `rgba(26, 39, 68, ${a})` : `rgba(${r}, ${g}, ${b}, ${a})`
+    }
+    return {
+      ['--canvas-primary' as any]: primary,
+      ['--canvas-primary-soft' as any]: hexToRgba(primary, 0.25),
+      ['--canvas-primary-bg' as any]: hexToRgba(primary, 0.05),
+      ['--canvas-secondary' as any]: secondary,
+      ['--canvas-tertiary' as any]: tertiary,
+      ['--canvas-success' as any]: '#059669',
+      ['--canvas-warning' as any]: '#d97706',
+      ['--canvas-danger' as any]: '#dc2626',
+      ['--canvas-neutral' as any]: '#6b7280',
+    }
+  }, [settings.brand_primary, settings.brand_secondary, settings.brand_tertiary])
+
   return (
     <>
       <SectionHeader eyebrow="Branding" title="Brand Kit" />
@@ -858,35 +908,21 @@ function BrandTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate: (
       </FieldRow>
 
       {/* Preview */}
-      {(settings.brand_company || settings.brand_primary || logoSrc) && (
-        <>
-          <Separator className="my-5" />
-          <p className="text-[11px] font-semibold text-neutral-400 dark:text-neutral-500 uppercase tracking-widest mb-3">Preview</p>
-          <div className="rounded-lg border border-neutral-200 dark:border-neutral-700 p-5 bg-white dark:bg-neutral-900">
-            {logoSrc && (
-              <img src={logoSrc} alt="" className="h-8 mb-3 object-contain" />
-            )}
-            <div
-              className="h-1 rounded-full mb-3"
-              style={{ backgroundColor: settings.brand_primary || '#1a2744', width: '100%' }}
-            />
-            <h3
-              className="text-[16px] font-bold mb-1"
-              style={{ color: settings.brand_primary || '#1a2744' }}
-            >
-              Sample Document Title
-            </h3>
-            <p className="text-[11px] text-neutral-500">
-              This is how your branded documents will look.
-            </p>
-            {settings.brand_company && (
-              <p className="text-[10px] text-neutral-400 mt-4 pt-2 border-t border-neutral-100 dark:border-neutral-800">
-                {settings.brand_company}
-              </p>
-            )}
+      <Separator className="my-5" />
+      <p className="text-[11px] font-semibold text-neutral-400 dark:text-neutral-500 uppercase tracking-widest mb-3">Preview</p>
+      <div
+        className="rounded-lg border border-neutral-200 dark:border-neutral-700 p-6 bg-white dark:bg-neutral-900 space-y-5 overflow-hidden"
+        style={previewCssVars}
+      >
+        {logoSrc && (
+          <div className="flex justify-end -mb-2">
+            <img src={logoSrc} alt={settings.brand_company || 'logo'} className="h-6 opacity-80 object-contain" />
           </div>
-        </>
-      )}
+        )}
+        {sampleDoc.map(block => (
+          <BlockRenderer key={block.id} block={block} />
+        ))}
+      </div>
     </>
   )
 }
