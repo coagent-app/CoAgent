@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { open } from '@tauri-apps/plugin-shell'
 import { invoke } from '@tauri-apps/api/core'
-import type { ApprovalItem, DoneItem, AgentMessage, WSServerMessage, WSClientMessage, Integration, AgentSettings, FileEntry, AuthStatus, AuthMethod, RelayUsage, UsageSummary, CalendarEntry, AdminUser, GoogleCalendarInfo, WSServerMessage as WSSMsg, HtmlDocument } from '@coagent/shared'
+import type { ApprovalItem, DoneItem, AgentMessage, WSServerMessage, WSClientMessage, Integration, AgentSettings, FileEntry, AuthStatus, AuthMethod, RelayUsage, UsageSummary, CalendarEntry, AdminUser, GoogleCalendarInfo, WSServerMessage as WSSMsg, Canvas } from '@coagent/shared'
 
 type RelayCredentials = Extract<WSSMsg, { type: 'relay_credentials' }>
 
@@ -71,9 +71,11 @@ export function useAgent() {
   const [teamStatus, setTeamStatus] = useState<{ status: 'processing' | 'idle'; from?: string } | null>(null)
   const [triggerPrompt, setTriggerPrompt] = useState<Integration | null>(null)
   const [googleCalendarStatus, setGoogleCalendarStatus] = useState<{ connected: boolean; calendars: GoogleCalendarInfo[]; lastSync: string | null }>({ connected: false, calendars: [], lastSync: null })
-  // HTML document state
-  const [htmlDoc, setHtmlDoc] = useState<HtmlDocument | null>(null)
-  const [htmlDocVisible, setHtmlDocVisible] = useState(false)
+  // Canvas state (react-runner artifact)
+  const [canvas, setCanvas] = useState<Canvas | null>(null)
+  const [canvasVisible, setCanvasVisible] = useState(false)
+  const [canvasStreamingCode, setCanvasStreamingCode] = useState<string | null>(null)
+  const [canvasStreaming, setCanvasStreaming] = useState(false)
   const settingsRef = useRef<AgentSettings | null>(_cached.settings ?? null)
   const prevConnectedSlugs = useRef<Set<string> | null>(null)
 
@@ -327,16 +329,42 @@ export function useAgent() {
           const s = msg as any
           setTeamStatus(s.status === 'idle' ? null : { status: s.status, from: s.from })
         }
-        if ((msg as any).type === 'html_doc_opened') {
-          const { doc } = msg as any
-          setHtmlDoc(doc as HtmlDocument)
-          setHtmlDocVisible(true)
+        if ((msg as any).type === 'canvas_opened') {
+          const { canvas: c } = msg as any
+          setCanvas(c as Canvas)
+          setCanvasVisible(true)
+          setCanvasStreaming(false)
+          setCanvasStreamingCode(null)
         }
-        if ((msg as any).type === 'html_doc_updated') {
-          const { doc } = msg as any
-          setHtmlDoc(doc as HtmlDocument)
-          // Auto-open the pane if it was hidden (e.g. user closed, agent patched)
-          setHtmlDocVisible(true)
+        if ((msg as any).type === 'canvas_updated') {
+          const { canvas: c } = msg as any
+          setCanvas(c as Canvas)
+          // Auto-open the pane if hidden (agent patched while closed)
+          setCanvasVisible(true)
+          setCanvasStreaming(false)
+          setCanvasStreamingCode(null)
+        }
+        if ((msg as any).type === 'canvas_streaming') {
+          const m = msg as any
+          // Show the pane immediately with a synthetic placeholder canvas so
+          // the user sees the draft materialize in real time. When the tool
+          // call finishes, canvas_opened will replace this with the persisted
+          // canvas from disk.
+          setCanvas(prev => prev && prev.id === m.canvasId ? prev : {
+            id: m.canvasId,
+            title: m.title || 'Drafting…',
+            code: '',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          })
+          setCanvasStreamingCode(m.partialCode || '')
+          setCanvasStreaming(true)
+          setCanvasVisible(true)
+        }
+        if ((msg as any).type === 'canvas_error') {
+          const m = msg as any
+          setError(m.message || 'Canvas error')
+          setTimeout(() => setError(null), 5000)
         }
         if (msg.type === 'error') { setError(msg.message); setTimeout(() => setError(null), 5000) }
         if (msg.type === 'integration_needs_fields') {
@@ -653,21 +681,19 @@ export function useAgent() {
     send({ type: 'team_history', limit } as any)
   }, [send])
 
-  const openHtmlDoc = useCallback((docId: string) => {
-    send({ type: 'html_doc_open', docId } as any)
+  const openCanvas = useCallback((canvasId: string) => {
+    send({ type: 'canvas_open', canvasId } as any)
   }, [send])
 
-  const closeHtmlDoc = useCallback(() => {
-    setHtmlDocVisible(false)
-  }, [])
-
-  const patchHtmlDocLocally = useCallback((updatedDoc: HtmlDocument) => {
-    setHtmlDoc(updatedDoc)
+  const closeCanvas = useCallback(() => {
+    setCanvasVisible(false)
+    setCanvasStreaming(false)
+    setCanvasStreamingCode(null)
   }, [])
 
   const triggerHeartbeat = useCallback(() => {
     send({ type: 'trigger_heartbeat' })
   }, [send])
 
-  return { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, pendingFields, setPendingFields, setModel, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, getTeamInfo, getTeamHistory, triggerPrompt, setTriggerPrompt, htmlDoc, htmlDocVisible, openHtmlDoc, closeHtmlDoc, patchHtmlDocLocally }
+  return { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, pendingFields, setPendingFields, setModel, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, getTeamInfo, getTeamHistory, triggerPrompt, setTriggerPrompt, canvas, canvasVisible, canvasStreaming, canvasStreamingCode, openCanvas, closeCanvas }
 }

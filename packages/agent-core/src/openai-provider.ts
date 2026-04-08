@@ -208,6 +208,17 @@ export function translateResponse(completion: OpenAI.ChatCompletion): {
   }
 }
 
+/**
+ * Fired whenever a tool call's arguments grow by a chunk during streaming.
+ * `argsSoFar` is the full accumulated (and possibly still-partial) JSON string.
+ * `toolCallId` is the provider-issued id, which the agent layer may remap.
+ */
+export type ToolArgsDeltaHandler = (args: {
+  toolName: string
+  toolCallId: string
+  argsSoFar: string
+}) => void
+
 /** Convert a streaming OpenAI response to Anthropic-like shape, calling onChunk for text deltas */
 export async function streamOpenAI(
   client: OpenAI,
@@ -220,6 +231,7 @@ export async function streamOpenAI(
   },
   onChunk?: (text: string) => void,
   signal?: AbortSignal,
+  onToolArgsDelta?: ToolArgsDeltaHandler,
 ): Promise<{
   content: Anthropic.ContentBlock[]
   stop_reason: 'end_turn' | 'tool_use' | 'max_tokens'
@@ -285,7 +297,20 @@ export async function streamOpenAI(
         const existing = toolCalls.get(idx)!
         if (tc.id) existing.id = tc.id
         if (tc.function?.name) existing.name = tc.function.name
-        if (tc.function?.arguments) existing.arguments += tc.function.arguments
+        if (tc.function?.arguments) {
+          existing.arguments += tc.function.arguments
+          if (onToolArgsDelta && existing.name) {
+            try {
+              onToolArgsDelta({
+                toolName: existing.name,
+                toolCallId: existing.id || `idx_${idx}`,
+                argsSoFar: existing.arguments,
+              })
+            } catch (err) {
+              console.error('[streamOpenAI] onToolArgsDelta error:', err)
+            }
+          }
+        }
       }
     }
 

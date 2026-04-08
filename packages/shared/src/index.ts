@@ -1,6 +1,6 @@
-// HTML document model — see ./document.ts
+// Canvas model — see ./document.ts
 export * from './document.js'
-import type { HtmlDocument } from './document.js'
+import type { Canvas } from './document.js'
 
 export type Autonomy = 'ask_first' | 'balanced' | 'agent' | 'autonomous'
 
@@ -222,9 +222,8 @@ export type WSClientMessage =
   | { type: 'team_join'; inviteCode: string; memberName: string; memberRole: string; memberHandles: string }
   | { type: 'team_leave' }
   | { type: 'team_invite' }
-  | { type: 'html_doc_open'; docId: string }
-  | { type: 'html_doc_write'; title: string; html: string; kind?: string; theme?: Partial<import('./document.js').DocumentTheme> }
-  | { type: 'html_doc_patch'; docId: string; targetId: string; op: string; content?: string; theme?: Partial<import('./document.js').DocumentTheme> }
+  | { type: 'canvas_open'; canvasId: string }
+  | { type: 'canvas_close' }
 
 export type WSServerMessage =
   | { type: 'queue_update'; items: ApprovalItem[] }
@@ -284,9 +283,10 @@ export type WSServerMessage =
   | { type: 'team_error'; error: string }
   | { type: 'status_line'; message: string }
   | { type: 'subscription_expired' }
-  | { type: 'html_doc_opened'; doc: HtmlDocument }
-  | { type: 'html_doc_updated'; doc: HtmlDocument }
-  | { type: 'html_doc_error'; docId?: string; message: string }
+  | { type: 'canvas_opened'; canvas: Canvas }
+  | { type: 'canvas_updated'; canvas: Canvas }
+  | { type: 'canvas_streaming'; canvasId: string; title?: string; partialCode: string }
+  | { type: 'canvas_error'; canvasId?: string; message: string }
 
 export interface AdminUser {
   userId: string

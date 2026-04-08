@@ -21,13 +21,10 @@ import { runResearch } from './research.js'
 import { runSubAgents, type SubAgentTask } from './sub-agent.js'
 import { streamOpenAI } from './openai-provider.js'
 import {
-  createHtmlDocument,
-  readHtmlDocument,
-  updateHtmlDocument,
-} from './html-document-store.js'
-import type { DocumentTheme } from '@coagent/shared'
-import { validateHtml } from './html-whitelist.js'
-import { parse as parseHtml, HTMLElement as HtmlElement } from 'node-html-parser'
+  createCanvas,
+  readCanvas,
+  updateCanvas,
+} from './canvas-store.js'
 
 /** Returns true if the model should use the Anthropic SDK */
 function isAnthropicModel(model: string): boolean {
@@ -41,7 +38,7 @@ const HISTORY_CAP = 200          // hard in-memory cap — trim from front when 
 
 
 // --- Skills ---
-const DEFAULT_SKILL_NAMES = new Set(['skill-creator', 'integration-builder', 'spreadsheet-pro', 'lead-generation', 'document-design'])
+const DEFAULT_SKILL_NAMES = new Set(['skill-creator', 'integration-builder', 'spreadsheet-pro', 'lead-generation', 'canvas-design'])
 interface Skill { name: string; description: string; instructions: string; placeholder?: string }
 
 async function skillsDir(dataDir: string): Promise<string> {
@@ -465,63 +462,50 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
 ]
 
-// HTML document tools — always registered (non-heartbeat contexts only).
-const HTML_DOC_TOOLS: Anthropic.Tool[] = [
+// Canvas tools — always registered (non-heartbeat contexts only).
+// The agent writes TSX that renders inside react-runner. Brand, charts, and
+// icons are pre-injected via scope — see apps/desktop/src/lib/canvas-scope.ts.
+const CANVAS_TOOLS: Anthropic.Tool[] = [
   {
-    name: 'write_document',
-    description: `Create a new HTML document. Use this for any document the user asks for — proposals, reports, flyers, letters, invoices. Call skills(execute, 'document-design') first if you haven't this conversation.
+    name: 'write_canvas',
+    description: `Create a new canvas — a TSX document rendered live in the canvas pane. Use this for any document the user asks for — proposals, reports, flyers, letters, invoices, one-pagers, dashboards. Call skills(execute, 'canvas-design') first if you haven't this conversation to load the scope reference and design patterns.
+
+The code prop is a full TSX module with a default-exported React component. It has access to these imports:
+- import { brand, Logo, Signature } from '@brand'  — brand kit from the user's settings
+- import { LineChart, BarChart, PieChart, ... } from 'recharts'  — charts
+- import { FileText, Mail, Check, ... } from 'lucide-react'  — icons
+- React hooks (useState, useMemo, etc.) from 'react'
 
 Rules:
-- Always assign stable id attributes to every top-level .sec-* and every .ed-* leaf so patch_document can address them.
-- Populate theme from the user's brand kit (brand_primary, brand_company, brand_logo from settings).
+- Default export a React function component.
+- Use Tailwind classes for layout (max-w-3xl, p-12, grid, flex, etc.) — Tailwind Play is loaded in the render sandbox.
+- Use brand.primary / brand.accent / brand.fontBody for color and typography.
+- Use <Logo /> for the user's logo. No external image URLs unless the user gave one.
 - Real content only — no {{placeholders}}, TBD, or "fill in later".
-- NEVER use the style attribute on any element. Pass theme via the theme parameter — the renderer injects CSS custom properties automatically.`,
+- No inline <script>, no dangerouslySetInnerHTML, no fetch/localStorage/window access.`,
     input_schema: {
       type: 'object' as const,
       properties: {
-        title: { type: 'string', description: 'Document title shown in the pane header.' },
-        html: { type: 'string', description: 'Full HTML fragment using the doc vocabulary. Root element must be <div class="doc"> with all CSS variables set inline.' },
-        kind: { type: 'string', description: 'Document archetype — e.g. "proposal", "flyer", "report", "letter", "invoice". Agent picks based on intent.' },
-        theme: {
-          type: 'object',
-          description: 'Theme overrides. Partial — unset fields fall back to brand kit defaults. Keys: background, foreground, muted, mutedForeground, primary, primaryForeground, secondary, secondaryForeground, accent, accentForeground, border, radius, fontDisplay, fontBody, logoDataUri, footerText.',
-          additionalProperties: true,
-        },
+        title: { type: 'string', description: 'Canvas title shown in the pane header.' },
+        code: { type: 'string', description: 'Full TSX source. Must default-export a React function component. Imports are restricted to @brand, recharts, lucide-react, and react.' },
+        kind: { type: 'string', description: 'Document archetype — e.g. "proposal", "flyer", "report", "letter", "invoice", "dashboard". Agent picks based on intent.' },
       },
-      required: ['title', 'html'],
+      required: ['title', 'code'],
     },
   },
   {
-    name: 'patch_document',
-    description: `Apply a targeted edit to an existing HTML document.
-Use for: changing text, updating a color, adding/removing a section, adjusting theme.
-Prefer this over write_document for any scoped change.
+    name: 'patch_canvas',
+    description: `Replace the code of an existing canvas. Use this for any edit — the canvas pane will compile the new code and swap in the new render with last-good-render fallback if there's a parse error.
 
-ops:
-- replace_text: set content to new plain text (target must be an .ed-* leaf)
-- replace_node: replace the entire element (target is any element with an id)
-- insert_before / insert_after: insert HTML adjacent to the target
-- delete: remove the target element
-- restyle: replace the class attribute of the target element
-- set_theme: merge theme object into doc.theme (use target_id "doc")`,
+Prefer patch_canvas over write_canvas when the user is iterating on an existing document ("change the color to green", "add a chart", "make the title bigger"). For structural rewrites, write the full new code.`,
     input_schema: {
       type: 'object' as const,
       properties: {
-        doc_id: { type: 'string', description: 'ID of the document to patch (from write_document response).' },
-        target_id: { type: 'string', description: 'The id attribute of the element to operate on, or "doc" for set_theme.' },
-        op: {
-          type: 'string',
-          enum: ['replace_text', 'replace_node', 'insert_before', 'insert_after', 'delete', 'restyle', 'set_theme'],
-          description: 'Operation to perform.',
-        },
-        content: { type: 'string', description: 'New content. Plain text for replace_text; HTML for replace_node / insert_*; class string for restyle. Omit for delete and set_theme.' },
-        theme: {
-          type: 'object',
-          description: 'Theme partial to merge — only for set_theme op.',
-          additionalProperties: true,
-        },
+        canvas_id: { type: 'string', description: 'ID of the canvas to patch (from write_canvas response).' },
+        code: { type: 'string', description: 'Full new TSX source. Replaces the existing code entirely.' },
+        title: { type: 'string', description: 'Optional new title.' },
       },
-      required: ['doc_id', 'target_id', 'op'],
+      required: ['canvas_id', 'code'],
     },
   },
 ]
@@ -562,8 +546,8 @@ const TOOL_LABELS: Record<string, string> = {
   exa: 'Searching the Web',
   research: 'Researching',
   monitor: 'Managing Monitors',
-  write_document: 'Creating Document',
-  patch_document: 'Updating Document',
+  write_canvas: 'Creating Canvas',
+  patch_canvas: 'Updating Canvas',
   create_custom_integration: 'Building Integration',
   set_status_line: 'Updating Status',
   notify_user: 'Sending Notification',
@@ -754,9 +738,9 @@ ${settings.heartbeat_interval > 0 ? `Heartbeat: every ${settings.heartbeat_inter
 
 Memory: search first (parallel, semantic) before writing. Edit existing files over creating new ones. Be selective — signal, not archive. Before saving a person or topic, verify relevance: recent activity? recurring contact? someone the user actually engages with? Skip incidental noise — one-time CC's, strangers looped into threads, form senders, names mentioned in passing. Save only what the user will still care about next week. When the user dismisses, corrects, or asks you to remove something ("don't need X", "that's old", "clean that up"), edit memory in the SAME turn — never just acknowledge. heartbeat.md defines what to check each heartbeat.${memoryFiles.length > 0 ? `\nRecent memories: ${memoryFiles.join(', ')} — search to find others.` : ''}
 Files: grep to search contents (PDF/DOCX/XLSX/text). create_folder/move to organize. get_pdf_fields + fill_pdf for fillable forms. [filename](coagent-file:ID) to open. coagent_file_ids to attach files to emails.
-Documents: use write_document to create any document (proposals, reports, flyers, letters, invoices). Call skills(action: 'execute', name: 'document-design') before writing to load vocabulary and design guidance. Use patch_document for scoped edits.
-  NEVER emit placeholder tokens ({{TITLE}}, "TBD", "[fill in]") — real content only.
-  NEVER use the style attribute in HTML — pass theme via the theme parameter in write_document.
+Canvas: use write_canvas to create any document (proposals, reports, flyers, letters, invoices, dashboards, one-pagers). Call skills(action: 'execute', name: 'canvas-design') before writing to load the scope reference and design patterns. Use patch_canvas for iterations on an existing canvas.
+  Canvases are TSX — default-export a React component. Allowed imports: '@brand' (brand, Logo, Signature), 'recharts', 'lucide-react', 'react'. Nothing else.
+  Use Tailwind classes for layout; use brand.primary / brand.fontBody for styling. Real content only — no {{placeholders}}, "TBD", or "[fill in]".
 Schedule: create/update/delete/complete/list — routines (cron), tasks (one-time), followups. Call get_current_time in parallel when scheduling — never guess the date.${googleCalendarConnected ? ' Google Calendar synced — schedule(action: "list") includes Google events. To modify/delete Google events, use call_external_tool with GOOGLECALENDAR_UPDATE_EVENT or GOOGLECALENDAR_DELETE_EVENT (not the schedule tool).' : ''}
 Skills: skills(action: 'list') to see available, skills(action: 'execute', name: 'skill-name') to run. Run proactively when they match the request.
 Integrations: create_custom_integration + @integration-builder for new API integrations.
@@ -776,107 +760,6 @@ research tool: ALWAYS present your planned queries to the user first and wait fo
 spawn_agents: run parallel sub-agents for independent tasks. Each gets its own instruction and tools (search, memory, documents) but cannot send emails or perform external actions. Use for: parallel analysis, drafting multiple versions, research + prep simultaneously.
 exa tool: use directly ONLY for get_contents (enrich specific URLs), find_similar (expand from a reference URL), or quick single lookups.
 After research, save structured findings to memory. monitor tool sets up recurring searches.` : ''}${onboardingSection}${teamRoster && teamRoster.length > 0 ? `\n\n## Team: ${teamName || 'Your Team'}\n\nYou are part of a team. Each member has their own AI agent — when you message someone, you're talking to their agent (another AI like you), not the person directly.\nMembers:\n${teamRoster.map((m: any) => `- ${m.name} (${m.role})`).join('\n')}\n\nUse send_team_message with to="name" to message their agent. You'll wait for and receive their agent's response. Omit "to" to broadcast.\nInclude agent_context with relevant background for the receiving agent.` : ''}`
-}
-
-// ── HTML document helpers ────────────────────────────────────────────────────
-
-/** Build a default DocumentTheme from the user's brand kit settings. */
-function themeFromSettings(settings: AgentSettings): DocumentTheme {
-  const primary = settings.brand_primary || '#1a2744'
-  // Derive a readable foreground for the primary swatch.
-  // Simple luminance heuristic: light colors get dark text, dark colors get white.
-  const primaryFg = isLightColor(primary) ? '#111111' : '#ffffff'
-  const secondary = settings.brand_secondary || '#6b7280'
-  const secondaryFg = isLightColor(secondary) ? '#111111' : '#ffffff'
-  return {
-    background: '#ffffff',
-    foreground: '#111111',
-    muted: '#f4f4f5',
-    mutedForeground: '#71717a',
-    primary,
-    primaryForeground: primaryFg,
-    secondary,
-    secondaryForeground: secondaryFg,
-    accent: '#e11d48',
-    accentForeground: '#ffffff',
-    border: '#e4e4e7',
-    radius: '0.5rem',
-    fontDisplay: 'system-ui, sans-serif',
-    fontBody: 'system-ui, sans-serif',
-    logoDataUri: settings.brand_logo || undefined,
-    footerText: settings.brand_company || undefined,
-  }
-}
-
-/** Very lightweight luminance check — only used for primary-foreground derivation. */
-function isLightColor(hex: string): boolean {
-  const h = hex.replace('#', '')
-  if (h.length < 6) return false
-  const r = parseInt(h.slice(0, 2), 16)
-  const g = parseInt(h.slice(2, 4), 16)
-  const b = parseInt(h.slice(4, 6), 16)
-  // WCAG relative luminance approximation
-  return (0.299 * r + 0.587 * g + 0.114 * b) > 128
-}
-
-type PatchOp = 'replace_text' | 'replace_node' | 'insert_before' | 'insert_after' | 'delete' | 'restyle'
-
-/** Apply a structural HTML patch. Returns { ok: true, html } or { ok: false, error }. */
-function applyHtmlPatch(
-  html: string,
-  targetId: string,
-  op: PatchOp,
-  content?: string,
-): { ok: true; html: string } | { ok: false; error: string } {
-  let root
-  try {
-    root = parseHtml(html, { lowerCaseTagName: true, comment: false })
-  } catch (err: any) {
-    return { ok: false, error: `Failed to parse document HTML: ${err.message}` }
-  }
-
-  // Find element by id — node-html-parser supports basic CSS selectors
-  const target = root.querySelector(`#${CSS.escape(targetId)}`)
-  if (!target || !(target instanceof HtmlElement)) {
-    return { ok: false, error: `Element with id="${targetId}" not found in document. Ensure you passed a stable id that was assigned during write_document.` }
-  }
-
-  switch (op) {
-    case 'replace_text': {
-      // Replace the text content of the node (not the whole element)
-      target.set_content(content ?? '')
-      break
-    }
-    case 'replace_node': {
-      if (!content) return { ok: false, error: 'replace_node requires content (the replacement HTML).' }
-      target.replaceWith(content)
-      break
-    }
-    case 'insert_before': {
-      if (!content) return { ok: false, error: 'insert_before requires content (the HTML to insert).' }
-      target.insertAdjacentHTML('beforebegin', content)
-      break
-    }
-    case 'insert_after': {
-      if (!content) return { ok: false, error: 'insert_after requires content (the HTML to insert).' }
-      target.insertAdjacentHTML('afterend', content)
-      break
-    }
-    case 'delete': {
-      target.remove()
-      break
-    }
-    case 'restyle': {
-      if (content === undefined) return { ok: false, error: 'restyle requires content (the new class string).' }
-      target.setAttribute('class', content)
-      break
-    }
-    default: {
-      return { ok: false, error: `Unknown op: ${op}` }
-    }
-  }
-
-  return { ok: true, html: root.toString() }
 }
 
 export class Agent {
@@ -1416,8 +1299,8 @@ Rules:
       }
     }] : []
     // HTML document tools are always available in non-heartbeat contexts.
-    const htmlDocTools: Anthropic.Tool[] = context !== 'heartbeat' ? HTML_DOC_TOOLS : []
-    const stableTools = [...contextTools, ...exaTools, ...researchTool, ...htmlDocTools].map(trimToolSchema)
+    const canvasTools: Anthropic.Tool[] = context !== 'heartbeat' ? CANVAS_TOOLS : []
+    const stableTools = [...contextTools, ...exaTools, ...researchTool, ...canvasTools].map(trimToolSchema)
     console.log(`[Agent] Tools available: ${stableTools.map(t => t.name).join(', ')}`)
 
     let finalText = ''
@@ -1541,6 +1424,44 @@ Rules:
               try { onChunk?.(text) } catch (err) { console.error('[Agent] onChunk error:', err) }
             })
 
+            // Stream partial canvas code to the pane as the model writes it.
+            // react-runner's useRunner keeps the last good render on parse errors,
+            // so piping partial TSX straight in is safe — the pane shows the
+            // previous valid render until the next full parse.
+            let lastCanvasBroadcast = 0
+            let streamingCanvasId: string | null = null
+            stream.on('streamEvent', (event, snapshot) => {
+              try {
+                if (event.type === 'content_block_start' && (event as any).content_block?.type === 'tool_use') {
+                  const name = (event as any).content_block.name
+                  if (name === 'write_canvas' || name === 'patch_canvas') {
+                    streamingCanvasId = (event as any).content_block.id
+                  }
+                } else if (event.type === 'content_block_delta' && streamingCanvasId) {
+                  const block = (snapshot.content as any[])?.[event.index]
+                  if (block?.type === 'tool_use' && (block.name === 'write_canvas' || block.name === 'patch_canvas')) {
+                    const input = block.input as { title?: string; code?: string; canvas_id?: string }
+                    if (input?.code) {
+                      const now = Date.now()
+                      if (now - lastCanvasBroadcast > 100) {
+                        lastCanvasBroadcast = now
+                        this.onBroadcast?.({
+                          type: 'canvas_streaming',
+                          canvasId: input.canvas_id || streamingCanvasId,
+                          title: input.title,
+                          partialCode: input.code,
+                        })
+                      }
+                    }
+                  }
+                } else if (event.type === 'content_block_stop' && streamingCanvasId) {
+                  streamingCanvasId = null
+                }
+              } catch (err) {
+                console.error('[Agent] canvas stream hook error:', err)
+              }
+            })
+
             const anthropicResponse = await stream.finalMessage()
             this.activeStream = null
             response = anthropicResponse
@@ -1571,13 +1492,81 @@ Rules:
             const abortController = new AbortController()
             this.activeStream = { abort: () => abortController.abort() } as any
 
+            // Stream partial canvas code over WS while Kimi writes the TSX.
+            // OpenAI-style streaming gives us partial JSON arguments; we pull
+            // the `code` field out of the in-progress JSON and broadcast it.
+            let lastCanvasBroadcast = 0
+            const extractPartialCode = (json: string): { code?: string; title?: string; canvas_id?: string } => {
+              // Fast path: valid JSON
+              try {
+                const parsed = JSON.parse(json)
+                if (parsed && typeof parsed === 'object') return parsed
+              } catch { /* still streaming — fall through */ }
+              // Slow path: scan for "code": "..." with escape-aware decoding.
+              const out: { code?: string; title?: string; canvas_id?: string } = {}
+              const grab = (key: string): string | undefined => {
+                const keyIdx = json.indexOf(`"${key}"`)
+                if (keyIdx < 0) return undefined
+                // Find the colon then the opening quote of the value
+                let i = keyIdx + key.length + 2
+                while (i < json.length && json[i] !== ':') i++
+                i++
+                while (i < json.length && json[i] !== '"') i++
+                if (i >= json.length) return undefined
+                i++ // past opening quote
+                let result = ''
+                while (i < json.length) {
+                  const ch = json[i]
+                  if (ch === '\\') {
+                    const next = json[i + 1]
+                    if (next === undefined) break
+                    if (next === 'n') result += '\n'
+                    else if (next === 't') result += '\t'
+                    else if (next === 'r') result += '\r'
+                    else if (next === '"') result += '"'
+                    else if (next === '\\') result += '\\'
+                    else if (next === '/') result += '/'
+                    else if (next === 'u' && i + 5 < json.length) {
+                      const hex = json.slice(i + 2, i + 6)
+                      const code = parseInt(hex, 16)
+                      if (!isNaN(code)) result += String.fromCharCode(code)
+                      i += 4
+                    } else result += next
+                    i += 2
+                    continue
+                  }
+                  if (ch === '"') break
+                  result += ch
+                  i++
+                }
+                return result
+              }
+              out.code = grab('code')
+              out.title = grab('title')
+              out.canvas_id = grab('canvas_id')
+              return out
+            }
+
             response = await streamOpenAI(openai, {
               model: currentModel,
               system: systemPrompt,
               messages: allMessages,
               tools: stableTools,
               maxTokens,
-            }, onChunk, abortController.signal)
+            }, onChunk, abortController.signal, ({ toolName, toolCallId, argsSoFar }) => {
+              if (toolName !== 'write_canvas' && toolName !== 'patch_canvas') return
+              const now = Date.now()
+              if (now - lastCanvasBroadcast < 100) return
+              const parsed = extractPartialCode(argsSoFar)
+              if (!parsed.code) return
+              lastCanvasBroadcast = now
+              this.onBroadcast?.({
+                type: 'canvas_streaming',
+                canvasId: parsed.canvas_id || toolCallId,
+                title: parsed.title,
+                partialCode: parsed.code,
+              })
+            })
 
             this.activeStream = null
             const cached = (response.usage as any).cached_tokens ?? 0
@@ -2167,109 +2156,59 @@ Rules:
             this.onNotifyUser?.(input.title, input.body)
             result = 'Notification sent.'
 
-          } else if (block.name === 'write_document') {
+          } else if (block.name === 'write_canvas') {
             const input = block.input as {
               title: string
-              html: string
+              code: string
               kind?: string
-              theme?: Partial<DocumentTheme>
             }
             try {
-              if (!input.title || !input.html) {
-                result = 'Error: write_document requires title and html.'
+              if (!input.title || !input.code) {
+                result = 'Error: write_canvas requires title and code.'
               } else {
-                // Validate HTML before persisting
-                const validation = validateHtml(input.html)
-                if (!validation.ok) {
-                  result = JSON.stringify({
-                    error: 'invalid_html',
-                    reason: validation.reason,
-                    detail: validation.detail,
-                    hint: 'Fix the HTML and call write_document again. Check the document-design skill for the allowed vocabulary.',
-                  })
-                } else {
-                  // Build theme: brand kit defaults + caller overrides
-                  const baseTheme: DocumentTheme = themeFromSettings(settings)
-                  const mergedTheme: DocumentTheme = { ...baseTheme, ...input.theme }
-                  const doc = await createHtmlDocument(this.dataDir, {
-                    title: input.title,
-                    html: validation.html,
-                    theme: mergedTheme,
-                    kind: input.kind,
-                  })
-                  // Open the HtmlDocumentPane immediately
-                  this.onBroadcast?.({ type: 'html_doc_opened', doc })
-                  console.log(`[Agent] Created HTML document: "${doc.title}" (${doc.id})`)
-                  result = `HTML document created: "${doc.title}"\ndoc_id: ${doc.id}\n\nUse patch_document with this doc_id for targeted edits.`
-                }
+                const canvas = await createCanvas(this.dataDir, {
+                  title: input.title,
+                  code: input.code,
+                  kind: input.kind,
+                })
+                this.onBroadcast?.({ type: 'canvas_opened', canvas })
+                console.log(`[Agent] Created canvas: "${canvas.title}" (${canvas.id})`)
+                result = `Canvas created: "${canvas.title}"\ncanvas_id: ${canvas.id}\n\nUse patch_canvas with this canvas_id for iterations.`
               }
             } catch (err: any) {
-              result = `Error creating document: ${err.message}`
-              console.error('[Agent] write_document error:', err)
+              result = `Error creating canvas: ${err.message}`
+              console.error('[Agent] write_canvas error:', err)
             }
 
-          } else if (block.name === 'patch_document') {
+          } else if (block.name === 'patch_canvas') {
             const input = block.input as {
-              doc_id: string
-              target_id: string
-              op: 'replace_text' | 'replace_node' | 'insert_before' | 'insert_after' | 'delete' | 'restyle' | 'set_theme'
-              content?: string
-              theme?: Partial<DocumentTheme>
+              canvas_id: string
+              code: string
+              title?: string
             }
             try {
-              if (!input.doc_id || !input.target_id || !input.op) {
-                result = 'Error: patch_document requires doc_id, target_id, and op.'
+              if (!input.canvas_id || !input.code) {
+                result = 'Error: patch_canvas requires canvas_id and code.'
               } else {
-                const doc = await readHtmlDocument(this.dataDir, input.doc_id)
-                if (!doc) {
-                  result = `Error: HTML document "${input.doc_id}" not found. Use write_document to create it first.`
-                } else if (input.op === 'set_theme') {
-                  // Theme-only update — no HTML mutation needed
-                  if (!input.theme) {
-                    result = 'Error: set_theme op requires a theme object.'
-                  } else {
-                    const updated = await updateHtmlDocument(this.dataDir, input.doc_id, { theme: input.theme })
-                    if (!updated) {
-                      result = `Error: Failed to update theme for document "${input.doc_id}".`
-                    } else {
-                      this.onBroadcast?.({ type: 'html_doc_updated', doc: updated })
-                      result = JSON.stringify({ ok: true, updated_html: updated.html })
-                    }
-                  }
+                const existing = await readCanvas(this.dataDir, input.canvas_id)
+                if (!existing) {
+                  result = `Error: Canvas "${input.canvas_id}" not found. Use write_canvas to create it first.`
                 } else {
-                  // HTML-mutating ops — parse, find target, mutate, validate, save
-                  const patchResult = applyHtmlPatch(doc.html, input.target_id, input.op, input.content)
-                  if (!patchResult.ok) {
-                    result = JSON.stringify({
-                      error: 'patch_failed',
-                      detail: patchResult.error,
-                      hint: 'Check that the target_id exists in the document and the op is valid for that element type.',
-                    })
+                  const updated = await updateCanvas(this.dataDir, input.canvas_id, {
+                    code: input.code,
+                    ...(input.title !== undefined ? { title: input.title } : {}),
+                  })
+                  if (!updated) {
+                    result = `Error: Failed to save patch for canvas "${input.canvas_id}".`
                   } else {
-                    // Validate patched HTML
-                    const validation = validateHtml(patchResult.html)
-                    if (!validation.ok) {
-                      result = JSON.stringify({
-                        error: 'invalid_html',
-                        reason: validation.reason,
-                        detail: validation.detail,
-                        hint: 'The patched HTML failed validation. Fix the content and retry.',
-                      })
-                    } else {
-                      const updated = await updateHtmlDocument(this.dataDir, input.doc_id, { html: validation.html })
-                      if (!updated) {
-                        result = `Error: Failed to save patch for document "${input.doc_id}".`
-                      } else {
-                        this.onBroadcast?.({ type: 'html_doc_updated', doc: updated })
-                        result = JSON.stringify({ ok: true, updated_html: updated.html })
-                      }
-                    }
+                    this.onBroadcast?.({ type: 'canvas_updated', canvas: updated })
+                    result = `Canvas updated: "${updated.title}"`
                   }
                 }
               }
             } catch (err: any) {
-              result = `Error patching document: ${err.message}`
-              console.error('[Agent] patch_document error:', err)
+              result = `Error patching canvas: ${err.message}`
+              console.error('[Agent] patch_canvas error:', err)
             }
 
           } else if (block.name === 'research') {

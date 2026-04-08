@@ -11,8 +11,7 @@ import { startScheduler } from './scheduler.js'
 import { readSettings, writeSettings } from './settings.js'
 
 import { listFiles, listFolders, ingestFile, deleteFileEntry, createFolder, moveFile, moveFolder, renameFile, renameFolder, deleteFolder, saveFolderOrder, searchFiles, autoOrganizeFiles } from './file-store.js'
-import { readHtmlDocument, createHtmlDocument, updateHtmlDocument } from './html-document-store.js'
-import { validateHtml } from './html-whitelist.js'
+import { readCanvas } from './canvas-store.js'
 import { randomUUID } from 'crypto'
 import { IMESSAGE_TOOLS, handleImessageTool } from './local-tools-imessage.js'
 import { CONTACTS_TOOLS, handleContactsTool } from './local-tools-contacts.js'
@@ -3181,95 +3180,20 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
       }
     }
 
-    // ── HTML Document ─────────────────────────────────────────────────────
-    if (msg.type === 'html_doc_open') {
+    // ── Canvas ────────────────────────────────────────────────────────────
+    // Reopen a persisted canvas by id. Writes/patches go through the agent's
+    // write_canvas / patch_canvas tools, not via the client, so there is no
+    // equivalent of the old html_doc_write / html_doc_patch here.
+    if (msg.type === 'canvas_open') {
       try {
-        const doc = await readHtmlDocument(DATA_DIR, msg.docId)
-        if (!doc) {
-          send(ws, { type: 'html_doc_error', docId: msg.docId, message: 'HTML document not found' })
+        const canvas = await readCanvas(DATA_DIR, (msg as any).canvasId)
+        if (!canvas) {
+          send(ws, { type: 'canvas_error', canvasId: (msg as any).canvasId, message: 'Canvas not found' })
         } else {
-          send(ws, { type: 'html_doc_opened', doc })
+          send(ws, { type: 'canvas_opened', canvas })
         }
       } catch (err: any) {
-        send(ws, { type: 'html_doc_error', docId: msg.docId, message: err?.message || 'Failed to open HTML document' })
-      }
-    }
-
-    // ── HTML Document write (Phase 3) ─────────────────────────────────────
-    if ((msg as any).type === 'html_doc_write') {
-      const m = msg as any
-      try {
-        const validation = validateHtml(m.html || '')
-        if (!validation.ok) {
-          send(ws, { type: 'html_doc_error', message: `Invalid HTML: ${validation.detail}` })
-        } else {
-          const settings = await readSettings(DATA_DIR)
-          const primary = settings.brand_primary || '#1a2744'
-          const baseTheme = {
-            background: '#ffffff', foreground: '#111111', muted: '#f4f4f5',
-            mutedForeground: '#71717a', primary, primaryForeground: '#ffffff',
-            secondary: settings.brand_secondary || '#6b7280', secondaryForeground: '#ffffff',
-            accent: '#e11d48', accentForeground: '#ffffff', border: '#e4e4e7',
-            radius: '0.5rem', fontDisplay: 'system-ui, sans-serif', fontBody: 'system-ui, sans-serif',
-            logoDataUri: settings.brand_logo || undefined,
-            footerText: settings.brand_company || undefined,
-          }
-          const mergedTheme = { ...baseTheme, ...(m.theme || {}) }
-          const doc = await createHtmlDocument(DATA_DIR, {
-            title: m.title || 'Untitled',
-            html: validation.html,
-            theme: mergedTheme,
-            kind: m.kind,
-          })
-          broadcast({ type: 'html_doc_opened', doc })
-        }
-      } catch (err: any) {
-        send(ws, { type: 'html_doc_error', message: err?.message || 'Failed to create HTML document' })
-      }
-    }
-
-    // ── HTML Document patch (Phase 3) ─────────────────────────────────────
-    if ((msg as any).type === 'html_doc_patch') {
-      const m = msg as any
-      try {
-        const doc = await readHtmlDocument(DATA_DIR, m.docId)
-        if (!doc) {
-          send(ws, { type: 'html_doc_error', docId: m.docId, message: 'HTML document not found' })
-        } else if (m.op === 'set_theme') {
-          const updated = await updateHtmlDocument(DATA_DIR, m.docId, { theme: m.theme || {} })
-          if (updated) broadcast({ type: 'html_doc_updated', doc: updated })
-        } else {
-          // Delegate to the same node-html-parser patching logic the agent uses.
-          // Import lazily to avoid circular dep risk — server.ts doesn't import agent.ts.
-          const { parse: parseHtmlNode, HTMLElement: HtmlEl } = await import('node-html-parser')
-          let root
-          try { root = parseHtmlNode(doc.html, { lowerCaseTagName: true, comment: false }) } catch (e: any) {
-            send(ws, { type: 'html_doc_error', docId: m.docId, message: `Parse error: ${e.message}` }); return
-          }
-          const target = root.querySelector(`#${m.targetId}`)
-          if (!target || !(target instanceof HtmlEl)) {
-            send(ws, { type: 'html_doc_error', docId: m.docId, message: `Element id="${m.targetId}" not found` }); return
-          }
-          switch (m.op) {
-            case 'replace_text': target.set_content(m.content ?? ''); break
-            case 'replace_node': if (m.content) target.replaceWith(m.content); break
-            case 'insert_before': if (m.content) target.insertAdjacentHTML('beforebegin', m.content); break
-            case 'insert_after': if (m.content) target.insertAdjacentHTML('afterend', m.content); break
-            case 'delete': target.remove(); break
-            case 'restyle': target.setAttribute('class', m.content ?? ''); break
-            default: send(ws, { type: 'html_doc_error', docId: m.docId, message: `Unknown op: ${m.op}` }); return
-          }
-          const newHtml = root.toString()
-          const validation = validateHtml(newHtml)
-          if (!validation.ok) {
-            send(ws, { type: 'html_doc_error', docId: m.docId, message: `Validation failed: ${validation.detail}` })
-          } else {
-            const updated = await updateHtmlDocument(DATA_DIR, m.docId, { html: validation.html })
-            if (updated) broadcast({ type: 'html_doc_updated', doc: updated })
-          }
-        }
-      } catch (err: any) {
-        send(ws, { type: 'html_doc_error', docId: (msg as any).docId, message: err?.message || 'Failed to patch HTML document' })
+        send(ws, { type: 'canvas_error', canvasId: (msg as any).canvasId, message: err?.message || 'Failed to open canvas' })
       }
     }
 
