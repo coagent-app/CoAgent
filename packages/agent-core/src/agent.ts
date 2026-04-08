@@ -1068,6 +1068,8 @@ export class Agent {
   /** Memoized system prompt — only rebuilt when inputs actually change */
   private cachedSystemPrompt: string | null = null
   private cachedPromptKey: string | null = null
+  /** Tracks whether the document-design skill has been injected into a tool result this conversation */
+  private docDesignSkillInjected = false
   // Briefings removed — context now provided via search_tools context param
   public onSkillsChanged?: () => void
   public onSettingsChanged?: () => void
@@ -2450,8 +2452,14 @@ Rules:
                   // Open the HtmlDocumentPane immediately
                   this.onBroadcast?.({ type: 'html_doc_opened', doc })
                   console.log(`[Agent] Created HTML document: "${doc.title}" (${doc.id})`)
-                  const skill = await loadDocDesignSkill()
-                  result = `HTML document created: "${doc.title}"\ndoc_id: ${doc.id}\n\nUse patch_document with this doc_id for targeted edits.\n\n${skill}`
+                  const baseResult = `HTML document created: "${doc.title}"\ndoc_id: ${doc.id}\n\nUse patch_document with this doc_id for targeted edits.`
+                  if (!this.docDesignSkillInjected) {
+                    const skill = await loadDocDesignSkill()
+                    this.docDesignSkillInjected = true
+                    result = `=== DOCUMENT DESIGN SKILL ===\n\n${skill}\n\n=== TOOL RESULT ===\n\n${baseResult}`
+                  } else {
+                    result = baseResult
+                  }
                 }
               }
             } catch (err: any) {
@@ -2521,6 +2529,12 @@ Rules:
             } catch (err: any) {
               result = `Error patching document: ${err.message}`
               console.error('[Agent] patch_document error:', err)
+            }
+            // Inject design skill into the first successful patch_document result this conversation
+            if (!this.docDesignSkillInjected && !result.startsWith('Error:')) {
+              const skill = await loadDocDesignSkill()
+              this.docDesignSkillInjected = true
+              result = `=== DOCUMENT DESIGN SKILL ===\n\n${skill}\n\n=== TOOL RESULT ===\n\n${result}`
             }
 
           } else if (block.name === 'research') {
@@ -3341,6 +3355,7 @@ Rules:
   clearHistory(): void {
     this.conversationHistory = []
     this.activeSkillTools.clear()
+    this.docDesignSkillInjected = false
     this.saveHistory().catch(console.error)
   }
 }
