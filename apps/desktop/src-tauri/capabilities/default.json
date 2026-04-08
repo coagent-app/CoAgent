@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capabilities",
-  "windows": ["main", "voice-pill"],
+  "windows": ["main", "voice-pill", "export_*"],
   "permissions": [
     "core:default",
     "core:event:default",
@@ -10,6 +10,7 @@
     "global-shortcut:default",
     "updater:default",
     "process:default",
+    "dialog:allow-save",
     "shell:allow-open",
     {
       "identifier": "shell:allow-execute",
