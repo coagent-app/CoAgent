@@ -588,9 +588,7 @@ Rules:
   },
 ]
 
-// HTML document tools — only registered when experimental.htmlDocuments is enabled.
-// Kept separate from INTERNAL_TOOLS so flag-off doesn't shift the stable tool array
-// index or disturb the API cache prefix.
+// HTML document tools — always registered (non-heartbeat contexts only).
 const HTML_DOC_TOOLS: Anthropic.Tool[] = [
   {
     name: 'write_document',
@@ -891,8 +889,8 @@ Documents (Canvas): create_document opens a live Canvas doc, update_document str
   update_document ops: {op:'insert',index,block}, {op:'replace',blockId,block}, {op:'delete',blockId}, {op:'set_title',title}. One block per call.
   Agentic reports: (1) create_document, (2) gather data in parallel from memory/files/research/tools, (3) plan a structure that fits THIS content (not a fixed skeleton), (4) stream blocks in with update_document. Skip any block you lack data for.
   NEVER emit placeholder tokens ({{TITLE}}, "TBD", "[fill in]") — real content only or skip the block.
-  list_documents: find an existing Canvas doc. export_document_pdf: render a finished doc to PDF (returns coagent_file_id) before attaching to send/upload tools.${settings.experimental?.htmlDocuments ? `
-HTML Documents: use write_document to create, patch_document to edit. For vocabulary and design guidance, call skills(action: 'execute', name: 'document-design') before writing.` : ''}
+  list_documents: find an existing Canvas doc. export_document_pdf: render a finished doc to PDF (returns coagent_file_id) before attaching to send/upload tools.
+HTML Documents: use write_document to create, patch_document to edit. For vocabulary and design guidance, call skills(action: 'execute', name: 'document-design') before writing.
 Schedule: create/update/delete/complete/list — routines (cron), tasks (one-time), followups. Call get_current_time in parallel when scheduling — never guess the date.${googleCalendarConnected ? ' Google Calendar synced — schedule(action: "list") includes Google events. To modify/delete Google events, use call_external_tool with GOOGLECALENDAR_UPDATE_EVENT or GOOGLECALENDAR_DELETE_EVENT (not the schedule tool).' : ''}
 Skills: skills(action: 'list') to see available, skills(action: 'execute', name: 'skill-name') to run. Run proactively when they match the request.
 Integrations: create_custom_integration + @integration-builder for new API integrations.
@@ -1552,10 +1550,8 @@ Rules:
         required: ['queries']
       }
     }] : []
-    // Add html document tools when the experimental flag is on
-    const htmlDocTools: Anthropic.Tool[] = (context !== 'heartbeat' && settings.experimental?.htmlDocuments)
-      ? HTML_DOC_TOOLS
-      : []
+    // HTML document tools are always available in non-heartbeat contexts.
+    const htmlDocTools: Anthropic.Tool[] = context !== 'heartbeat' ? HTML_DOC_TOOLS : []
     const stableTools = [...contextTools, ...exaTools, ...researchTool, ...htmlDocTools].map(trimToolSchema)
     console.log(`[Agent] Tools available: ${stableTools.map(t => t.name).join(', ')}`)
 

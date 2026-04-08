@@ -168,41 +168,37 @@ export default function App() {
         {view === 'chat' && (
           <div className="relative flex-1 flex overflow-hidden">
             <ChatPane messages={messages} streamingText={streamingText} thinking={thinking} processing={processing} toolLabel={toolLabel} researchAgents={researchAgents} connected={connected} onChat={chat} onSteer={steer} onStop={stopAgent} onIngestFile={ingestFile} files={files} onNavigateToSettings={() => setView('settings')} lastHeartbeat={lastHeartbeat} heartbeatLog={heartbeatLog} onTriggerHeartbeat={triggerHeartbeat} statusLine={statusLine} skills={skills} capabilityCard={capabilityCard} onConfirmCapabilities={confirmCapabilities} userName={settings?.name} userRole={settings?.role} onboarded={settings?.onboarded} agentName={settings?.agent_name} onOpenCanvasDoc={openCanvasDoc} className="flex-1" />
-            {settings?.experimental?.htmlDocuments ? (
-              // Phase 2: render HtmlDocument in sandboxed iframe when flag is on
-              htmlDoc && htmlDocVisible && (
-                <HtmlDocumentPane
-                  doc={htmlDoc}
-                  streaming={false}
-                  onClose={closeHtmlDoc}
-                  onPatchDocument={(args) => {
-                    console.log('[App] patchDocument (Phase 3 stub):', args)
-                  }}
-                  onDocumentChange={(next) => patchHtmlDocLocally(next)}
-                />
-              )
-            ) : (
-              canvasDoc && canvasVisible && (
-                <CanvasPane
-                  doc={canvasDoc}
-                  streaming={canvasStreaming}
-                  brand={settings ? {
-                    companyName: settings.brand_company || undefined,
-                    primary: settings.brand_primary || undefined,
-                    secondary: settings.brand_secondary || undefined,
-                    tertiary: settings.brand_tertiary || undefined,
-                    logoDataUri: settings.brand_logo || undefined,
-                  } : undefined}
-                  onClose={closeCanvas}
-                  onExportPdf={exportCanvasPdf}
-                  onSaveToFiles={saveCanvasToFiles}
-                  exporting={canvasExporting}
-                  onDocumentChange={next => setCanvasDocFromClient(next)}
-                  onEmit={(docId, ops) => sendCanvasClientOps(docId, ops)}
-                />
-              )
+            {htmlDoc && htmlDocVisible && (
+              <HtmlDocumentPane
+                doc={htmlDoc}
+                streaming={false}
+                onClose={closeHtmlDoc}
+                onPatchDocument={(args) => {
+                  console.log('[App] patchDocument (Phase 3 stub):', args)
+                }}
+                onDocumentChange={(next) => patchHtmlDocLocally(next)}
+              />
             )}
-            {!settings?.experimental?.htmlDocuments && canvasDoc && !canvasVisible && (
+            {canvasDoc && canvasVisible && (
+              <CanvasPane
+                doc={canvasDoc}
+                streaming={canvasStreaming}
+                brand={settings ? {
+                  companyName: settings.brand_company || undefined,
+                  primary: settings.brand_primary || undefined,
+                  secondary: settings.brand_secondary || undefined,
+                  tertiary: settings.brand_tertiary || undefined,
+                  logoDataUri: settings.brand_logo || undefined,
+                } : undefined}
+                onClose={closeCanvas}
+                onExportPdf={exportCanvasPdf}
+                onSaveToFiles={saveCanvasToFiles}
+                exporting={canvasExporting}
+                onDocumentChange={next => setCanvasDocFromClient(next)}
+                onEmit={(docId, ops) => sendCanvasClientOps(docId, ops)}
+              />
+            )}
+            {canvasDoc && !canvasVisible && (
               <CanvasReopenChip
                 title={canvasDoc.title}
                 streaming={canvasStreaming}

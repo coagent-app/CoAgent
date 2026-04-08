@@ -117,7 +117,7 @@ export function useAgent() {
   // (showing a reopen chip) without losing the doc, and new agent activity
   // auto-reopens it.
   const [canvasVisible, setCanvasVisible] = useState(false)
-  // HTML document state (Phase 2 — experimental.htmlDocuments flag)
+  // HTML document state
   const [htmlDoc, setHtmlDoc] = useState<HtmlDocument | null>(null)
   const [htmlDocVisible, setHtmlDocVisible] = useState(false)
   // Feedback toast shown after a user-initiated PDF export finishes. Auto-
