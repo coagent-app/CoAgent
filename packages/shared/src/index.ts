@@ -1,3 +1,7 @@
+// Block document model — see ./blocks.ts
+export * from './blocks.js'
+import type { BlockDocument, DocumentUpdateOp } from './blocks.js'
+
 export type Autonomy = 'ask_first' | 'balanced' | 'agent' | 'autonomous'
 
 export type NotificationMode = 'always' | 'away_only' | 'never'
@@ -31,7 +35,9 @@ export interface AgentSettings {
   onboarded: boolean       // false until onboarding completes — triggers onboarding flow in system prompt
   custom_instructions: string  // freeform text injected into every system prompt — user or agent can edit
   brand_company: string        // company name for document branding
-  brand_color: string          // accent color hex for documents, e.g. '#1a2744'
+  brand_primary: string        // required accent color hex, e.g. '#1a2744'
+  brand_secondary: string      // optional secondary accent hex; '' = unset
+  brand_tertiary: string       // optional tertiary accent hex; '' = unset
   brand_logo: string           // base64 data URI of logo PNG/JPEG for documents
   auto_brief_meetings: boolean // auto-brief before calendar meetings
   auto_brief_minutes: number   // minutes before meeting to fire brief (default 30)
@@ -98,10 +104,19 @@ export interface GoogleCalendarInfo {
   color: string
 }
 
+export interface AgentMessageDoc {
+  id: string
+  title: string
+}
+
 export interface AgentMessage {
   role: 'user' | 'assistant'
   content: string
   timestamp: string
+  // Client-side only: Canvas documents created during this turn. Populated by
+  // the desktop app so chat bubbles can render clickable DocCards. Never sent
+  // by the server and not persisted across sessions.
+  docs?: AgentMessageDoc[]
 }
 
 export interface TriggerInfo {
@@ -128,7 +143,7 @@ export interface Integration {
 
 export interface FileEntry {
   id: string
-  type: 'upload'
+  type: 'upload' | 'block_document'
   filename: string
   path: string          // absolute path on disk
   addedAt: string       // ISO timestamp
@@ -136,11 +151,9 @@ export interface FileEntry {
   summary: string       // AI-written 2-3 sentence description
   group: string         // agent-assigned folder name e.g. "Contracts"
   sizeBytes: number
-  documentMeta?: {
-    template: string        // e.g. 'resume', 'proposal'
-    templateData: any       // the full data object passed to renderTemplatedDocument
-    lastRenderedAt: string  // ISO timestamp
-  }
+  // For block_document files: the document id that maps to a .cadoc on disk.
+  // Clicking this file in FilesPane opens it in Canvas instead of the default viewer.
+  blockDocId?: string
 }
 
 export type WSClientMessage =
@@ -215,7 +228,9 @@ export type WSClientMessage =
   | { type: 'team_join'; inviteCode: string; memberName: string; memberRole: string; memberHandles: string }
   | { type: 'team_leave' }
   | { type: 'team_invite' }
-  | { type: 'update_document_fields'; fileId: string; data: Record<string, any> }
+  | { type: 'canvas_open_doc'; docId: string }
+  | { type: 'canvas_close' }
+  | { type: 'canvas_save_pdf'; docId: string; base64: string; requestId?: string }
 
 export type WSServerMessage =
   | { type: 'queue_update'; items: ApprovalItem[] }
@@ -275,6 +290,12 @@ export type WSServerMessage =
   | { type: 'team_error'; error: string }
   | { type: 'status_line'; message: string }
   | { type: 'subscription_expired' }
+  | { type: 'canvas_open'; doc: BlockDocument; streaming: boolean }
+  | { type: 'canvas_update'; docId: string; ops: DocumentUpdateOp[] }
+  | { type: 'canvas_close' }
+  | { type: 'canvas_export_request'; doc: BlockDocument; requestId: string }
+  | { type: 'canvas_pdf_exported'; docId: string; fileId: string; filename: string; requestId?: string }
+  | { type: 'canvas_error'; docId?: string; message: string; requestId?: string }
 
 export interface AdminUser {
   userId: string
