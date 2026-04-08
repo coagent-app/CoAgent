@@ -1,5 +1,8 @@
 // Block document model — see ./blocks.ts
 export * from './blocks.js'
+
+// HTML document model — see ./document.ts
+export * from './document.js'
 import type { BlockDocument, DocumentUpdateOp } from './blocks.js'
 
 export type Autonomy = 'ask_first' | 'balanced' | 'agent' | 'autonomous'

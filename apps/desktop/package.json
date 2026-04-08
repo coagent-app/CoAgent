@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "node ../../scripts/start-dev.js",
     "build": "tsc && vite build",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "build:doc-runtime": "node src/doc-runtime/build.js"
   },
   "dependencies": {
     "@coagent/shared": "workspace:*",

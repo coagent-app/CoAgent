@@ -1,0 +1,51 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  .doc {
+    /* Default theme values — populated per-doc at render time */
+    --background: 0 0% 100%;
+    --foreground: 222 47% 11%;
+    --muted: 210 40% 96%;
+    --muted-foreground: 215 16% 47%;
+    --primary: 221 70% 18%;      /* default brand navy */
+    --primary-foreground: 0 0% 100%;
+    --secondary: 210 40% 96%;
+    --secondary-foreground: 222 47% 11%;
+    --accent: 210 40% 96%;
+    --accent-foreground: 222 47% 11%;
+    --border: 214 32% 91%;
+    --radius: 0.75rem;
+    --font-display: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --font-body: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+}
+
+@layer components {
+  .doc { @apply bg-background text-foreground; font-family: var(--font-body); }
+  .doc-page { @apply max-w-[816px] mx-auto p-12; }
+  .doc-header { @apply mb-8; }
+  .doc-footer { @apply mt-12 pt-6 border-t border-border text-muted-foreground text-sm; }
+
+  .sec { @apply mb-8; }
+  .sec-hero { @apply mb-12; }
+  .sec-kpi { @apply grid grid-cols-3 gap-6 mb-8; }
+  .sec-split { @apply grid grid-cols-2 gap-8 mb-8; }
+  .sec-compare { @apply grid grid-cols-2 gap-8 mb-8; }
+  .sec-gallery { @apply grid grid-cols-3 gap-4 mb-8; }
+  .sec-quote { @apply my-12 pl-6 border-l-4 border-primary; }
+  .sec-table { @apply mb-8; }
+  .sec-signoff { @apply mt-12 pt-6 border-t border-border; }
+  .sec-cta { @apply my-8 p-8 bg-primary text-primary-foreground rounded; }
+
+  .ed-title { font-family: var(--font-display); @apply text-4xl font-semibold tracking-tight; }
+  .ed-eyebrow { @apply text-xs uppercase tracking-wider text-muted-foreground mb-2; }
+  .ed-lede { @apply text-lg text-muted-foreground mb-6; }
+  .ed-body { @apply text-base leading-relaxed mb-4; }
+  .ed-stat-value { font-family: var(--font-display); @apply text-3xl font-semibold; }
+  .ed-stat-label { @apply text-xs uppercase tracking-wider text-muted-foreground; }
+  .ed-cell { @apply py-2 px-3; }
+  .ed-caption { @apply text-sm text-muted-foreground mt-2; }
+  .ed-signature { @apply text-base; }
+}
