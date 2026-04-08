@@ -13,7 +13,6 @@ import { SkillsPane } from '@/components/SkillsPane'
 import { TeamPane } from '@/components/TeamPane'
 import { CanvasPane } from '@/components/CanvasPane'
 import { CanvasReopenChip } from '@/components/CanvasReopenChip'
-import { CanvasExportSurface } from '@/components/CanvasExportSurface'
 import { OnboardingTour } from '@/components/OnboardingTour'
 import { useAgent } from '@/hooks/useAgent'
 import { useUpdater } from '@/hooks/useUpdater'
@@ -72,7 +71,7 @@ function ExportToast({ filename, filePath, onShowInFiles, onDismiss }: { filenam
   )
 }
 export default function App() {
-  const { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, error, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, settings, updateSettings, authStatus, updateAuth, verifyAuth, files, folders, searchResults, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, relayActive, relayModel, setRelayModel, relayUsage, activateRelay, refreshRelayStatus, pendingFields, setPendingFields, setModel, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, triggerPrompt, setTriggerPrompt, canvasDoc, canvasStreaming, canvasExporting, canvasVisible, openCanvasDoc, closeCanvas, reopenCanvas, exportCanvasPdf, pendingExport, completePendingExport, failPendingExport, exportToast, dismissExportToast } = useAgent()
+  const { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, error, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, settings, updateSettings, authStatus, updateAuth, verifyAuth, files, folders, searchResults, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, relayActive, relayModel, setRelayModel, relayUsage, activateRelay, refreshRelayStatus, pendingFields, setPendingFields, setModel, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, triggerPrompt, setTriggerPrompt, canvasDoc, canvasStreaming, canvasExporting, canvasVisible, openCanvasDoc, closeCanvas, reopenCanvas, exportCanvasPdf, exportToast, dismissExportToast } = useAgent()
   const { dark, toggle: toggleTheme } = useTheme()
   const updater = useUpdater()
   const [view, setView] = useState<View>('chat')
@@ -297,24 +296,6 @@ export default function App() {
         />
       )}
 
-      {/* Off-screen PDF rendering surface for agent-initiated export_document_pdf.
-          Mounted only while a pendingExport exists; it renders, reports the
-          base64 back, and clears itself. */}
-      {pendingExport && (
-        <CanvasExportSurface
-          key={pendingExport.requestId}
-          doc={pendingExport.doc}
-          brand={settings ? {
-            companyName: settings.brand_company || undefined,
-            primary: settings.brand_primary || undefined,
-            secondary: settings.brand_secondary || undefined,
-            tertiary: settings.brand_tertiary || undefined,
-            logoDataUri: settings.brand_logo || undefined,
-          } : undefined}
-          onRendered={(r) => completePendingExport(r.base64)}
-          onError={(msg) => failPendingExport(msg)}
-        />
-      )}
 
       <IntegrationsModal
         open={modalOpen}
