@@ -63,6 +63,6 @@ export function buildBrandPalette(brand?: BrandInput): BrandPalette {
 export const PDF_CALLOUT_STYLES = {
   info:    { bg: '#eff6ff', border: '#bfdbfe', text: '#1e40af', icon: 'i' },
   warn:    { bg: '#fffbeb', border: '#fde68a', text: '#b45309', icon: '!' },
-  success: { bg: '#ecfdf5', border: '#a7f3d0', text: '#047857', icon: '✓' },
-  tip:     { bg: '#f5f3ff', border: '#ddd6fe', text: '#6d28d9', icon: '◆' },
+  success: { bg: '#ecfdf5', border: '#a7f3d0', text: '#047857', icon: '+' },
+  tip:     { bg: '#f5f3ff', border: '#ddd6fe', text: '#6d28d9', icon: '*' },
 } as const
