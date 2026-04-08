@@ -654,8 +654,8 @@ export async function ingestFile(
 
 
 // Overwrite the bytes of an existing file without changing its id or group.
-// Called by the canvas_save_pdf dedupe path so repeated agent-initiated exports
-// on the same doc update a single Files entry rather than creating new ones.
+// Used when repeated agent-initiated exports on the same doc should update a
+// single Files entry rather than creating new ones.
 export async function overwriteFile(
   dataDir: string,
   fileId: string,
@@ -1132,9 +1132,9 @@ export async function updateFileContent(
 // ── Block document index integration ─────────────────────────────────────────
 
 /**
- * Upsert a FileEntry for a Canvas block document (.cadoc). Used by agent.ts
- * after creating or updating a BlockDocument so the doc shows up in FilesPane
- * alongside uploaded files. Keyed by FileEntry.id === doc.id.
+ * Upsert a FileEntry for an HTML document. Used by agent.ts after creating or
+ * updating a document so it shows up in FilesPane alongside uploaded files.
+ * Keyed by FileEntry.id === doc.id.
  */
 export async function upsertBlockDocEntry(
   dataDir: string,

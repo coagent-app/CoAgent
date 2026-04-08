@@ -1,5 +1,5 @@
 // HTML document store — reads/writes/updates .htmldoc files for the HTML
-// document architecture. Coexists with block-document-store.ts (.cadoc).
+// document architecture.
 // See docs/plans/2026-04-08-html-document-architecture.md for the full design.
 
 import { readFile, writeFile, mkdir, unlink, rename } from 'fs/promises'

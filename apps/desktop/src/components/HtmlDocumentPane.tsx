@@ -1,7 +1,6 @@
 // HtmlDocumentPane — renders an HtmlDocument in a sandboxed iframe.
-// Phase 2 of the HTML document architecture. Mirrors CanvasPane chrome
-// (toolbar, Save to Files, Export, streaming loader) but replaces the
-// block-based rendering surface with a `sandbox="allow-same-origin"` iframe.
+// Phase 2 of the HTML document architecture. Toolbar chrome with
+// Save/Export/streaming loader over a `sandbox="allow-same-origin"` iframe.
 //
 // Editor affordances implemented here (Phase 2):
 //   - Click-to-edit on .ed-* leaves (contentEditable, blur/Enter → patchDocument)
@@ -333,7 +332,7 @@ export function HtmlDocumentPane({
       ref={containerRef}
       className="flex flex-col h-full w-full max-w-[640px] border-l border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-950 relative"
     >
-      {/* Toolbar — identical chrome to CanvasPane */}
+      {/* Toolbar */}
       <div className="flex items-center justify-between px-4 py-2.5 border-b border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 flex-shrink-0">
         <div className="flex items-center gap-2 min-w-0">
           {streaming && (

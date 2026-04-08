@@ -2904,7 +2904,7 @@ Rules:
    * Handles:
    * 1. Orphaned tool_result: no matching tool_use in the window
    * 2. Orphaned tool_use: no matching tool_result in the window
-   * 3. Duplicate IDs: Kimi reuses tool_call IDs like "update_document:N" across
+   * 3. Duplicate IDs: Kimi reuses tool_call IDs like "tool_name:N" across
    *    different API calls. Uses cardinality counting (not just Set membership)
    *    to ensure each tool_use has exactly one matching tool_result.
    */

@@ -4,12 +4,11 @@
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
 #[cfg(target_os = "macos")]
 use std::ffi::c_void;
 #[cfg(target_os = "macos")]
 use std::sync::atomic::AtomicPtr;
-use tauri::{Emitter, Listener, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Listener, Manager};
 
 // ── File logging (visible when launched from Finder where stderr is lost) ────
 fn log(msg: &str) {
@@ -588,261 +587,7 @@ fn start_event_tap() {
     });
 }
 
-// ── Canvas → PDF export (Path C: HTML→print via hidden WKWebView) ───────────
-//
-// Flow:
-//   1. Frontend calls `export_document_pdf(docJson, brandJson)`.
-//   2. Rust stages the payload in ExportPayloadStore under a fresh uuid label.
-//   3. Rust spawns a hidden WebviewWindow pointed at /?print=1&label=<label>.
-//   4. The PrintRoute in that window reads the label, fetches the payload via
-//      `get_export_payload`, renders the doc, signals `print-ready`.
-//   5. Rust waits for the `print-ready` event, then calls capture_nswindow_pdf
-//      (Objective-C helper) which walks the window's view tree, finds the
-//      WKWebView, calls createPDFWithConfiguration, writes bytes to a temp
-//      file. Rust reads the file, deletes it, returns the bytes.
-//   6. Rust closes the hidden window and clears the staged payload.
-
-#[derive(Clone, Default)]
-struct ExportPayload {
-    doc_json: String,
-    brand_json: Option<String>,
-}
-
-// Arc<Mutex<>> so we can cheaply clone the inner handle into the scopeguard
-// cleanup closure (we can't move a Tauri State across await points).
-#[derive(Default, Clone)]
-struct ExportPayloadStore(Arc<Mutex<HashMap<String, ExportPayload>>>);
-
-// Tracks which print labels have signalled "ready". Frontend PrintRoute
-// invokes signal_print_ready after layout settles; the Rust export command
-// polls this set until the label appears (or times out).
-#[derive(Default, Clone)]
-struct PrintReadyStore(Arc<Mutex<std::collections::HashSet<String>>>);
-
-#[cfg(target_os = "macos")]
-extern "C" {
-    fn capture_nswindow_pdf(nswindow_ptr: *mut c_void, out_path: *const u8) -> i32;
-}
-
-// Called by the PrintRoute in the hidden window to retrieve the staged
-// payload. Returns a JSON object with `doc` and `brand` fields that the
-// frontend parses into its BlockDocument/BrandKit shapes.
-#[tauri::command]
-fn signal_print_ready(
-    label: String,
-    state: tauri::State<'_, PrintReadyStore>,
-) -> Result<(), String> {
-    let mut set = state.0.lock().map_err(|e| format!("lock: {}", e))?;
-    set.insert(label);
-    Ok(())
-}
-
-#[tauri::command]
-fn get_export_payload(
-    label: String,
-    state: tauri::State<'_, ExportPayloadStore>,
-) -> Result<serde_json::Value, String> {
-    let store = state.0.lock().map_err(|e| format!("lock: {}", e))?;
-    let payload = store.get(&label).ok_or_else(|| format!("no payload for label {}", label))?;
-    let doc: serde_json::Value = serde_json::from_str(&payload.doc_json)
-        .map_err(|e| format!("invalid doc JSON: {}", e))?;
-    let brand: serde_json::Value = match &payload.brand_json {
-        Some(s) => serde_json::from_str(s).map_err(|e| format!("invalid brand JSON: {}", e))?,
-        None => serde_json::Value::Null,
-    };
-    Ok(serde_json::json!({ "doc": doc, "brand": brand }))
-}
-
-// Top-level export command called from useAgent.ts. Handles the full
-// lifecycle: stage payload, spawn window, wait for ready, capture, close.
-#[tauri::command]
-async fn export_document_pdf(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, ExportPayloadStore>,
-    doc_json: String,
-    brand_json: Option<String>,
-) -> Result<String, String> {
-    // 1. Generate a label and stage the payload.
-    let label = format!("export_{}", uuid_v4_lite());
-    {
-        let mut store = state.0.lock().map_err(|e| format!("lock: {}", e))?;
-        store.insert(label.clone(), ExportPayload { doc_json, brand_json });
-    }
-    // Always clear the staged payload when we exit, even on error.
-    let state_cleanup = app.state::<ExportPayloadStore>().inner().0.clone();
-    let label_cleanup = label.clone();
-    let _cleanup = scopeguard_like(move || {
-        if let Ok(mut store) = state_cleanup.lock() {
-            store.remove(&label_cleanup);
-        }
-    });
-
-    // 2. Build the URL for the hidden window. In dev the frontend runs at the
-    // Vite server (devUrl in tauri.conf); in prod it's the bundled index.html.
-    // Tauri's WebviewUrl::App takes a relative path — the ?print=1&label=...
-    // query string is appended.
-    let relative_url = format!("index.html?print=1&label={}", label);
-    let webview_url = WebviewUrl::App(relative_url.into());
-
-    // 3. Spawn the hidden window.
-    //
-    // Why visible(true) + offscreen + skip_taskbar instead of visible(false):
-    // WebviewWindowBuilder::visible(false) on macOS doesn't lay out the
-    // WKWebView, so createPDF returns an empty document. We work around this
-    // by making the window technically visible but positioned off-screen and
-    // hidden from the dock/taskbar. The user never sees it.
-    let window = WebviewWindowBuilder::new(&app, &label, webview_url)
-        .title("CoAgent Export")
-        .inner_size(816.0, 1056.0) // US Letter at 96dpi
-        .position(-10000.0, -10000.0) // offscreen
-        .resizable(false)
-        .decorations(false)
-        .skip_taskbar(true)
-        .focused(false)
-        .visible(true)
-        .build()
-        .map_err(|e| format!("spawn export window: {}", e))?;
-
-    // 4. Poll the PrintReadyStore until the PrintRoute calls signal_print_ready
-    // with our label, or we hit the deadline. We use invoke-based signalling
-    // instead of emit/listen because the Tauri 2 global event bus doesn't
-    // reliably propagate from a child webview to an AppHandle listener.
-    let ready_store = app.state::<PrintReadyStore>().inner().0.clone();
-    let poll_label = label.clone();
-    let wait_result: Result<(), ()> = {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        let mut found = false;
-        while std::time::Instant::now() < deadline {
-            {
-                let mut set = ready_store.lock().map_err(|e| format!("lock: {}", e))?;
-                if set.remove(&poll_label) {
-                    found = true;
-                    break;
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        if found { Ok(()) } else { Err(()) }
-    };
-
-    if wait_result.is_err() {
-        let _ = window.close();
-        return Err("timeout waiting for print-ready".to_string());
-    }
-
-    // 6. Capture the window to a temp PDF file via the obj-c helper.
-    let temp_path = std::env::temp_dir().join(format!("{}.pdf", label));
-    let temp_path_str = temp_path.to_string_lossy().to_string();
-
-    #[cfg(target_os = "macos")]
-    let capture_result: Result<(), String> = {
-        // ns_window() returns *mut c_void on macOS. It MUST be called from
-        // the main thread (or from a context that can dispatch to it).
-        let nswindow_ptr = window
-            .ns_window()
-            .map_err(|e| format!("ns_window: {}", e))?;
-        let path_cstr = std::ffi::CString::new(temp_path_str.clone())
-            .map_err(|e| format!("path CString: {}", e))?;
-        // Run the capture on a background thread so the .m helper can
-        // dispatch_sync to the main queue without deadlocking.
-        let nswindow_usize = nswindow_ptr as usize;
-        let path_bytes: Vec<u8> = {
-            let mut v = path_cstr.into_bytes_with_nul();
-            v.shrink_to_fit();
-            v
-        };
-        let handle = std::thread::spawn(move || unsafe {
-            capture_nswindow_pdf(nswindow_usize as *mut c_void, path_bytes.as_ptr())
-        });
-        let code = handle.join().map_err(|_| "capture thread panicked".to_string())?;
-        if code != 0 {
-            Err(format!("capture_nswindow_pdf returned {}", code))
-        } else {
-            Ok(())
-        }
-    };
-    #[cfg(not(target_os = "macos"))]
-    let capture_result: Result<(), String> = Err("PDF export only implemented on macOS".to_string());
-
-    // 7. Close the hidden window regardless of capture outcome.
-    let _ = window.close();
-
-    capture_result?;
-
-    // 8. Read the temp file into memory, delete it, return base64.
-    let bytes = std::fs::read(&temp_path).map_err(|e| format!("read temp PDF: {}", e))?;
-    let _ = std::fs::remove_file(&temp_path);
-
-    let mut b64 = String::new();
-    base64_encode_to(&bytes, &mut b64).map_err(|e| format!("base64: {}", e))?;
-    Ok(b64)
-}
-
-// Tiny uuid v4 generator — avoids pulling in the uuid crate for one use.
-// Uses /dev/urandom on unix which is available on macOS.
-fn uuid_v4_lite() -> String {
-    let mut bytes = [0u8; 16];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        use std::io::Read;
-        let _ = f.read_exact(&mut bytes);
-    } else {
-        // Fallback: timestamp-based, not cryptographically unique but OK for
-        // a short-lived payload label.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        for (i, b) in bytes.iter_mut().enumerate() {
-            *b = ((now >> (i * 8)) & 0xff) as u8;
-        }
-    }
-    // Set version (4) and variant (10xx) bits
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5], bytes[6], bytes[7],
-        bytes[8], bytes[9], bytes[10], bytes[11],
-        bytes[12], bytes[13], bytes[14], bytes[15],
-    )
-}
-
-// Minimal base64 encoder — avoids pulling in the base64 crate.
-fn base64_encode_to(input: &[u8], out: &mut String) -> Result<(), String> {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    out.reserve((input.len() + 2) / 3 * 4);
-    let mut i = 0;
-    while i + 3 <= input.len() {
-        let b0 = input[i];
-        let b1 = input[i + 1];
-        let b2 = input[i + 2];
-        out.push(ALPHABET[(b0 >> 2) as usize] as char);
-        out.push(ALPHABET[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
-        out.push(ALPHABET[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char);
-        out.push(ALPHABET[(b2 & 0x3f) as usize] as char);
-        i += 3;
-    }
-    let rem = input.len() - i;
-    if rem == 1 {
-        let b0 = input[i];
-        out.push(ALPHABET[(b0 >> 2) as usize] as char);
-        out.push(ALPHABET[((b0 & 0x03) << 4) as usize] as char);
-        out.push('=');
-        out.push('=');
-    } else if rem == 2 {
-        let b0 = input[i];
-        let b1 = input[i + 1];
-        out.push(ALPHABET[(b0 >> 2) as usize] as char);
-        out.push(ALPHABET[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
-        out.push(ALPHABET[((b1 & 0x0f) << 2) as usize] as char);
-        out.push('=');
-    }
-    Ok(())
-}
-
-// Minimal base64 decoder — mirror of base64_encode_to, avoids pulling in the
-// base64 crate for one use.
+// Minimal base64 decoder — avoids pulling in the base64 crate for one use.
 fn base64_decode_from(input: &str) -> Result<Vec<u8>, String> {
     const DECODE: [i8; 128] = {
         let mut t = [-1i8; 128];
@@ -905,20 +650,6 @@ fn write_file_bytes(path: String, base64: String) -> Result<(), String> {
     Ok(())
 }
 
-// Minimal scopeguard — runs a closure on drop. Avoids depending on the
-// scopeguard crate for one use.
-struct ScopeGuard<F: FnOnce()>(Option<F>);
-impl<F: FnOnce()> Drop for ScopeGuard<F> {
-    fn drop(&mut self) {
-        if let Some(f) = self.0.take() {
-            f();
-        }
-    }
-}
-fn scopeguard_like<F: FnOnce()>(f: F) -> ScopeGuard<F> {
-    ScopeGuard(Some(f))
-}
-
 fn main() {
     log("CoAgent starting up");
 
@@ -930,8 +661,6 @@ fn main() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(ServerProcess(Arc::new(Mutex::new(None))))
-        .manage(ExportPayloadStore::default())
-        .manage(PrintReadyStore::default())
         .setup(|app| {
             #[cfg(not(debug_assertions))]
             {
@@ -1119,9 +848,6 @@ fn main() {
             server_status,
             get_ws_nonce,
             get_relay_credentials,
-            export_document_pdf,
-            get_export_payload,
-            signal_print_ready,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
