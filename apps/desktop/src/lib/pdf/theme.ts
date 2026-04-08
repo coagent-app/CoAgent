@@ -2,6 +2,8 @@
 // Brand kit → react-pdf StyleSheet. react-pdf can't read CSS vars, so we
 // bake brand colors into a typed palette that block components consume.
 
+import { hexToRgba } from '../colors'
+
 export interface BrandPalette {
   primary: string
   primarySoft: string    // primary @ 0.25
@@ -17,21 +19,13 @@ export interface BrandPalette {
 
 const DEFAULT_PRIMARY = '#1a2744'
 
-function hexToRgba(hex: string, alpha: number): string {
-  const h = hex.replace('#', '')
-  const full = h.length === 3 ? h.split('').map(c => c + c).join('') : h
-  const r = parseInt(full.slice(0, 2), 16)
-  const g = parseInt(full.slice(2, 4), 16)
-  const b = parseInt(full.slice(4, 6), 16)
-  if ([r, g, b].some(n => Number.isNaN(n))) return `rgba(26, 39, 68, ${alpha})`
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`
-}
-
 export interface BrandInput {
   primary?: string
   secondary?: string
   tertiary?: string
 }
+
+const isSet = (c?: string) => typeof c === 'string' && c.trim() !== ''
 
 export function buildBrandPalette(brand?: BrandInput): BrandPalette {
   const primary = brand?.primary || DEFAULT_PRIMARY
@@ -41,24 +35,27 @@ export function buildBrandPalette(brand?: BrandInput): BrandPalette {
   const warning = '#d97706'
   const danger = '#dc2626'
   const neutral = '#6b7280'
+
+  // Chart palette skips unset user colors so a primary-only brand doesn't
+  // render bars 2 and 3 in the same color as bar 1.
+  const chartPalette: string[] = [primary]
+  if (isSet(secondary)) chartPalette.push(secondary)
+  if (isSet(tertiary)) chartPalette.push(tertiary)
+  chartPalette.push(success, danger, neutral)
+
   return {
     primary,
     primarySoft: hexToRgba(primary, 0.25),
     primaryBg: hexToRgba(primary, 0.05),
+    // Individual palette slots keep their fallback behavior — non-chart blocks
+    // (KPI borders, header eyebrow, callouts) need a real color value.
     secondary: secondary || primary,
     tertiary: tertiary || secondary || primary,
     success,
     warning,
     danger,
     neutral,
-    chartPalette: [
-      primary,
-      secondary || primary,
-      tertiary || secondary || primary,
-      success,
-      danger,
-      neutral,
-    ],
+    chartPalette,
   }
 }
 

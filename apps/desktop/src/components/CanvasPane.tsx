@@ -7,6 +7,7 @@ import { X, Download, Loader2 } from 'lucide-react'
 import type { BlockDocument, DocumentBlock } from '@coagent/shared'
 import { BlockRenderer } from '@/components/blocks/BlockRenderer'
 import { cn } from '@/lib/utils'
+import { hexToRgba } from '@/lib/colors'
 
 interface BrandKit {
   companyName?: string
@@ -25,32 +26,46 @@ interface Props {
   exporting?: boolean
 }
 
-// Hex -> rgba helper. Accepts #rgb / #rrggbb.
-function hexToRgba(hex: string, alpha: number): string {
-  const h = hex.replace('#', '')
-  const full = h.length === 3 ? h.split('').map(c => c + c).join('') : h
-  const r = parseInt(full.slice(0, 2), 16)
-  const g = parseInt(full.slice(2, 4), 16)
-  const b = parseInt(full.slice(4, 6), 16)
-  if ([r, g, b].some(n => Number.isNaN(n))) return `rgba(37, 99, 235, ${alpha})`
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`
-}
+const isSet = (c?: string) => typeof c === 'string' && c.trim() !== ''
 
 export function CanvasPane({ doc, streaming, brand, onClose, onExportPdf, exporting }: Props) {
   const primary = brand?.primary || '#1a2744'
   const secondary = brand?.secondary || ''
   const tertiary = brand?.tertiary || ''
-  const cssVars = useMemo<React.CSSProperties>(() => ({
-    ['--canvas-primary' as any]: primary,
-    ['--canvas-primary-soft' as any]: hexToRgba(primary, 0.25),
-    ['--canvas-primary-bg' as any]: hexToRgba(primary, 0.05),
-    ['--canvas-secondary' as any]: secondary || primary,
-    ['--canvas-tertiary' as any]: tertiary || secondary || primary,
-    ['--canvas-success' as any]: '#059669',
-    ['--canvas-warning' as any]: '#d97706',
-    ['--canvas-danger' as any]: '#dc2626',
-    ['--canvas-neutral' as any]: '#6b7280',
-  }), [primary, secondary, tertiary])
+  const cssVars = useMemo<React.CSSProperties>(() => {
+    const success = '#059669'
+    const danger = '#dc2626'
+    const neutral = '#6b7280'
+
+    // Build chart palette skipping unset user brand slots (same logic as theme.ts)
+    // so a primary-only brand doesn't repeat the primary for series 2 and 3.
+    const chartPalette: string[] = [primary]
+    if (isSet(secondary)) chartPalette.push(secondary)
+    if (isSet(tertiary)) chartPalette.push(tertiary)
+    chartPalette.push(success, danger, neutral)
+
+    // Emit 6 numbered chart vars; overflow slots wrap around via modulo so
+    // the chart cycle always has 6 entries without introducing blank slots.
+    const chartVars: Record<string, string> = {}
+    for (let i = 0; i < 6; i++) {
+      chartVars[`--canvas-chart-${i + 1}` as string] = chartPalette[i % chartPalette.length]
+    }
+
+    return {
+      // Keep the semantic vars — non-chart blocks (KPI borders, header eyebrow,
+      // callouts) depend on these.
+      ['--canvas-primary' as any]: primary,
+      ['--canvas-primary-soft' as any]: hexToRgba(primary, 0.25),
+      ['--canvas-primary-bg' as any]: hexToRgba(primary, 0.05),
+      ['--canvas-secondary' as any]: secondary || primary,
+      ['--canvas-tertiary' as any]: tertiary || secondary || primary,
+      ['--canvas-success' as any]: success,
+      ['--canvas-warning' as any]: '#d97706',
+      ['--canvas-danger' as any]: danger,
+      ['--canvas-neutral' as any]: neutral,
+      ...chartVars,
+    }
+  }, [primary, secondary, tertiary])
 
   // Track which block IDs have been animated in. New ones fade + slide on arrival.
   const [seenIds, setSeenIds] = useState<Set<string>>(() => new Set(doc.blocks.map(b => b.id)))

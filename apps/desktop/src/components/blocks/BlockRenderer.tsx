@@ -280,16 +280,17 @@ function FooterBlockView({ block }: { block: FooterBlock }) {
   )
 }
 
-// Chart palette cycles through user brand colors first, then semantic fallbacks.
-// Using CSS vars lets the same component work in both live Canvas and (later)
-// the PDF renderer (which bakes values from the brand kit into a StyleSheet).
+// Chart palette references the numbered chart CSS vars emitted by CanvasPane.
+// Those vars are built with skip logic — unset brand colors (secondary/tertiary)
+// are excluded so a primary-only brand doesn't duplicate the primary color for
+// series 2 and 3. Overflow slots wrap around, so modulo cycling still works.
 const CHART_PALETTE = [
-  'var(--canvas-primary)',
-  'var(--canvas-secondary)',
-  'var(--canvas-tertiary)',
-  'var(--canvas-success)',
-  'var(--canvas-danger)',
-  'var(--canvas-neutral)',
+  'var(--canvas-chart-1)',
+  'var(--canvas-chart-2)',
+  'var(--canvas-chart-3)',
+  'var(--canvas-chart-4)',
+  'var(--canvas-chart-5)',
+  'var(--canvas-chart-6)',
 ]
 
 function ChartBlockView({ block }: { block: ChartBlock }) {
