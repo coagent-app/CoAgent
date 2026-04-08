@@ -12,19 +12,7 @@ import { searchEventStore, markEventsDone, getUnprocessedEvents } from './relay-
 import { readSettings, writeSettings } from './settings.js'
 import type { AgentSettings } from './settings.js'
 import type { AgentTrigger } from '@coagent/shared'
-import { searchFiles, readFileContent, readFileBase64, deleteFileEntry, getStorageStats, listFiles, ingestFile, createFolder, moveFile, grepFiles, getPdfFormFields, fillPdfForm, updateFileContent, upsertBlockDocEntry, removeBlockDocEntry } from './file-store.js'
-import {
-  createBlockDocument,
-  readBlockDocument,
-  updateBlockDocument,
-  listBlockDocuments,
-  deleteBlockDocument,
-  loadPreset,
-  listPresets,
-  buildBlockDocFileEntry,
-  applyOps as applyDocOps,
-} from './block-document-store.js'
-import type { DocumentBlock, DocumentUpdateOp, BlockDocument } from '@coagent/shared'
+import { searchFiles, readFileContent, readFileBase64, deleteFileEntry, getStorageStats, listFiles, ingestFile, createFolder, moveFile, grepFiles, getPdfFormFields, fillPdfForm, updateFileContent } from './file-store.js'
 import { embedTools, searchToolsAndSchema, setToolEmbeddingsDir } from './tool-embeddings.js'
 import { logToolCall, extractIntegration, searchToolLogs } from './service-logger.js'
 import { recordUsage } from './usage-tracker.js'
@@ -51,53 +39,6 @@ const MOONSHOT_BASE_URL = 'https://api.moonshot.ai/v1'
 const HISTORY_WINDOW = 50        // total pool — recent messages
 const HISTORY_CAP = 200          // hard in-memory cap — trim from front when exceeded
 
-// Composition guide injected into the create_document tool RESULT (not the
-// tool description). This keeps the ~600 tokens of layout variant guidance
-// out of the agent's context on every turn — it only appears after the
-// model has committed to creating a doc, for the lifetime of that
-// composition session.
-const DOC_COMPOSITION_GUIDE = `
-COMPOSITION GUIDE — read this, then stream blocks in via update_document.
-
-Compose freely. Don't use the same skeleton every time. Pick blocks based on what the content actually is, and vary the structure so no two docs look identical.
-
-BLOCK TYPES:
-- header — eyebrow + title + subtitle. Usually one, at top.
-- text — markdown prose, sub-headings, bullets, inline tables. Workhorse.
-- kpis — 2–6 label/value/delta cards for numbers at a glance.
-- table — headers + rows. {emphasis:true} on totals rows.
-- callout — boxed note, variant: info|warn|success|tip.
-- two_column — side-by-side blocks with {left,right,ratio}.
-- image — with optional caption.
-- chart — bar|line|pie. {kind,data,xKey,yKeys} or {kind,data,nameKey,valueKey}.
-- divider — section break.
-- signoff — name/title/date for letters.
-- footer — one, at bottom.
-- section — layout variant wrapper for 1–4 child blocks (see below).
-
-LAYOUT VARIANTS (via section block) — the ONLY way to get non-stack layouts. Mix 1–3 variant sections per doc with flat top-level blocks. Don't wrap every block in a section.
-- standard — vertical stack with optional title. "Just group these together".
-- hero — full-bleed image backdrop with title+eyebrow overlay. First image child becomes backdrop. For doc openers or topic lead-ins. 1 image + 1 short text child works best.
-- two_column — two children side by side, equal width. For "read these in parallel" (e.g. chart + takeaway text). Exactly 2 children.
-- kpi_band — slab background with a single KpisBlock child. Makes stats feel distinct from surrounding text.
-- gallery — 2-up or 3-up image grid. For multiple product shots, screenshots, brand images.
-- quote_pull — oversized serif italic quote with side rule. For a single forceful customer quote or stat. 1 text child.
-- comparison — strict 2-column split with tinted left side and divider. For before/after, old/new, A/B. Exactly 2 children.
-- timeline — reserved, renders as standard for now.
-
-STRUCTURE EXAMPLES (suggestions, not rules — vary them):
-- Data-heavy → header → section(kpi_band, [kpis]) → chart → text → table → callout
-- Narrative → header → section(hero, [image, text]) → text → callout → table → signoff
-- Briefing → header → kpis → section(two_column, [text, text]) → callout
-- Proposal → header → text → section(comparison, [text, text]) → table → callout → signoff
-- Portfolio → header → section(hero, [image, text]) → section(gallery, [image, image, image]) → text → signoff
-
-RULES:
-- Real content only. Never emit {{...}}, TBD, [fill in]. Skip a block rather than fake data.
-- Stream one top-level block per update_document call. When inserting a section, include all its children in the section's blocks array on that one op — you can't stream children into an existing section.
-- Text blocks use markdown (# headings, **bold**, - bullets).
-- Sections can't nest and can't contain header/footer/signoff.
-`.trim()
 
 // --- Skills ---
 const DEFAULT_SKILL_NAMES = new Set(['skill-creator', 'integration-builder', 'spreadsheet-pro', 'lead-generation', 'document-design'])
@@ -452,70 +393,6 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
     }
   },
   {
-    name: 'create_document',
-    description: `Open a visual document in the Canvas pane. This tool OPENS the doc — it does NOT fill the body. Pass a \`title\` (and optionally a \`preset\`); the tool result will include a composition guide showing the block types and layout variants available. Then stream the body in with follow-up \`update_document\` insert ops so the user sees it being written live. Output is a .cadoc file you can attach to emails or other send/upload tools.
-
-Rules:
-- NEVER write placeholder tokens like {{TITLE}}, "TBD", "[fill in]". Real content only.
-- Stream one block per update_document call — don't batch.
-- Brand kit auto-applies from settings; don't pass it.`,
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        title: { type: 'string', description: 'Document title, shown in Canvas header and used for the filename. e.g. "Q2 Status — Acme Corp".' },
-        preset: {
-          type: 'string',
-          enum: ['client-status', 'daily-briefing', 'marketing-audit'],
-          description: 'Optional starting template. When set, the doc opens with a branded header and you get back a plan describing which blocks to stream in via update_document.',
-        },
-        blocks: {
-          type: 'array',
-          description: 'Optional initial blocks. Most of the time, leave this empty (or pass only a header) and stream the body in via update_document for the live-writing effect. Each block needs a unique id and type plus its type-specific fields.',
-          items: { type: 'object', additionalProperties: true },
-        },
-      },
-      required: ['title'],
-    },
-  },
-  {
-    name: 'update_document',
-    description: 'Edit a Canvas document that already exists. Provide the doc id (from create_document response or list_documents) and an array of ops. Each op is replace (swap one block for a new one), insert (add a block at an index), delete (remove a block), or set_title. Use this for incremental updates like refreshing a KPI strip or rewriting a text block — don\'t recreate the whole doc.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        doc_id: { type: 'string', description: 'ID returned by create_document or list_documents.' },
-        ops: {
-          type: 'array',
-          description: 'Array of ops. Each is one of: {op:"replace", blockId, block}, {op:"insert", index, block}, {op:"delete", blockId}, {op:"set_title", title}.',
-          items: { type: 'object', additionalProperties: true },
-          minItems: 1,
-        },
-      },
-      required: ['doc_id', 'ops'],
-    },
-  },
-  {
-    name: 'list_documents',
-    description: 'List Canvas documents (.cadoc files). Use to find an existing doc to update or attach. Returns recent docs sorted by most recently updated.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        limit: { type: 'number', description: 'Max docs to return (default 20)' },
-      },
-    },
-  },
-  {
-    name: 'export_document_pdf',
-    description: 'Render a Canvas document to a PDF file and register it. Returns a coagent_file_id you can attach to any send/upload tool that accepts file attachments (email, messaging, Slack, WhatsApp, Drive, etc.). Rendering happens client-side so the PDF matches exactly what the user sees in Canvas. Call this right before attaching the finished document.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        doc_id: { type: 'string', description: 'ID of the Canvas document to export (from create_document or list_documents).' },
-      },
-      required: ['doc_id'],
-    },
-  },
-  {
     name: 'call_external_tool',
     description: 'Execute an external tool discovered via search_tools. Pass exact tool name and parameters from the schema.',
     input_schema: {
@@ -592,15 +469,13 @@ Rules:
 const HTML_DOC_TOOLS: Anthropic.Tool[] = [
   {
     name: 'write_document',
-    description: `Create or fully rewrite an HTML document in the Document pane.
-Use for: new documents, major regenerations ("make this a flyer"), full rewrites.
-For scoped edits (change a headline, update a price, swap a color), use patch_document instead.
-Call skills(action: 'execute', name: 'document-design') before writing to load vocabulary and design guidance.
+    description: `Create a new HTML document. Use this for any document the user asks for — proposals, reports, flyers, letters, invoices. Call skills(execute, 'document-design') first if you haven't this conversation.
 
 Rules:
 - Always assign stable id attributes to every top-level .sec-* and every .ed-* leaf so patch_document can address them.
 - Populate theme from the user's brand kit (brand_primary, brand_company, brand_logo from settings).
-- Real content only — no {{placeholders}}, TBD, or "fill in later".`,
+- Real content only — no {{placeholders}}, TBD, or "fill in later".
+- NEVER use the style attribute on any element. Pass theme via the theme parameter — the renderer injects CSS custom properties automatically.`,
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -687,10 +562,6 @@ const TOOL_LABELS: Record<string, string> = {
   exa: 'Searching the Web',
   research: 'Researching',
   monitor: 'Managing Monitors',
-  create_document: 'Creating Document',
-  update_document: 'Updating Document',
-  list_documents: 'Listing Documents',
-  export_document_pdf: 'Exporting PDF',
   write_document: 'Creating Document',
   patch_document: 'Updating Document',
   create_custom_integration: 'Building Integration',
@@ -883,14 +754,9 @@ ${settings.heartbeat_interval > 0 ? `Heartbeat: every ${settings.heartbeat_inter
 
 Memory: search first (parallel, semantic) before writing. Edit existing files over creating new ones. Be selective — signal, not archive. Before saving a person or topic, verify relevance: recent activity? recurring contact? someone the user actually engages with? Skip incidental noise — one-time CC's, strangers looped into threads, form senders, names mentioned in passing. Save only what the user will still care about next week. When the user dismisses, corrects, or asks you to remove something ("don't need X", "that's old", "clean that up"), edit memory in the SAME turn — never just acknowledge. heartbeat.md defines what to check each heartbeat.${memoryFiles.length > 0 ? `\nRecent memories: ${memoryFiles.join(', ')} — search to find others.` : ''}
 Files: grep to search contents (PDF/DOCX/XLSX/text). create_folder/move to organize. get_pdf_fields + fill_pdf for fillable forms. [filename](coagent-file:ID) to open. coagent_file_ids to attach files to emails.
-Documents (Canvas): create_document opens a live Canvas doc, update_document streams the body in block-by-block so the user watches it being written. Always stream — never batch the whole doc into create_document.
-  Start: { title } or { title, blocks: [header] }. Preset shortcut { preset: 'client-status'|'daily-briefing'|'marketing-audit' } exists for recurring exact-format deliverables, but compose freely by default — don't let every report look the same. Pick blocks that fit the content and vary the structure.
-  Blocks: header {eyebrow,title,subtitle}, text {markdown} (# headings, **bold**, - bullets, | tables |), kpis {items:[{label,value,delta?}]}, table {headers,rows:[{cells}]}, callout {variant:'info'|'warn'|'success'|'tip', title?, markdown}, two_column {left,right,ratio?}, image {src,caption?}, chart {kind:'bar'|'line'|'pie', data, xKey?, yKeys?, nameKey?, valueKey?}, divider, signoff {name,title?,date?}, footer {note?}.
-  update_document ops: {op:'insert',index,block}, {op:'replace',blockId,block}, {op:'delete',blockId}, {op:'set_title',title}. One block per call.
-  Agentic reports: (1) create_document, (2) gather data in parallel from memory/files/research/tools, (3) plan a structure that fits THIS content (not a fixed skeleton), (4) stream blocks in with update_document. Skip any block you lack data for.
-  NEVER emit placeholder tokens ({{TITLE}}, "TBD", "[fill in]") — real content only or skip the block.
-  list_documents: find an existing Canvas doc. export_document_pdf: render a finished doc to PDF (returns coagent_file_id) before attaching to send/upload tools.
-HTML Documents: use write_document to create, patch_document to edit. For vocabulary and design guidance, call skills(action: 'execute', name: 'document-design') before writing.
+Documents: use write_document to create any document (proposals, reports, flyers, letters, invoices). Call skills(action: 'execute', name: 'document-design') before writing to load vocabulary and design guidance. Use patch_document for scoped edits.
+  NEVER emit placeholder tokens ({{TITLE}}, "TBD", "[fill in]") — real content only.
+  NEVER use the style attribute in HTML — pass theme via the theme parameter in write_document.
 Schedule: create/update/delete/complete/list — routines (cron), tasks (one-time), followups. Call get_current_time in parallel when scheduling — never guess the date.${googleCalendarConnected ? ' Google Calendar synced — schedule(action: "list") includes Google events. To modify/delete Google events, use call_external_tool with GOOGLECALENDAR_UPDATE_EVENT or GOOGLECALENDAR_DELETE_EVENT (not the schedule tool).' : ''}
 Skills: skills(action: 'list') to see available, skills(action: 'execute', name: 'skill-name') to run. Run proactively when they match the request.
 Integrations: create_custom_integration + @integration-builder for new API integrations.
@@ -1054,7 +920,6 @@ export class Agent {
   public onResearchProgress?: (agents: { query: string; status: string; detail?: string }[]) => void
   public onCustomIntegration?: (action: string, data: any) => Promise<string>
   public onBroadcast?: (event: any) => void
-  public onExportDocumentPdf?: (docId: string) => Promise<{ fileId: string; filename: string }>
   public activeSkillTools = new Set<string>()
 
   async getSkills(): Promise<{ name: string; description: string; instructions: string; placeholder?: string; builtin: boolean }[]> {
@@ -2302,92 +2167,6 @@ Rules:
             this.onNotifyUser?.(input.title, input.body)
             result = 'Notification sent.'
 
-          } else if (block.name === 'create_document') {
-            const input = block.input as { title: string; preset?: string; blocks?: DocumentBlock[] }
-            try {
-              let initialBlocks: DocumentBlock[] = Array.isArray(input.blocks) ? input.blocks : []
-              let title = input.title || 'Untitled Document'
-              let presetPlan: string | undefined
-              if (input.preset) {
-                const preset = await loadPreset(input.preset)
-                if (preset) {
-                  // Preset provides a default skeleton — user-supplied blocks (if any) override
-                  if (initialBlocks.length === 0) initialBlocks = preset.blocks
-                  if (!input.title) title = preset.title
-                  presetPlan = preset.plan
-                }
-              }
-              const doc = await createBlockDocument(this.dataDir, {
-                title,
-                blocks: initialBlocks,
-                presetId: input.preset,
-              })
-              const entry = buildBlockDocFileEntry(doc, this.dataDir)
-              await upsertBlockDocEntry(this.dataDir, entry)
-              // Stream: open the Canvas and push the initial doc
-              this.onBroadcast?.({ type: 'canvas_open', doc, streaming: true })
-              console.log(`[Agent] Created Canvas document: ${doc.title} (${doc.id}, ${doc.blocks.length} blocks)`)
-              const planSection = presetPlan
-                ? `\n\nPLAN — stream these blocks in now via update_document insert ops:\n\n${presetPlan}`
-                : ''
-              result = `Canvas document created: "${doc.title}"\ndoc_id: ${doc.id}\ncoagent_file_id: ${doc.id}${planSection}\n\n${DOC_COMPOSITION_GUIDE}`
-            } catch (err: any) {
-              result = `Document creation failed: ${err.message}`
-              console.error('[Agent] Document creation error:', err)
-            }
-
-          } else if (block.name === 'update_document') {
-            const input = block.input as { doc_id: string; ops: DocumentUpdateOp[] }
-            try {
-              if (!input.doc_id || !Array.isArray(input.ops) || input.ops.length === 0) {
-                result = 'Error: update_document requires doc_id and a non-empty ops array.'
-              } else {
-                const updated = await updateBlockDocument(this.dataDir, input.doc_id, input.ops)
-                if (!updated) {
-                  result = `Error: no Canvas document found with id "${input.doc_id}". Use list_documents to find the right id.`
-                } else {
-                  const entry = buildBlockDocFileEntry(updated, this.dataDir)
-                  await upsertBlockDocEntry(this.dataDir, entry)
-                  this.onBroadcast?.({ type: 'canvas_update', docId: updated.id, ops: input.ops })
-                  result = `Updated "${updated.title}" (${input.ops.length} op${input.ops.length === 1 ? '' : 's'}). ${updated.blocks.length} blocks total.`
-                }
-              }
-            } catch (err: any) {
-              result = `Error updating document: ${err.message}`
-            }
-
-          } else if (block.name === 'list_documents') {
-            const input = block.input as { limit?: number }
-            try {
-              const limit = Math.max(1, Math.min(input.limit || 20, 100))
-              const docs = await listBlockDocuments(this.dataDir)
-              const sliced = docs.slice(0, limit)
-              if (sliced.length === 0) {
-                result = 'No Canvas documents yet.'
-              } else {
-                result = `${sliced.length} Canvas document${sliced.length === 1 ? '' : 's'}:\n` +
-                  sliced.map(d => `- ${d.title} (id: ${d.id}, updated: ${d.updatedAt}${d.presetId ? `, preset: ${d.presetId}` : ''})`).join('\n')
-              }
-            } catch (err: any) {
-              result = `Error listing documents: ${err.message}`
-            }
-
-          } else if (block.name === 'export_document_pdf') {
-            const input = block.input as { doc_id: string }
-            try {
-              if (!input.doc_id) {
-                result = 'Error: export_document_pdf requires doc_id.'
-              } else if (!this.onExportDocumentPdf) {
-                result = 'Error: PDF export is not available (no desktop client connected).'
-              } else {
-                const { fileId, filename } = await this.onExportDocumentPdf(input.doc_id)
-                result = `PDF exported: "${filename}"\ncoagent_file_id: ${fileId}\n\nAttach this id to GMAIL_SEND_EMAIL (or similar) to send it.`
-              }
-            } catch (err: any) {
-              result = `Error exporting PDF: ${err.message}`
-              console.error('[Agent] export_document_pdf error:', err)
-            }
-
           } else if (block.name === 'write_document') {
             const input = block.input as {
               title: string
@@ -2555,67 +2334,6 @@ Rules:
                     (t.description || '').toLowerCase().includes(query)
                   ).slice(0, 10)
                   return matched.map(t => `${t.name}: ${t.description || ''}`).join('\n') || 'No tools found.'
-                }
-                if (name === 'create_document') {
-                  const title = (inp.title as string) || 'Untitled Document'
-                  const presetId = inp.preset as string | undefined
-                  let initialBlocks: DocumentBlock[] = Array.isArray(inp.blocks) ? (inp.blocks as DocumentBlock[]) : []
-                  let finalTitle = title
-                  let presetPlan: string | undefined
-                  if (presetId) {
-                    const preset = await loadPreset(presetId)
-                    if (preset) {
-                      if (initialBlocks.length === 0) initialBlocks = preset.blocks
-                      if (!inp.title) finalTitle = preset.title
-                      presetPlan = preset.plan
-                    }
-                  }
-                  const doc = await createBlockDocument(this.dataDir, {
-                    title: finalTitle,
-                    blocks: initialBlocks,
-                    presetId,
-                  })
-                  const entry = buildBlockDocFileEntry(doc, this.dataDir)
-                  await upsertBlockDocEntry(this.dataDir, entry)
-                  this.onBroadcast?.({ type: 'canvas_open', doc, streaming: true })
-                  const planSection = presetPlan
-                    ? `\n\nPLAN — stream these blocks in now via update_document insert ops. Never use placeholder tokens:\n\n${presetPlan}`
-                    : `\n\nUse update_document with this doc_id to add blocks one at a time. Never write placeholder tokens.`
-                  return `Canvas document created: "${doc.title}" (doc_id: ${doc.id}).${planSection}`
-                }
-                if (name === 'update_document') {
-                  const docId = inp.doc_id as string
-                  const ops = inp.ops as DocumentUpdateOp[]
-                  if (!docId || !Array.isArray(ops) || ops.length === 0) {
-                    return 'Error: update_document requires doc_id and a non-empty ops array.'
-                  }
-                  const updated = await updateBlockDocument(this.dataDir, docId, ops)
-                  if (!updated) {
-                    return `Error: no Canvas document found with id "${docId}".`
-                  }
-                  const entry = buildBlockDocFileEntry(updated, this.dataDir)
-                  await upsertBlockDocEntry(this.dataDir, entry)
-                  this.onBroadcast?.({ type: 'canvas_update', docId: updated.id, ops })
-                  return `Updated "${updated.title}" (${ops.length} op${ops.length === 1 ? '' : 's'}). ${updated.blocks.length} blocks total.`
-                }
-                if (name === 'list_documents') {
-                  const limit = Math.max(1, Math.min((inp.limit as number) || 20, 100))
-                  const docs = await listBlockDocuments(this.dataDir)
-                  const sliced = docs.slice(0, limit)
-                  if (sliced.length === 0) return 'No Canvas documents yet.'
-                  return `${sliced.length} Canvas document${sliced.length === 1 ? '' : 's'}:\n` +
-                    sliced.map(d => `- ${d.title} (id: ${d.id}, updated: ${d.updatedAt}${d.presetId ? `, preset: ${d.presetId}` : ''})`).join('\n')
-                }
-                if (name === 'export_document_pdf') {
-                  const docId = inp.doc_id as string
-                  if (!docId) return 'Error: export_document_pdf requires doc_id.'
-                  if (!this.onExportDocumentPdf) return 'Error: PDF export is not available (no desktop client connected).'
-                  try {
-                    const { fileId, filename } = await this.onExportDocumentPdf(docId)
-                    return `PDF exported: "${filename}"\ncoagent_file_id: ${fileId}`
-                  } catch (err: any) {
-                    return `Error exporting PDF: ${err.message}`
-                  }
                 }
                 // Files, schedule, skills — route to the main handler
                 if (name === 'files' || name === 'schedule' || name === 'skills') {

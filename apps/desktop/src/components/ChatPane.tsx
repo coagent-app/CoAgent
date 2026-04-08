@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react'
-import { Send, Square, FileText, Sheet, File, X, ChevronLeft, ChevronRight, ExternalLink, Paperclip, Mic } from 'lucide-react'
+import { Send, Square, FileText, Sheet, File, X, ChevronLeft, ChevronRight, Paperclip, Mic } from 'lucide-react'
 import { CapabilityCard } from '@/components/CapabilityCard'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { invoke } from '@tauri-apps/api/core'
@@ -482,7 +482,8 @@ function FileDeck({ files }: { files: FileEntry[] }) {
 
 const FILE_LINK_RE = /\[([^\]]*)\]\(coagent-file:([^)]+)\)/g
 
-const AgentBubble = React.memo(function AgentBubble({ content, files }: { content: string; files: FileEntry[] }) {
+
+const AgentBubble = React.memo(function AgentBubble({ content, files, docs }: { content: string; files: FileEntry[]; docs?: { id: string; title: string }[] }) {
   const filesMap = React.useMemo(() => {
     const map = new Map<string, FileEntry>()
     for (const f of files) map.set(f.id, f)
@@ -769,7 +770,7 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
 
   return (
     <div
-      className={cn("flex-1 bg-white dark:bg-neutral-950 flex flex-col overflow-hidden relative", className)}
+      className={cn("flex-1 min-w-0 bg-white dark:bg-neutral-950 flex flex-col overflow-hidden relative", className)}
       onDragOver={(e) => { e.preventDefault(); setIsDragging(true) }}
       onDragLeave={(e) => { if (e.currentTarget === e.target) setIsDragging(false) }}
       onDrop={(e) => {
@@ -821,7 +822,7 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
                   {msg.content}
                 </div>
               ) : (
-                <AgentBubble content={msg.content} files={files} />
+                <AgentBubble content={msg.content} files={files} docs={msg.docs} />
               )}
             </div>
           ))}
@@ -931,7 +932,7 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
           >
             <Paperclip size={16} />
           </button>
-          <div className="relative flex-1">
+          <div className="relative flex-1 min-w-0">
             <Input
               ref={inputRef}
               className="flex-1 w-full text-[13.5px] dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500"
@@ -944,7 +945,7 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
               readOnly={dictation.recording}
             />
             {!isActive && connected && !input && !inputFocused && !dictation.recording && !dictation.transcribing && (
-              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[13.5px] text-neutral-400 dark:text-neutral-500 pointer-events-none">
+              <span className="absolute left-3 right-3 top-1/2 -translate-y-1/2 text-[13.5px] text-neutral-400 dark:text-neutral-500 pointer-events-none truncate whitespace-nowrap overflow-hidden">
                 {typingPlaceholder}<span className="inline-block w-[1px] h-[14px] bg-neutral-400 dark:bg-neutral-500 ml-[1px] align-middle animate-pulse" />
               </span>
             )}

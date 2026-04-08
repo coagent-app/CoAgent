@@ -123,12 +123,12 @@ function walkNode(node: ReturnType<typeof parse> | HTMLElement): WhitelistResult
         }
       }
 
-      // Reject style entirely (simpler; revisit in a later phase)
+      // Reject style entirely — theme is injected by the renderer from doc.theme
       if (attrLower === 'style') {
         return {
           ok: false,
           reason: 'disallowed_attribute',
-          detail: `Inline style attributes are not allowed — use Tailwind classes instead`,
+          detail: `Inline style attributes are not allowed. Use the theme parameter in write_document instead of inline styles — the renderer injects CSS custom properties automatically. Use Tailwind classes for layout.`,
         }
       }
 

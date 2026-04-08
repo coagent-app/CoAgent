@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Trash2, FileText, Sheet, Image, File, Folder, Pencil, LayoutGrid, List, ArrowUpDown, ArrowUp, ArrowDown, Search, X, ChevronLeft, ExternalLink } from 'lucide-react'
+import { Trash2, FileText, Sheet, Image, File, Folder, Pencil, LayoutGrid, List, ArrowUpDown, ArrowUp, ArrowDown, Search, X, ChevronLeft, ExternalLink, Sparkles } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import type { FileEntry } from '@coagent/shared'
 
@@ -46,6 +46,7 @@ const STORAGE_SORT_DIR = 'coagent_files_sort_dir'
 
 function fileIcon(filename: string) {
   const ext = filename.split('.').pop()?.toLowerCase()
+  if (ext === 'cadoc') return Sparkles
   if (ext === 'pdf') return FileText
   if (['csv', 'xlsx', 'xls'].includes(ext ?? '')) return Sheet
   if (['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(ext ?? '')) return Image
@@ -626,6 +627,11 @@ export function FilesPane({
     }
   }
 
+  // Opens a file in the OS default app via Tauri's open_file command.
+  function handleActivateFile(file: FileEntry) {
+    handleOpenFile(file.path)
+  }
+
   // ── Item click – handles plain / Cmd / Shift ──────────────────────────────
   function handleItemClick(e: React.MouseEvent, id: string) {
     e.stopPropagation()
@@ -932,7 +938,7 @@ export function FilesPane({
         onDragStart={(e) => { e.dataTransfer.setData('text/plain', file.id); setDraggingId(file.id) }}
         onDragEnd={() => { setDraggingId(null); setDragOverFolder(null) }}
         onClick={(e) => { if (!isRenaming) handleItemClick(e, file.id) }}
-        onDoubleClick={() => { if (!isRenaming) handleOpenFile(file.path) }}
+        onDoubleClick={() => { if (!isRenaming) handleActivateFile(file) }}
         onContextMenu={(e) => openContextMenu(e, { kind: 'file', id: file.id, currentName: file.filename, path: file.path, x: 0, y: 0 })}
         className={`group relative flex flex-col items-center gap-1.5 p-2 rounded-xl cursor-pointer select-none transition-all duration-150 ${
           draggingId === file.id
@@ -997,7 +1003,7 @@ export function FilesPane({
         onDragStart={(e) => { e.dataTransfer.setData('text/plain', file.id); setDraggingId(file.id) }}
         onDragEnd={() => { setDraggingId(null); setDragOverFolder(null) }}
         onClick={(e) => { if (!isRenaming) handleItemClick(e, file.id) }}
-        onDoubleClick={() => { if (!isRenaming) handleOpenFile(file.path) }}
+        onDoubleClick={() => { if (!isRenaming) handleActivateFile(file) }}
         onContextMenu={(e) => openContextMenu(e, { kind: 'file', id: file.id, currentName: file.filename, path: file.path, x: 0, y: 0 })}
         className={`flex items-center gap-3 px-2 py-2 rounded-lg cursor-pointer select-none transition-all duration-100 ${
           draggingId === file.id

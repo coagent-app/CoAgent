@@ -73,6 +73,39 @@ export class MCPManager {
   private toolCache: { tools: Anthropic.Tool[]; serverMap: Map<string, string> } | null = null
   private cacheVersion = 0
   private stderrBuffers: Map<string, string[]> = new Map()
+  // Pending startup connection promises, keyed by source name (e.g. 'composio', 'stdio').
+  // ready() awaits all of these so startup-fired triggers see the full tool list.
+  private pendingInits: Map<string, Promise<unknown>> = new Map()
+
+  /**
+   * Register an in-flight MCP connection/init promise so that ready() can await it.
+   * Failures are swallowed (wrapped in .catch) so a single failed server doesn't
+   * permanently block ready() — callers log their own errors.
+   */
+  registerPending(name: string, p: Promise<unknown>): void {
+    this.pendingInits.set(name, p.catch(() => {}))
+  }
+
+  /**
+   * Resolves once every registered pending init has settled (fulfilled or rejected).
+   * Callers that rely on the full tool set being available (scheduled tasks,
+   * webhooks, triggers) should await this before doing any tool-discovery work.
+   *
+   * IMPORTANT: loops until the pending-init set stops growing. The scheduler's
+   * startup IIFE hits `await ready()` at a moment when only the stdio pending has
+   * been registered (Agent constructor runs before the Composio/custom blocks in
+   * server.ts). A single-snapshot Promise.all would resolve as soon as stdio came
+   * up and fire scheduled tasks before Composio finished connecting. The loop
+   * ensures we also wait for pendings registered while we were already awaiting.
+   */
+  async ready(): Promise<void> {
+    let prevSize = -1
+    while (this.pendingInits.size !== prevSize) {
+      prevSize = this.pendingInits.size
+      if (prevSize === 0) return
+      await Promise.all([...this.pendingInits.values()])
+    }
+  }
 
   async connect(configs: MCPServerConfig[]): Promise<void> {
     const results = await Promise.allSettled(configs.map(async (config) => {

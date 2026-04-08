@@ -53,8 +53,11 @@ Every editable text element **must** use one of these classes and have a stable 
 
 ## 2. Theme Variables
 
-Theme CSS variables are set on the `.doc` root element via inline `style` — but
-**never hardcode hex values in Tailwind classes**. Always use these token names:
+**NEVER use the `style` attribute on any element.** The renderer automatically
+injects a `<style>` block from `doc.theme` at render time. Pass theme values
+via the `theme` parameter in `write_document` — not inline styles.
+
+Use these CSS token names in your Tailwind classes:
 
 | CSS variable | Tailwind class | Purpose |
 |---|---|---|
@@ -70,18 +73,19 @@ Theme CSS variables are set on the `.doc` root element via inline `style` — bu
 | `--accent-foreground` | `text-accent-foreground` | Text on accent bg |
 | `--border` | `border-border` | Dividers, table borders, horizontal rules |
 | `--radius` | `rounded` | Border radius token (applied via `border-radius: var(--radius)`) |
-| `--font-display` | (set via `style` on heading elements) | Display/title font stack |
-| `--font-body` | (set via `style` on body elements) | Body prose font stack |
+| `--font-display` | (font-family on heading elements via class) | Display/title font stack |
+| `--font-body` | (font-family on body elements via class) | Body prose font stack |
 
 **Brand kit integration:** On every new document, read the user's brand kit from
 settings (brand_primary, brand_secondary, brand_company, brand_logo). Map them
 to the theme object. The `write_document` tool accepts a `theme` partial — pass
 the brand values there. Do NOT override brand colors the user has explicitly set.
 
-**Setting theme on the `.doc` root:**
+**The `.doc` root element requires no inline style.** Just use the class:
 ```html
-<div class="doc" style="--background:#ffffff;--foreground:#111111;--primary:#1a2744;--primary-foreground:#ffffff;--muted:#f4f4f5;--muted-foreground:#71717a;--secondary:#6b7280;--secondary-foreground:#ffffff;--accent:#e11d48;--accent-foreground:#ffffff;--border:#e4e4e7;--radius:0.5rem;">
+<div class="doc">
 ```
+The renderer injects all CSS custom properties from `doc.theme` automatically.
 
 ---
 
@@ -238,7 +242,7 @@ differently with the same visual identity.
 ### Example A — Proposal
 
 ```html
-<div class="doc" style="--background:#ffffff;--foreground:#111111;--primary:#1a2744;--primary-foreground:#ffffff;--muted:#f4f4f5;--muted-foreground:#71717a;--secondary:#6b7280;--secondary-foreground:#ffffff;--accent:#e11d48;--accent-foreground:#ffffff;--border:#e4e4e7;--radius:0.5rem;">
+<div class="doc">
   <div class="doc-page">
     <header class="doc-header flex items-center justify-between px-12 py-8 border-b border-border">
       <p id="company-name" class="ed-eyebrow text-sm font-semibold tracking-widest uppercase text-muted-foreground">Acme Creative</p>
@@ -331,7 +335,7 @@ differently with the same visual identity.
 ### Example B — Property Flyer
 
 ```html
-<div class="doc" style="--background:#ffffff;--foreground:#111111;--primary:#1a2744;--primary-foreground:#ffffff;--muted:#f4f4f5;--muted-foreground:#71717a;--secondary:#6b7280;--secondary-foreground:#ffffff;--accent:#e11d48;--accent-foreground:#ffffff;--border:#e4e4e7;--radius:0.5rem;">
+<div class="doc">
   <div class="doc-page">
     <header class="doc-header flex items-center justify-between px-10 py-6 bg-primary text-primary-foreground">
       <p id="agent-name" class="ed-eyebrow text-sm font-semibold tracking-wider uppercase">Sarah Chen · Licensed Realtor</p>
@@ -339,10 +343,10 @@ differently with the same visual identity.
     </header>
 
     <main class="doc-body">
-      <section id="hero" class="sec-hero relative bg-muted overflow-hidden" style="min-height:320px;">
+      <section id="hero" class="sec-hero relative bg-muted overflow-hidden min-h-80">
         <div class="absolute inset-0 bg-primary opacity-60"></div>
         <div class="relative px-10 py-16 text-primary-foreground">
-          <p id="status-badge" class="ed-eyebrow inline-block text-xs font-bold tracking-widest uppercase bg-accent text-accent-foreground px-3 py-1 mb-6" style="border-radius:var(--radius);">Just Listed</p>
+          <p id="status-badge" class="ed-eyebrow inline-block text-xs font-bold tracking-widest uppercase bg-accent text-accent-foreground px-3 py-1 mb-6 rounded">Just Listed</p>
           <h1 id="address" class="ed-title text-4xl font-bold leading-tight mb-2">742 Evergreen Terrace</h1>
           <p id="city-state" class="ed-lede text-lg opacity-90 mb-6">Springfield, IL 62701</p>
           <p id="price" class="ed-stat-value text-3xl font-bold">$649,000</p>
@@ -402,7 +406,7 @@ differently with the same visual identity.
 ### Example C — Consulting Report
 
 ```html
-<div class="doc" style="--background:#ffffff;--foreground:#111111;--primary:#1a2744;--primary-foreground:#ffffff;--muted:#f4f4f5;--muted-foreground:#71717a;--secondary:#6b7280;--secondary-foreground:#ffffff;--accent:#e11d48;--accent-foreground:#ffffff;--border:#e4e4e7;--radius:0.5rem;">
+<div class="doc">
   <div class="doc-page">
     <header class="doc-header flex items-center justify-between px-12 py-8 border-b border-border">
       <div>
@@ -475,7 +479,7 @@ differently with the same visual identity.
 ### Example D — Client Letter
 
 ```html
-<div class="doc" style="--background:#ffffff;--foreground:#111111;--primary:#1a2744;--primary-foreground:#ffffff;--muted:#f4f4f5;--muted-foreground:#71717a;--secondary:#6b7280;--secondary-foreground:#ffffff;--accent:#e11d48;--accent-foreground:#ffffff;--border:#e4e4e7;--radius:0.5rem;">
+<div class="doc">
   <div class="doc-page max-w-2xl mx-auto">
     <header class="doc-header flex items-start justify-between px-0 pt-12 pb-8 border-b border-border mb-10">
       <div>
@@ -522,7 +526,8 @@ differently with the same visual identity.
 
 Before emitting any HTML, verify:
 
-- [ ] Root `.doc` element has all CSS variables set inline
+- [ ] Root `.doc` element has NO style attribute — theme is passed via `theme` parameter
+- [ ] NO element has a `style` attribute — the whitelist rejects them; use Tailwind classes only
 - [ ] Every `.sec-*` has a unique, semantic `id`
 - [ ] Every `.ed-*` leaf has a unique `id`
 - [ ] No hardcoded hex colors in Tailwind classes (use token names)

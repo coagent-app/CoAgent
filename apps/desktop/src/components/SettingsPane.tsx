@@ -5,8 +5,7 @@ import { Input } from '@/components/ui/input'
 import { Separator } from '@/components/ui/separator'
 import { cn } from '@/lib/utils'
 import { hexToRgba } from '@/lib/colors'
-import type { AgentSettings, DayName, Autonomy, RelayUsage, UsageSummary, AdminUser, DocumentBlock } from '@coagent/shared'
-import { BlockRenderer } from '@/components/blocks/BlockRenderer'
+import type { AgentSettings, DayName, Autonomy, RelayUsage, UsageSummary, AdminUser } from '@coagent/shared'
 
 type SettingsTab = 'general' | 'model' | 'brand' | 'usage' | 'admin'
 
@@ -738,32 +737,6 @@ function BrandTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate: (
     reader.readAsDataURL(file)
   }
 
-  const sampleDoc: DocumentBlock[] = useMemo(() => [
-    {
-      id: 's1',
-      type: 'header',
-      eyebrow: 'PREVIEW',
-      title: settings.brand_company || 'Sample Document',
-      subtitle: 'How your branded documents will look',
-    },
-    {
-      id: 's2',
-      type: 'kpis',
-      items: [
-        { label: 'Revenue', value: '$48.2K', delta: '▲ 12%' },
-        { label: 'Churn', value: '2.1%', delta: '▼ 0.4%' },
-        { label: 'NPS', value: '72', delta: '+3' },
-      ],
-    },
-    {
-      id: 's3',
-      type: 'callout',
-      variant: 'info',
-      title: 'Callouts stay semantic',
-      markdown: 'Info, warning, success, and tip callouts keep their own colors by design — they carry meaning, not brand.',
-    },
-  ], [settings.brand_company])
-
   const previewCssVars = useMemo<React.CSSProperties>(() => {
     const primary = settings.brand_primary || '#1a2744'
     const secondary = settings.brand_secondary || primary
@@ -914,9 +887,13 @@ function BrandTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate: (
             <img src={logoSrc} alt={settings.brand_company || 'logo'} className="h-6 opacity-80 object-contain" />
           </div>
         )}
-        {sampleDoc.map(block => (
-          <BlockRenderer key={block.id} block={block} />
-        ))}
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-widest text-neutral-400 mb-1">Preview</p>
+          <h3 className="text-lg font-semibold" style={{ color: 'var(--canvas-primary)' }}>
+            {settings.brand_company || 'Sample Document'}
+          </h3>
+          <p className="text-[13px] text-neutral-500 dark:text-neutral-400">How your branded documents will look</p>
+        </div>
       </div>
     </>
   )

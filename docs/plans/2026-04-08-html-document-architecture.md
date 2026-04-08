@@ -171,20 +171,14 @@ Creates or fully rewrites a doc. Streams — the client renders progressively as
 ```
 {
   doc_id: string,
-  target_id: string,      // an id="..." the agent set in a previous write
-  op: "replace_text" | "replace_node" | "insert_before" | "insert_after" | "delete" | "restyle",
-  content?: string        // HTML for *_node/insert ops, text for replace_text, class string for restyle
+  target_id: string,      // an id="..." the agent set in a previous write, or "doc" for root theme edits
+  op: "replace_text" | "replace_node" | "insert_before" | "insert_after" | "delete" | "restyle" | "set_theme",
+  content?: string,       // HTML for *_node/insert ops, text for replace_text, class string for restyle
+  theme?: Partial<DocumentTheme>  // only for set_theme op
 }
 → { ok, updated_html }
 ```
-Targeted edit. The agent assigns `id="n1"`, `id="n2"` etc. as it writes; subsequent patches reference those ids. Used for: "tighten this paragraph," "change the accent color on the hero," "add one more KPI."
-
-#### `set_document_theme`
-```
-{ doc_id: string, theme: Partial<DocumentTheme> }
-→ { ok }
-```
-Pure theme edit — no HTML rewrite needed. Used for: "make it green instead of blue."
+Targeted edit. The agent assigns `id="n1"`, `id="n2"` etc. as it writes; subsequent patches reference those ids. Used for: "tighten this paragraph," "change the accent color on the hero," "add one more KPI," "make it green instead of blue" (set_theme op).
 
 Agent system prompt gets a short section that says: **prefer `patch_document` for scoped edits; use `write_document` only for new docs or full rewrites. Always assign stable ids to top-level sections so patches are addressable.**
 

@@ -1,41 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { open } from '@tauri-apps/plugin-shell'
 import { invoke } from '@tauri-apps/api/core'
-import { save } from '@tauri-apps/plugin-dialog'
-import type { ApprovalItem, DoneItem, AgentMessage, WSServerMessage, WSClientMessage, Integration, AgentSettings, FileEntry, AuthStatus, AuthMethod, RelayUsage, UsageSummary, CalendarEntry, AdminUser, GoogleCalendarInfo, WSServerMessage as WSSMsg, BlockDocument, DocumentUpdateOp, HtmlDocument } from '@coagent/shared'
-import { applyDocumentOps } from '@/lib/canvas'
-
-// ── Path C export: hidden WKWebView → PDF via Tauri command ─────────────────
-// We no longer use @react-pdf/renderer — instead, the Rust side spawns a
-// hidden window that mounts PrintRoute, waits for it to signal ready, then
-// calls WKWebView.createPDF and returns the bytes as base64. This keeps
-// Canvas (HTML) and PDF output rendered from the exact same React tree.
-type BrandPayload = {
-  companyName?: string
-  primary?: string
-  secondary?: string
-  tertiary?: string
-  logoDataUri?: string
-  footerText?: string
-}
-
-async function exportDocumentPdfViaTauri(doc: BlockDocument, brand: BrandPayload | undefined): Promise<{ base64: string }> {
-  const docJson = JSON.stringify(doc)
-  const brandJson = brand ? JSON.stringify(brand) : null
-  const base64 = await invoke<string>('export_document_pdf', { docJson, brandJson })
-  return { base64 }
-}
-
-function brandFromSettings(settings: AgentSettings | null | undefined): BrandPayload | undefined {
-  if (!settings) return undefined
-  return {
-    companyName: settings.brand_company || undefined,
-    primary: settings.brand_primary || undefined,
-    secondary: settings.brand_secondary || undefined,
-    tertiary: settings.brand_tertiary || undefined,
-    logoDataUri: settings.brand_logo || undefined,
-  }
-}
+import type { ApprovalItem, DoneItem, AgentMessage, WSServerMessage, WSClientMessage, Integration, AgentSettings, FileEntry, AuthStatus, AuthMethod, RelayUsage, UsageSummary, CalendarEntry, AdminUser, GoogleCalendarInfo, WSServerMessage as WSSMsg, HtmlDocument } from '@coagent/shared'
 
 type RelayCredentials = Extract<WSSMsg, { type: 'relay_credentials' }>
 
@@ -66,11 +32,6 @@ export function useAgent() {
   const pollIntervals = useRef<ReturnType<typeof setInterval>[]>([])
   const recentIngestedFiles = useRef<{ id: string; filename: string }[]>([])
   const wasStreamingRef = useRef(false)
-  // Canvas documents opened during the current chat turn. Tracked so we can
-  // attach DocCards to the final assistant bubble and the user can reopen
-  // closed canvas docs from the chat pane. Cleared when the user sends a new
-  // message and when chat_response flushes the cards onto a bubble.
-  const currentTurnDocsRef = useRef<Map<string, { id: string; title: string }>>(new Map())
   const [queue, setQueue] = useState<ApprovalItem[]>([])
   const [done, setDone] = useState<DoneItem[]>([])
   const [messages, setMessages] = useState<AgentMessage[]>(_cached.messages ?? [])
@@ -110,37 +71,10 @@ export function useAgent() {
   const [teamStatus, setTeamStatus] = useState<{ status: 'processing' | 'idle'; from?: string } | null>(null)
   const [triggerPrompt, setTriggerPrompt] = useState<Integration | null>(null)
   const [googleCalendarStatus, setGoogleCalendarStatus] = useState<{ connected: boolean; calendars: GoogleCalendarInfo[]; lastSync: string | null }>({ connected: false, calendars: [], lastSync: null })
-  const [canvasDoc, setCanvasDoc] = useState<BlockDocument | null>(null)
-  const [canvasStreaming, setCanvasStreaming] = useState(false)
-  const [canvasExporting, setCanvasExporting] = useState(false)
-  // Visibility is separate from the doc itself — the user can hide the pane
-  // (showing a reopen chip) without losing the doc, and new agent activity
-  // auto-reopens it.
-  const [canvasVisible, setCanvasVisible] = useState(false)
   // HTML document state
   const [htmlDoc, setHtmlDoc] = useState<HtmlDocument | null>(null)
   const [htmlDocVisible, setHtmlDocVisible] = useState(false)
-  // Feedback toast shown after a user-initiated PDF export finishes. Auto-
-  // cleared by the component rendering it. Agent-initiated exports skip this
-  // toast — they happen silently during a chat turn.
-  const [exportToast, setExportToast] = useState<{ fileId: string; filename: string; filePath?: string } | null>(null)
-  // Flag set when the user triggers the export button (vs. the agent via RPC)
-  // so we know whether to surface the toast when canvas_pdf_exported fires.
-  const userExportPendingRef = useRef(false)
   const settingsRef = useRef<AgentSettings | null>(_cached.settings ?? null)
-  // Mirror canvasDoc state into a ref so the async canvas_export_request
-  // handler (bound in a stale WS closure) can read the latest live doc. This
-  // is what guarantees "what you see in Canvas is what you export" — without
-  // it, exports render whatever the server happens to have on disk, which can
-  // drift from live Canvas state if any op is in flight.
-  const canvasDocRef = useRef<BlockDocument | null>(null)
-  // Streaming playback queue. Models like Kimi K2.5 batch many update_document
-  // ops into a single tool_use, which arrives as a single canvas_update frame.
-  // Applying them all in one setState makes every block appear simultaneously
-  // (no "being written" feel). Instead we push ops onto a queue and drain one
-  // at a time with a small delay so the user visibly watches the doc build.
-  const opQueueRef = useRef<Array<{ docId: string; op: DocumentUpdateOp }>>([])
-  const opDrainTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const prevConnectedSlugs = useRef<Set<string> | null>(null)
 
   useEffect(() => {
@@ -254,10 +188,6 @@ export function useAgent() {
         if (msg.type === 'chat_response') {
           const wasStreamed = wasStreamingRef.current
           wasStreamingRef.current = false
-          // Harvest any canvas docs opened during this turn so we can stamp
-          // them onto the final assistant bubble as clickable DocCards.
-          const docsForTurn = Array.from(currentTurnDocsRef.current.values())
-          currentTurnDocsRef.current.clear()
           // Snapshot any remaining streaming text as a final bubble
           setStreamingText(current => {
             if (current?.trim()) {
@@ -270,28 +200,9 @@ export function useAgent() {
           if (!wasStreamed) {
             setMessages(prev => [...prev, msg.message].slice(-100))
           }
-          // Attach the turn's canvas docs to the most recent assistant bubble.
-          // Runs after the two setMessages above so it always targets the
-          // freshly added final bubble.
-          if (docsForTurn.length > 0) {
-            setMessages(prev => {
-              const copy = [...prev]
-              for (let i = copy.length - 1; i >= 0; i--) {
-                if (copy[i].role === 'assistant') {
-                  const existing = copy[i].docs || []
-                  const existingIds = new Set(existing.map(d => d.id))
-                  const merged = [...existing, ...docsForTurn.filter(d => !existingIds.has(d.id))]
-                  copy[i] = { ...copy[i], docs: merged }
-                  break
-                }
-              }
-              return copy
-            })
-          }
           setThinking(false)
           setToolLabel(null)
           setProcessing(false)
-          setCanvasStreaming(false)
           // Dismiss voice pill if it was active (covers both normal completion and stop)
           if ((window as any).__voiceActive) {
             ;(window as any).__voiceActive = false
@@ -304,7 +215,6 @@ export function useAgent() {
           setThinking(false)
           setToolLabel(null)
           setProcessing(false)
-          setCanvasStreaming(false)
           if ((window as any).__voiceActive) {
             ;(window as any).__voiceActive = false
             import('@/lib/voice').then(v => { v.cancelTts(); v.showVoiceSummary('') })
@@ -417,87 +327,6 @@ export function useAgent() {
           const s = msg as any
           setTeamStatus(s.status === 'idle' ? null : { status: s.status, from: s.from })
         }
-        if ((msg as any).type === 'canvas_open') {
-          const { doc, streaming } = msg as any
-          const bd = doc as BlockDocument
-          setCanvasDoc(bd)
-          setCanvasStreaming(Boolean(streaming))
-          // Always auto-open on new doc — the user can hide it again if they want.
-          setCanvasVisible(true)
-          // Track this doc as part of the current turn so a DocCard gets
-          // attached to the final assistant bubble.
-          currentTurnDocsRef.current.set(bd.id, { id: bd.id, title: bd.title || 'Untitled' })
-        }
-        if ((msg as any).type === 'canvas_update') {
-          const { docId, ops } = msg as { docId: string; ops: DocumentUpdateOp[] }
-          // Reopen the canvas immediately so the user sees the drain happen.
-          setCanvasVisible(true)
-
-          // Ops that don't produce visible block-level motion (title changes,
-          // deletes, replaces) get applied in one batched flush with no delay
-          // since they don't benefit from pacing. Inserts are what we pace,
-          // because watching blocks appear one at a time is the whole point.
-          const insertOps: DocumentUpdateOp[] = []
-          const instantOps: DocumentUpdateOp[] = []
-          for (const op of ops) {
-            if (op.op === 'insert') insertOps.push(op)
-            else instantOps.push(op)
-          }
-
-          // Apply instant ops (title / delete / replace) immediately.
-          if (instantOps.length > 0) {
-            setCanvasDoc(prev => {
-              if (!prev || prev.id !== docId) return prev
-              const next = applyDocumentOps(prev, instantOps)
-              if (currentTurnDocsRef.current.has(docId) && next.title) {
-                currentTurnDocsRef.current.set(docId, { id: docId, title: next.title })
-              }
-              return next
-            })
-          }
-
-          // If there's only one insert (or none), apply it immediately — no
-          // value in pacing a single op.
-          if (insertOps.length <= 1) {
-            if (insertOps.length === 1) {
-              setCanvasDoc(prev => {
-                if (!prev || prev.id !== docId) return prev
-                return applyDocumentOps(prev, insertOps)
-              })
-            }
-            return
-          }
-
-          // Multiple inserts: enqueue and drain at cadence. Each op is tagged
-          // with its docId so the drain loop can skip stale entries if the
-          // user switched docs mid-drain.
-          for (const op of insertOps) {
-            opQueueRef.current.push({ docId, op })
-          }
-          // Start the drain loop if it isn't already running.
-          if (opDrainTimerRef.current == null) {
-            const STREAM_CADENCE_MS = 220
-            const drain = () => {
-              const entry = opQueueRef.current.shift()
-              if (!entry) {
-                opDrainTimerRef.current = null
-                return
-              }
-              setCanvasDoc(prev => {
-                if (!prev || prev.id !== entry.docId) return prev
-                return applyDocumentOps(prev, [entry.op])
-              })
-              opDrainTimerRef.current = setTimeout(drain, STREAM_CADENCE_MS)
-            }
-            // Kick off on the next tick so React can flush the open state first.
-            opDrainTimerRef.current = setTimeout(drain, 0)
-          }
-        }
-        if ((msg as any).type === 'canvas_close') {
-          setCanvasDoc(null)
-          setCanvasStreaming(false)
-          setCanvasVisible(false)
-        }
         if ((msg as any).type === 'html_doc_opened') {
           const { doc } = msg as any
           setHtmlDoc(doc as HtmlDocument)
@@ -508,48 +337,6 @@ export function useAgent() {
           setHtmlDoc(doc as HtmlDocument)
           // Auto-open the pane if it was hidden (e.g. user closed, agent patched)
           setHtmlDocVisible(true)
-        }
-        if ((msg as any).type === 'canvas_export_request') {
-          const { doc, requestId } = msg as any
-          // Prefer the live Canvas doc (React state) over the disk copy the
-          // server just sent us, when the IDs match. Canvas and PDF must be
-          // rendered from the SAME source — otherwise any in-flight op or
-          // local edit can cause the exported PDF to diverge from what the
-          // user is looking at.
-          const liveDoc = canvasDocRef.current
-          const incoming = doc as BlockDocument
-          const sourceDoc: BlockDocument = liveDoc && liveDoc.id === incoming.id ? liveDoc : incoming
-          if (liveDoc && liveDoc.id === incoming.id && liveDoc !== incoming) {
-            console.log('[Canvas] Export using live doc state (may differ from server disk copy)')
-          }
-          // Render to PDF via hidden WKWebView (Path C). Canvas and PDF
-          // are rendered from the exact same React tree.
-          const currentSettings = settingsRef.current
-          exportDocumentPdfViaTauri(sourceDoc, brandFromSettings(currentSettings)).then(({ base64 }) => {
-            if (wsRef.current?.readyState === WebSocket.OPEN) {
-              wsRef.current.send(JSON.stringify({ type: 'canvas_save_pdf', docId: (doc as BlockDocument).id, base64, requestId }))
-            }
-          }).catch((err: any) => {
-            console.error('[Canvas] Agent export failed:', err)
-            if (wsRef.current?.readyState === WebSocket.OPEN) {
-              wsRef.current.send(JSON.stringify({ type: 'canvas_save_pdf', docId: (doc as BlockDocument).id, base64: '', requestId }))
-            }
-          })
-        }
-        if ((msg as any).type === 'canvas_pdf_exported') {
-          setCanvasExporting(false)
-          // Only surface a toast for user-initiated exports. Agent-initiated
-          // exports (requestId set) happen silently as part of a tool call.
-          const m = msg as any
-          if (!m.requestId && userExportPendingRef.current) {
-            userExportPendingRef.current = false
-            setExportToast({ fileId: m.fileId, filename: m.filename })
-          }
-        }
-        if ((msg as any).type === 'canvas_error') {
-          setCanvasExporting(false)
-          setError((msg as any).message || 'Canvas error')
-          setTimeout(() => setError(null), 5000)
         }
         if (msg.type === 'error') { setError(msg.message); setTimeout(() => setError(null), 5000) }
         if (msg.type === 'integration_needs_fields') {
@@ -644,9 +431,6 @@ export function useAgent() {
     setMessages(prev => [...prev, { role: 'user' as const, content: message, timestamp: new Date().toISOString() }].slice(-100))
     const fileIds = recentIngestedFiles.current.map(f => f.id)
     recentIngestedFiles.current = []
-    // Reset the turn doc tracker — any Canvas docs opened from here on
-    // belong to this new turn.
-    currentTurnDocsRef.current.clear()
     send({ type: 'chat', message, ...(fileIds.length ? { fileIds } : {}) })
   }, [send])
 
@@ -869,10 +653,6 @@ export function useAgent() {
     send({ type: 'team_history', limit } as any)
   }, [send])
 
-  const openCanvasDoc = useCallback((docId: string) => {
-    send({ type: 'canvas_open_doc', docId } as any)
-  }, [send])
-
   const openHtmlDoc = useCallback((docId: string) => {
     send({ type: 'html_doc_open', docId } as any)
   }, [send])
@@ -885,98 +665,9 @@ export function useAgent() {
     setHtmlDoc(updatedDoc)
   }, [])
 
-  // Send client-originated document ops to the server for persistence.
-  // Called by CanvasPane after every local edit so the server stays in sync.
-  const sendCanvasClientOps = useCallback((docId: string, ops: DocumentUpdateOp[]) => {
-    send({ type: 'canvas_client_ops', docId, ops } as any)
-  }, [send])
-
-  // Allow App.tsx (and CanvasPane via prop drilling) to push a client-side
-  // doc update into the hook's state — used when the editor applies ops
-  // locally and needs the hook's canvasDoc ref to stay in sync.
-  const setCanvasDocFromClient = useCallback((next: BlockDocument) => {
-    setCanvasDoc(next)
-  }, [])
-
-  // User-initiated hide — keeps the doc in memory so a reopen chip can bring
-  // it back. Does NOT tell the server to drop the doc; the agent is free to
-  // keep updating it and auto-reopen will fire on the next canvas_update.
-  const closeCanvas = useCallback(() => {
-    setCanvasVisible(false)
-  }, [])
-
-  const reopenCanvas = useCallback(() => {
-    if (canvasDoc) setCanvasVisible(true)
-  }, [canvasDoc])
-
-  // Keep canvasDocRef in lockstep with state so the WS canvas_export_request
-  // handler (captured in a stale closure) always reads the latest doc. Any
-  // setCanvasDoc call will flow through here.
-  useEffect(() => {
-    canvasDocRef.current = canvasDoc
-  }, [canvasDoc])
-
-  // User-initiated export from the visible CanvasPane toolbar.
-  // Opens a native Save dialog, renders via hidden WKWebView (Path C), and
-  // writes bytes directly to the chosen path without ingesting into Files.
-  const exportCanvasPdf = useCallback(async () => {
-    if (!canvasDoc) return
-    setCanvasExporting(true)
-    try {
-      // 1. Ask the user where to save
-      const defaultName = (canvasDoc.title || 'Document').trim().replace(/[^\w\s-]/g, '').replace(/\s+/g, '_') + '.pdf'
-      const targetPath = await save({
-        defaultPath: defaultName,
-        filters: [{ name: 'PDF', extensions: ['pdf'] }],
-      })
-      if (!targetPath) {
-        setCanvasExporting(false)
-        return
-      }
-      // 2. Render via hidden WKWebView to base64
-      const { base64 } = await exportDocumentPdfViaTauri(canvasDoc, brandFromSettings(settings))
-      // 3. Write bytes to the chosen path (bypass Files index)
-      await invoke('write_file_bytes', { path: targetPath, base64 })
-      // 4. Surface a toast referencing the file path (not a Files entry)
-      const filename = targetPath.split('/').pop() || defaultName
-      setExportToast({ fileId: '', filename, filePath: targetPath })
-    } catch (err: any) {
-      console.error('[Canvas] Export failed:', err)
-      setError(`Export failed: ${err?.message || String(err)}`)
-      setTimeout(() => setError(null), 5000)
-    } finally {
-      setCanvasExporting(false)
-    }
-  }, [canvasDoc, settings])
-
-  // User-initiated "Save to Files" — renders PDF via hidden WKWebView and
-  // sends it to the server via canvas_save_pdf (no requestId). Server
-  // dedupes by docId so re-clicking overwrites the existing Files entry.
-  const saveCanvasToFiles = useCallback(async () => {
-    if (!canvasDoc) return
-    setCanvasExporting(true)
-    try {
-      const { base64 } = await exportDocumentPdfViaTauri(canvasDoc, brandFromSettings(settings))
-      const ws = wsRef.current
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'canvas_save_pdf', docId: canvasDoc.id, base64 }))
-      } else {
-        throw new Error('Not connected')
-      }
-    } catch (err: any) {
-      console.error('[Canvas] Save to Files failed:', err)
-      setError(`Save failed: ${err?.message || String(err)}`)
-      setTimeout(() => setError(null), 5000)
-    } finally {
-      setCanvasExporting(false)
-    }
-  }, [canvasDoc, settings])
-
-  const dismissExportToast = useCallback(() => setExportToast(null), [])
-
   const triggerHeartbeat = useCallback(() => {
     send({ type: 'trigger_heartbeat' })
   }, [send])
 
-  return { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, pendingFields, setPendingFields, setModel, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, getTeamInfo, getTeamHistory, triggerPrompt, setTriggerPrompt, canvasDoc, canvasStreaming, canvasExporting, canvasVisible, openCanvasDoc, closeCanvas, reopenCanvas, exportCanvasPdf, saveCanvasToFiles, exportToast, dismissExportToast, sendCanvasClientOps, setCanvasDocFromClient, htmlDoc, htmlDocVisible, openHtmlDoc, closeHtmlDoc, patchHtmlDocLocally }
+  return { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, pendingFields, setPendingFields, setModel, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, getTeamInfo, getTeamHistory, triggerPrompt, setTriggerPrompt, htmlDoc, htmlDocVisible, openHtmlDoc, closeHtmlDoc, patchHtmlDocLocally }
 }

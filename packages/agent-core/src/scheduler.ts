@@ -644,6 +644,10 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
 
   ;(async () => {
     syncRoutineTimers()
+    // Wait for MCP servers (memory, exa, composio, custom) to finish their startup
+    // connections before firing any overdue tasks. Otherwise tasks that need Gmail,
+    // Calendar, etc. will run with a partial tool list and fail to find them.
+    await agent.mcpManager.ready()
     await fireDueTasks()
     scheduleBriefTimer()
     scheduleHeartbeatTimer()

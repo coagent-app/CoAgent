@@ -11,8 +11,6 @@ import { SettingsPane } from '@/components/SettingsPane'
 import { FilesPane } from '@/components/FilesPane'
 import { SkillsPane } from '@/components/SkillsPane'
 import { TeamPane } from '@/components/TeamPane'
-import { CanvasPane } from '@/components/CanvasPane'
-import { CanvasReopenChip } from '@/components/CanvasReopenChip'
 import { HtmlDocumentPane } from '@/components/HtmlDocumentPane'
 import { OnboardingTour } from '@/components/OnboardingTour'
 import { useAgent } from '@/hooks/useAgent'
@@ -22,57 +20,9 @@ import { cn } from '@/lib/utils'
 import { registerVoiceHotkey, unregisterVoiceHotkey, cancelVoice, setTtsVolume } from '@/lib/voice'
 import { emit } from '@tauri-apps/api/event'
 import type { ApprovalItem } from '@coagent/shared'
-import { invoke as tauriInvoke } from '@tauri-apps/api/core'
-import { FileText, X } from 'lucide-react'
 
-// ── PDF export toast ───────────────────────────────────────────────────────
-// Shown briefly after a user-initiated Canvas PDF export finishes, so they
-// have visible feedback and a fast way to access the file.
-function ExportToast({ filename, filePath, onShowInFiles, onDismiss }: { filename: string; filePath?: string; onShowInFiles: () => void; onDismiss: () => void }) {
-  useEffect(() => {
-    const t = setTimeout(onDismiss, 8000)
-    return () => clearTimeout(t)
-  }, [onDismiss])
-  const revealInFinder = () => {
-    if (!filePath) return
-    tauriInvoke('reveal_in_file_manager', { path: filePath }).catch(err => console.error('[Toast] Reveal failed:', err))
-    onDismiss()
-  }
-  return (
-    <div className="fixed bottom-5 right-5 z-50 flex items-center gap-3 bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-xl shadow-lg px-4 py-3 max-w-sm animate-in fade-in slide-in-from-bottom-2 duration-200">
-      <div className="flex-shrink-0 w-9 h-9 rounded-lg bg-emerald-50 dark:bg-emerald-900/30 flex items-center justify-center">
-        <FileText size={16} className="text-emerald-600 dark:text-emerald-400" />
-      </div>
-      <div className="flex-1 min-w-0">
-        <p className="text-[12.5px] font-medium text-neutral-800 dark:text-neutral-200">PDF saved to Files</p>
-        <p className="text-[11px] text-neutral-400 dark:text-neutral-500 truncate">{filename}</p>
-      </div>
-      {filePath && (
-        <button
-          onClick={revealInFinder}
-          className="text-[11.5px] font-medium text-neutral-700 dark:text-neutral-200 hover:text-neutral-900 dark:hover:text-white px-2 py-1 rounded-md hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
-        >
-          Reveal
-        </button>
-      )}
-      <button
-        onClick={onShowInFiles}
-        className="text-[11.5px] font-medium text-neutral-700 dark:text-neutral-200 hover:text-neutral-900 dark:hover:text-white px-2 py-1 rounded-md hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
-      >
-        Show
-      </button>
-      <button
-        onClick={onDismiss}
-        className="flex-shrink-0 p-1 rounded-md text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
-        aria-label="Dismiss"
-      >
-        <X size={13} />
-      </button>
-    </div>
-  )
-}
 export default function App() {
-  const { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, error, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, settings, updateSettings, authStatus, updateAuth, verifyAuth, files, folders, searchResults, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, relayActive, relayModel, setRelayModel, relayUsage, activateRelay, refreshRelayStatus, pendingFields, setPendingFields, setModel, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, triggerPrompt, setTriggerPrompt, canvasDoc, canvasStreaming, canvasExporting, canvasVisible, openCanvasDoc, closeCanvas, reopenCanvas, exportCanvasPdf, saveCanvasToFiles, exportToast, dismissExportToast, sendCanvasClientOps, setCanvasDocFromClient, htmlDoc, htmlDocVisible, openHtmlDoc, closeHtmlDoc, patchHtmlDocLocally } = useAgent()
+  const { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, error, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, settings, updateSettings, authStatus, updateAuth, verifyAuth, files, folders, searchResults, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, relayActive, relayModel, setRelayModel, relayUsage, activateRelay, refreshRelayStatus, pendingFields, setPendingFields, setModel, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, triggerPrompt, setTriggerPrompt, htmlDoc, htmlDocVisible, openHtmlDoc, closeHtmlDoc, patchHtmlDocLocally } = useAgent()
   const { dark, toggle: toggleTheme } = useTheme()
   const updater = useUpdater()
   const [view, setView] = useState<View>('chat')
@@ -87,14 +37,13 @@ export default function App() {
   useEffect(() => {
     const handleEsc = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        if (canvasVisible) { closeCanvas(); return }
         cancelVoice()
         stopAgent()
       }
     }
     window.addEventListener('keydown', handleEsc)
     return () => window.removeEventListener('keydown', handleEsc)
-  }, [stopAgent, canvasVisible, closeCanvas])
+  }, [stopAgent])
 
   // Voice: register/unregister based on voice_enabled setting
   const voiceEnabled = settings?.voice_enabled ?? false
@@ -167,7 +116,7 @@ export default function App() {
 
         {view === 'chat' && (
           <div className="relative flex-1 flex overflow-hidden">
-            <ChatPane messages={messages} streamingText={streamingText} thinking={thinking} processing={processing} toolLabel={toolLabel} researchAgents={researchAgents} connected={connected} onChat={chat} onSteer={steer} onStop={stopAgent} onIngestFile={ingestFile} files={files} onNavigateToSettings={() => setView('settings')} lastHeartbeat={lastHeartbeat} heartbeatLog={heartbeatLog} onTriggerHeartbeat={triggerHeartbeat} statusLine={statusLine} skills={skills} capabilityCard={capabilityCard} onConfirmCapabilities={confirmCapabilities} userName={settings?.name} userRole={settings?.role} onboarded={settings?.onboarded} agentName={settings?.agent_name} onOpenCanvasDoc={openCanvasDoc} className="flex-1" />
+            <ChatPane messages={messages} streamingText={streamingText} thinking={thinking} processing={processing} toolLabel={toolLabel} researchAgents={researchAgents} connected={connected} onChat={chat} onSteer={steer} onStop={stopAgent} onIngestFile={ingestFile} files={files} onNavigateToSettings={() => setView('settings')} lastHeartbeat={lastHeartbeat} heartbeatLog={heartbeatLog} onTriggerHeartbeat={triggerHeartbeat} statusLine={statusLine} skills={skills} capabilityCard={capabilityCard} onConfirmCapabilities={confirmCapabilities} userName={settings?.name} userRole={settings?.role} onboarded={settings?.onboarded} agentName={settings?.agent_name} className="flex-1" />
             {htmlDoc && htmlDocVisible && (
               <HtmlDocumentPane
                 doc={htmlDoc}
@@ -177,32 +126,6 @@ export default function App() {
                   console.log('[App] patchDocument (Phase 3 stub):', args)
                 }}
                 onDocumentChange={(next) => patchHtmlDocLocally(next)}
-              />
-            )}
-            {canvasDoc && canvasVisible && (
-              <CanvasPane
-                doc={canvasDoc}
-                streaming={canvasStreaming}
-                brand={settings ? {
-                  companyName: settings.brand_company || undefined,
-                  primary: settings.brand_primary || undefined,
-                  secondary: settings.brand_secondary || undefined,
-                  tertiary: settings.brand_tertiary || undefined,
-                  logoDataUri: settings.brand_logo || undefined,
-                } : undefined}
-                onClose={closeCanvas}
-                onExportPdf={exportCanvasPdf}
-                onSaveToFiles={saveCanvasToFiles}
-                exporting={canvasExporting}
-                onDocumentChange={next => setCanvasDocFromClient(next)}
-                onEmit={(docId, ops) => sendCanvasClientOps(docId, ops)}
-              />
-            )}
-            {canvasDoc && !canvasVisible && (
-              <CanvasReopenChip
-                title={canvasDoc.title}
-                streaming={canvasStreaming}
-                onReopen={reopenCanvas}
               />
             )}
           </div>
@@ -293,23 +216,9 @@ export default function App() {
             onSearchFiles={searchFilesUI}
             organizing={organizing}
             onAutoOrganize={autoOrganize}
-            onOpenCanvasDoc={(docId) => { openCanvasDoc(docId); setView('chat') }}
           />
         )}
       </div>
-
-
-      {exportToast && (
-        <ExportToast
-          filename={exportToast.filename}
-          filePath={files.find(f => f.id === exportToast.fileId)?.path}
-          onShowInFiles={() => {
-            setView('files')
-            dismissExportToast()
-          }}
-          onDismiss={dismissExportToast}
-        />
-      )}
 
 
       <IntegrationsModal

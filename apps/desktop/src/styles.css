@@ -112,3 +112,89 @@
   -webkit-text-fill-color: transparent;
   animation: shimmer 4s ease-in-out infinite;
 }
+
+/* ── Print route styles ────────────────────────────────────────────────
+ * These rules apply when the app is loaded with ?print=1 inside a hidden
+ * Tauri window. The goal: render the document at letter-page dimensions
+ * with proper margins and page-break control so WKWebView.createPDF
+ * produces a clean, paginated PDF that matches Canvas exactly.
+ */
+@page {
+  size: letter;
+  margin: 0.75in 0.75in 0.85in 0.75in;
+}
+
+.print-root {
+  background: #ffffff;
+  color: #111827;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+
+.print-root .print-page {
+  /* On screen (before print) we render inside the page-sized width so the
+   * hidden window lays out content the same way the PDF will. Letter page
+   * width minus 2× 0.75in margin = 7.0in = ~672px @ 96dpi. */
+  width: 7in;
+  margin: 0 auto;
+  padding: 0;
+}
+
+.print-root .print-logo {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: -6px;
+}
+
+.print-root .print-logo img {
+  height: 28px;
+  opacity: 0.85;
+  object-fit: contain;
+}
+
+.print-root .print-body {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* Avoid breaking blocks across pages when possible. Tables and KPI rows
+ * are the worst offenders — force them to keep-together. */
+.print-root .print-block {
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+.print-root .print-footer {
+  margin-top: 24px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
+  font-size: 10px;
+  color: #9ca3af;
+  text-align: center;
+}
+
+.print-loading,
+.print-error {
+  padding: 24px;
+  font-family: system-ui, sans-serif;
+  font-size: 13px;
+  color: #6b7280;
+}
+
+/* When the browser is in a real print/PDF context we strip any padding
+ * that the on-screen preview uses — @page handles margins. */
+@media print {
+  html,
+  body,
+  #root {
+    height: auto !important;
+    overflow: visible !important;
+    background: #ffffff !important;
+  }
+  .print-root .print-page {
+    width: auto;
+    padding: 0;
+  }
+}

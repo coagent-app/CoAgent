@@ -10,8 +10,7 @@ import { INTEGRATIONS, getIntegrationStatuses, generateAuthUrl, getRequiredField
 import { startScheduler } from './scheduler.js'
 import { readSettings, writeSettings } from './settings.js'
 
-import { listFiles, listFolders, ingestFile, overwriteFile, deleteFileEntry, createFolder, moveFile, moveFolder, renameFile, renameFolder, deleteFolder, saveFolderOrder, searchFiles, autoOrganizeFiles } from './file-store.js'
-import { readBlockDocument, updateBlockDocument } from './block-document-store.js'
+import { listFiles, listFolders, ingestFile, deleteFileEntry, createFolder, moveFile, moveFolder, renameFile, renameFolder, deleteFolder, saveFolderOrder, searchFiles, autoOrganizeFiles } from './file-store.js'
 import { readHtmlDocument, createHtmlDocument, updateHtmlDocument } from './html-document-store.js'
 import { validateHtml } from './html-whitelist.js'
 import { randomUUID } from 'crypto'
@@ -237,10 +236,6 @@ function buildMcpConfigs(): MCPServerConfig[] {
 const DATA_DIR = process.env.COAGENT_DATA_DIR || join(homedir(), '.coagent')
 mkdirSync(DATA_DIR, { recursive: true })
 
-// Dedupe map for agent-initiated PDF exports — maps docId → fileId so
-// repeated exports on the same doc overwrite the existing Files entry
-// instead of creating a new one.
-const docIdToExportedFileId = new Map<string, string>()
 setUsageDataDir(DATA_DIR)
 initCustomMcpDir(DATA_DIR)
 
@@ -348,7 +343,7 @@ Consolidated tools — each handles multiple actions via an \`action\` parameter
 - **exa** (search/find_similar/get_contents) — web search. Auto-saves to research DB.
 - **research** — parallel web research: dispatches multiple queries to sub-agents simultaneously for deep research from different angles.
 - **spawn_agents** — run parallel sub-agents for independent tasks. Each gets its own instructions and tools.
-- **create_document** / **update_document** — generate branded PDFs (resume, proposal, invoice, letter, report, brief, newsletter).
+- **write_document** — create HTML documents (proposals, reports, flyers, letters, invoices). Run skills(execute, 'document-design') first.
 - **queue_approval** / **add_done_item** — approval queue and activity log.
 - **update_settings** — update user profile, autonomy, schedule, voice, and other settings.
 - **notify_user** — send push notifications to the user's phone.
@@ -705,7 +700,7 @@ Then write an MLS-ready description:
 - Highlight location, features, recent updates
 - End with a call to action
 
-Save the description to memory (write to a file like "listing-[address].md") and offer to create a PDF listing sheet with create_document.`,
+Save the description to memory (write to a file like "listing-[address].md") and offer to create a branded listing sheet with write_document.`,
     },
   },
 }
@@ -1032,35 +1027,6 @@ agent.onResearchProgress = (agents) => {
 agent.onBroadcast = (event) => {
   broadcast(event)
 }
-
-// ── Canvas PDF export RPC ──────────────────────────────────────────────────
-// Agent calls export_document_pdf → we broadcast canvas_export_request to the
-// desktop client, it renders the doc via @react-pdf/renderer (vector output),
-// sends the base64 back via canvas_save_pdf with the requestId, and we resolve
-// the pending promise so the tool returns the new file_id to the agent.
-interface PendingPdfExport {
-  resolve: (out: { fileId: string; filename: string }) => void
-  reject: (err: Error) => void
-  timer: NodeJS.Timeout
-}
-const pendingPdfExports = new Map<string, PendingPdfExport>()
-
-async function requestCanvasPdfExport(docId: string): Promise<{ fileId: string; filename: string }> {
-  const doc = await readBlockDocument(DATA_DIR, docId)
-  if (!doc) throw new Error(`Canvas document not found: ${docId}`)
-  if (!wss || wss.clients.size === 0) throw new Error('No desktop client connected — cannot render PDF')
-  const requestId = randomUUID()
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      pendingPdfExports.delete(requestId)
-      reject(new Error('PDF export timed out (60s) — desktop may be unresponsive'))
-    }, 60000)
-    pendingPdfExports.set(requestId, { resolve, reject, timer })
-    broadcast({ type: 'canvas_export_request', doc, requestId })
-  })
-}
-
-agent.onExportDocumentPdf = (docId: string) => requestCanvasPdfExport(docId)
 
 agent.onSettingsChanged = async () => {
   const settings = await readSettings(DATA_DIR)
@@ -3215,27 +3181,7 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
       }
     }
 
-    // ── Canvas ────────────────────────────────────────────────────────────
-    if (msg.type === 'canvas_open_doc') {
-      try {
-        const doc = await readBlockDocument(DATA_DIR, msg.docId)
-        if (!doc) {
-          send(ws, { type: 'canvas_error', docId: msg.docId, message: 'Document not found' })
-        } else {
-          send(ws, { type: 'canvas_open', doc, streaming: false })
-        }
-      } catch (err: any) {
-        send(ws, { type: 'canvas_error', docId: msg.docId, message: err?.message || 'Failed to open document' })
-      }
-    }
-
-    if (msg.type === 'canvas_close') {
-      // Just a client state signal — nothing to do server-side, but other
-      // clients may want to know, so broadcast it.
-      broadcast({ type: 'canvas_close' })
-    }
-
-    // ── HTML Document (Phase 2) ───────────────────────────────────────────
+    // ── HTML Document ─────────────────────────────────────────────────────
     if (msg.type === 'html_doc_open') {
       try {
         const doc = await readHtmlDocument(DATA_DIR, msg.docId)
@@ -3324,83 +3270,6 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
         }
       } catch (err: any) {
         send(ws, { type: 'html_doc_error', docId: (msg as any).docId, message: err?.message || 'Failed to patch HTML document' })
-      }
-    }
-
-    if (msg.type === 'canvas_save_pdf') {
-      // Client has rendered the canvas surface to a PDF and sent us base64.
-      // Persist it alongside the .cadoc in the files index so the agent can
-      // attach it to emails etc. If requestId is present, this is an
-      // agent-initiated export via export_document_pdf — resolve the pending
-      // promise so the tool returns the new file_id to the agent.
-      const pending = msg.requestId ? pendingPdfExports.get(msg.requestId) : undefined
-      try {
-        if (!msg.base64) {
-          const err = new Error('Empty PDF payload')
-          if (pending) { clearTimeout(pending.timer); pendingPdfExports.delete(msg.requestId!); pending.reject(err) }
-          send(ws, { type: 'canvas_error', docId: msg.docId, message: err.message, requestId: msg.requestId })
-        } else {
-          const doc = await readBlockDocument(DATA_DIR, msg.docId)
-          if (!doc) {
-            const err = new Error('Document not found')
-            if (pending) { clearTimeout(pending.timer); pendingPdfExports.delete(msg.requestId!); pending.reject(err) }
-            send(ws, { type: 'canvas_error', docId: msg.docId, message: err.message, requestId: msg.requestId })
-          } else {
-            const buffer = Buffer.from(msg.base64, 'base64')
-            const safeTitle = (doc.title || 'Document').trim().replace(/[^\w\s-]/g, '').replace(/\s+/g, '_').slice(0, 60) || 'Document'
-            const filename = `${safeTitle}.pdf`
-            // Dedupe by docId for BOTH user- and agent-initiated saves.
-            // If we already have a fileId for this doc and the file still exists
-            // on disk, overwrite it in place so Files pane doesn't accumulate
-            // stale entries. Otherwise ingest fresh and record the mapping.
-            let entry: { id: string; filename: string }
-            const existingFileId = docIdToExportedFileId.get(msg.docId)
-            if (existingFileId) {
-              const overwritten = await overwriteFile(DATA_DIR, existingFileId, buffer, filename)
-              if (overwritten) {
-                entry = { id: overwritten.id, filename: overwritten.filename }
-              } else {
-                const fresh = await ingestFile(DATA_DIR, filename, buffer, 'application/pdf')
-                docIdToExportedFileId.set(msg.docId, fresh.id)
-                entry = { id: fresh.id, filename: fresh.filename }
-              }
-            } else {
-              const fresh = await ingestFile(DATA_DIR, filename, buffer, 'application/pdf')
-              docIdToExportedFileId.set(msg.docId, fresh.id)
-              entry = { id: fresh.id, filename: fresh.filename }
-            }
-            if (pending) {
-              clearTimeout(pending.timer)
-              pendingPdfExports.delete(msg.requestId!)
-              pending.resolve({ fileId: entry.id, filename: entry.filename })
-            }
-            broadcast({ type: 'canvas_pdf_exported', docId: msg.docId, fileId: entry.id, filename: entry.filename, requestId: msg.requestId })
-            await sendFilesAndFolders(ws)
-          }
-        }
-      } catch (err: any) {
-        if (pending) { clearTimeout(pending.timer); pendingPdfExports.delete(msg.requestId!); pending.reject(err) }
-        send(ws, { type: 'canvas_error', docId: msg.docId, message: err?.message || 'Failed to save PDF', requestId: msg.requestId })
-      }
-    }
-
-    // Client-originated document ops (e.g. user editing a block in the Canvas
-    // pane). Apply them server-side for persistence, then rebroadcast to any
-    // other connected clients (e.g. a relay session watching the same doc).
-    if ((msg as any).type === 'canvas_client_ops') {
-      const { docId, ops } = msg as any
-      try {
-        await updateBlockDocument(DATA_DIR, docId, ops)
-        // Rebroadcast to OTHER clients so they stay in sync.
-        if (wss) {
-          for (const client of wss.clients) {
-            if (client !== ws && client.readyState === WebSocket.OPEN) {
-              client.send(JSON.stringify({ type: 'canvas_update', docId, ops }))
-            }
-          }
-        }
-      } catch (err: any) {
-        send(ws, { type: 'canvas_error', docId, message: err?.message || 'Failed to apply client ops' })
       }
     }
 
