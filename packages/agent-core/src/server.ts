@@ -10,7 +10,9 @@ import { INTEGRATIONS, getIntegrationStatuses, generateAuthUrl, getRequiredField
 import { startScheduler } from './scheduler.js'
 import { readSettings, writeSettings } from './settings.js'
 
-import { listFiles, listFolders, ingestFile, deleteFileEntry, createFolder, moveFile, moveFolder, renameFile, renameFolder, deleteFolder, saveFolderOrder, searchFiles, autoOrganizeFiles, getDocumentMeta, updateDocumentMeta } from './file-store.js'
+import { listFiles, listFolders, ingestFile, overwriteFile, deleteFileEntry, createFolder, moveFile, moveFolder, renameFile, renameFolder, deleteFolder, saveFolderOrder, searchFiles, autoOrganizeFiles } from './file-store.js'
+import { readBlockDocument, updateBlockDocument } from './block-document-store.js'
+import { randomUUID } from 'crypto'
 import { IMESSAGE_TOOLS, handleImessageTool } from './local-tools-imessage.js'
 import { CONTACTS_TOOLS, handleContactsTool } from './local-tools-contacts.js'
 import { embedTools, purgeTools, setToolEmbeddingsDir } from './tool-embeddings.js'
@@ -232,6 +234,11 @@ function buildMcpConfigs(): MCPServerConfig[] {
 
 const DATA_DIR = process.env.COAGENT_DATA_DIR || join(homedir(), '.coagent')
 mkdirSync(DATA_DIR, { recursive: true })
+
+// Dedupe map for agent-initiated PDF exports — maps docId → fileId so
+// repeated exports on the same doc overwrite the existing Files entry
+// instead of creating a new one.
+const docIdToExportedFileId = new Map<string, string>()
 setUsageDataDir(DATA_DIR)
 initCustomMcpDir(DATA_DIR)
 
@@ -1002,6 +1009,35 @@ agent.onBroadcast = (event) => {
   broadcast(event)
 }
 
+// ── Canvas PDF export RPC ──────────────────────────────────────────────────
+// Agent calls export_document_pdf → we broadcast canvas_export_request to the
+// desktop client, it renders the doc via @react-pdf/renderer (vector output),
+// sends the base64 back via canvas_save_pdf with the requestId, and we resolve
+// the pending promise so the tool returns the new file_id to the agent.
+interface PendingPdfExport {
+  resolve: (out: { fileId: string; filename: string }) => void
+  reject: (err: Error) => void
+  timer: NodeJS.Timeout
+}
+const pendingPdfExports = new Map<string, PendingPdfExport>()
+
+async function requestCanvasPdfExport(docId: string): Promise<{ fileId: string; filename: string }> {
+  const doc = await readBlockDocument(DATA_DIR, docId)
+  if (!doc) throw new Error(`Canvas document not found: ${docId}`)
+  if (!wss || wss.clients.size === 0) throw new Error('No desktop client connected — cannot render PDF')
+  const requestId = randomUUID()
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingPdfExports.delete(requestId)
+      reject(new Error('PDF export timed out (60s) — desktop may be unresponsive'))
+    }, 60000)
+    pendingPdfExports.set(requestId, { resolve, reject, timer })
+    broadcast({ type: 'canvas_export_request', doc, requestId })
+  })
+}
+
+agent.onExportDocumentPdf = (docId: string) => requestCanvasPdfExport(docId)
+
 agent.onSettingsChanged = async () => {
   const settings = await readSettings(DATA_DIR)
   broadcast({ type: 'settings_update', settings })
@@ -1439,7 +1475,7 @@ if (composioKey()) {
   purgeExpiredAccounts(composioKey()!, composioUserId())
     .catch(err => console.error('[Composio] Failed to purge expired accounts:', err.message))
 
-  getConnectedSlugs(composioKey()!, composioUserId()).then(async (slugs) => {
+  const composioInit = getConnectedSlugs(composioKey()!, composioUserId()).then(async (slugs) => {
     console.log(`[Composio] Found ${slugs.length} connected integrations: ${slugs.join(', ') || 'none'}`)
     // Default to all supported integrations so tools are available even before user connects
     const userToolkits = slugs.length > 0 ? slugs : ['gmail', 'googlecalendar']
@@ -1454,20 +1490,27 @@ if (composioKey()) {
     // Embed tools + params on connect so they're ready before the first message
     setToolEmbeddingsDir(DATA_DIR)
     embedToolsFromMcp().catch(() => {})
-  }).catch(err => console.error('[Composio] Failed to connect MCP:', err.message))
+  })
+  composioInit.catch(err => console.error('[Composio] Failed to connect MCP:', err.message))
+  // Register so mcpManager.ready() waits for Composio before startup-fired triggers run.
+  // Without this, scheduled tasks and webhooks firing in the first few seconds after
+  // boot would see an empty tool list for Gmail/Calendar.
+  agent.mcpManager.registerPending('composio', composioInit)
 } else {
   console.log('[Composio] No API key found, skipping MCP connection')
 }
 
 // Connect custom MCPs on startup
-getCustomMcpConfigs().then(async (configs) => {
+const customMcpInit = getCustomMcpConfigs().then(async (configs) => {
   if (configs.length > 0) {
     console.log(`[Custom MCP] Connecting ${configs.length} custom integration(s)...`)
     await agent.mcpManager.connect(configs)
     console.log('[Custom MCP] Connected:', configs.map(c => c.name).join(', '))
     embedToolsFromMcp().catch(() => {})
   }
-}).catch(err => console.error('[Custom MCP] Failed to connect:', err.message))
+})
+customMcpInit.catch(err => console.error('[Custom MCP] Failed to connect:', err.message))
+agent.mcpManager.registerPending('custom', customMcpInit)
 
 // Auto-reconnect local integrations (iMessage, Contacts) that were connected before restart
 ;(async () => {
@@ -2971,59 +3014,6 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
       }
     }
 
-    if (msg.type === 'update_document_fields') {
-      try {
-        const meta = await getDocumentMeta(DATA_DIR, msg.fileId)
-        if (!meta) {
-          send(ws, { type: 'error', message: 'This document has no stored template data.' } as any)
-          return
-        }
-
-        // Deep merge: arrays replaced, objects shallow-merged, primitives replaced
-        const merged = { ...meta.templateData }
-        for (const [key, value] of Object.entries(msg.data)) {
-          if (Array.isArray(value)) {
-            merged[key] = value
-          } else if (value && typeof value === 'object' && !Array.isArray(value)) {
-            merged[key] = { ...(merged[key] || {}), ...value }
-          } else {
-            merged[key] = value
-          }
-        }
-
-        const settings = await readSettings(DATA_DIR)
-        const brand = (settings.brand_company || settings.brand_color || settings.brand_logo)
-          ? { companyName: settings.brand_company || undefined, accentColor: settings.brand_color || undefined, logoBase64: settings.brand_logo || undefined }
-          : undefined
-
-        const { renderTemplatedDocument } = await import('./document-renderer.js')
-        const buf = await renderTemplatedDocument({ ...merged, template: meta.template }, brand)
-
-        // Write the new PDF to the same path
-        const files = await listFiles(DATA_DIR)
-        const originalFile = files.find(f => f.id === msg.fileId)
-
-        if (originalFile) {
-          // Overwrite the file on disk
-          const { writeFile: writeFileAsync } = await import('fs/promises')
-          await writeFileAsync(originalFile.path, buf)
-
-          // Update the metadata with new data
-          await updateDocumentMeta(DATA_DIR, msg.fileId, {
-            template: meta.template,
-            templateData: merged,
-            lastRenderedAt: new Date().toISOString()
-          })
-
-          send(ws, { type: 'document_updated', fileId: msg.fileId } as any)
-          broadcastFilesDebounced()
-        }
-      } catch (err: any) {
-        console.error('[Server] update_document_fields error:', err.message)
-        send(ws, { type: 'error', message: `Failed to update document: ${err.message}` } as any)
-      }
-    }
-
     if (msg.type === 'trigger_heartbeat') {
       console.log('[Server] Manual heartbeat triggered')
       try {
@@ -3198,6 +3188,108 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
       } catch (err: any) {
         send(ws, { type: 'auto_organize_done', folders: [], moved: 0 })
         send(ws, { type: 'error', message: `Auto-organize failed: ${err.message}` })
+      }
+    }
+
+    // ── Canvas ────────────────────────────────────────────────────────────
+    if (msg.type === 'canvas_open_doc') {
+      try {
+        const doc = await readBlockDocument(DATA_DIR, msg.docId)
+        if (!doc) {
+          send(ws, { type: 'canvas_error', docId: msg.docId, message: 'Document not found' })
+        } else {
+          send(ws, { type: 'canvas_open', doc, streaming: false })
+        }
+      } catch (err: any) {
+        send(ws, { type: 'canvas_error', docId: msg.docId, message: err?.message || 'Failed to open document' })
+      }
+    }
+
+    if (msg.type === 'canvas_close') {
+      // Just a client state signal — nothing to do server-side, but other
+      // clients may want to know, so broadcast it.
+      broadcast({ type: 'canvas_close' })
+    }
+
+    if (msg.type === 'canvas_save_pdf') {
+      // Client has rendered the canvas surface to a PDF and sent us base64.
+      // Persist it alongside the .cadoc in the files index so the agent can
+      // attach it to emails etc. If requestId is present, this is an
+      // agent-initiated export via export_document_pdf — resolve the pending
+      // promise so the tool returns the new file_id to the agent.
+      const pending = msg.requestId ? pendingPdfExports.get(msg.requestId) : undefined
+      try {
+        if (!msg.base64) {
+          const err = new Error('Empty PDF payload')
+          if (pending) { clearTimeout(pending.timer); pendingPdfExports.delete(msg.requestId!); pending.reject(err) }
+          send(ws, { type: 'canvas_error', docId: msg.docId, message: err.message, requestId: msg.requestId })
+        } else {
+          const doc = await readBlockDocument(DATA_DIR, msg.docId)
+          if (!doc) {
+            const err = new Error('Document not found')
+            if (pending) { clearTimeout(pending.timer); pendingPdfExports.delete(msg.requestId!); pending.reject(err) }
+            send(ws, { type: 'canvas_error', docId: msg.docId, message: err.message, requestId: msg.requestId })
+          } else {
+            const buffer = Buffer.from(msg.base64, 'base64')
+            const safeTitle = (doc.title || 'Document').trim().replace(/[^\w\s-]/g, '').replace(/\s+/g, '_').slice(0, 60) || 'Document'
+            const filename = `${safeTitle}.pdf`
+            // Agent-initiated exports (requestId present): dedupe by docId.
+            // If we already have a fileId for this doc and the file still exists
+            // on disk, overwrite it in place so Files pane doesn't accumulate
+            // stale entries. Otherwise ingest fresh and record the mapping.
+            let entry: { id: string; filename: string }
+            if (msg.requestId) {
+              const existingFileId = docIdToExportedFileId.get(msg.docId)
+              if (existingFileId) {
+                const overwritten = await overwriteFile(DATA_DIR, existingFileId, buffer, filename)
+                if (overwritten) {
+                  entry = { id: overwritten.id, filename: overwritten.filename }
+                } else {
+                  // File was deleted or moved — ingest fresh
+                  const fresh = await ingestFile(DATA_DIR, filename, buffer, 'application/pdf')
+                  docIdToExportedFileId.set(msg.docId, fresh.id)
+                  entry = { id: fresh.id, filename: fresh.filename }
+                }
+              } else {
+                const fresh = await ingestFile(DATA_DIR, filename, buffer, 'application/pdf')
+                docIdToExportedFileId.set(msg.docId, fresh.id)
+                entry = { id: fresh.id, filename: fresh.filename }
+              }
+            } else {
+              entry = await ingestFile(DATA_DIR, filename, buffer, 'application/pdf')
+            }
+            if (pending) {
+              clearTimeout(pending.timer)
+              pendingPdfExports.delete(msg.requestId!)
+              pending.resolve({ fileId: entry.id, filename: entry.filename })
+            }
+            broadcast({ type: 'canvas_pdf_exported', docId: msg.docId, fileId: entry.id, filename: entry.filename, requestId: msg.requestId })
+            await sendFilesAndFolders(ws)
+          }
+        }
+      } catch (err: any) {
+        if (pending) { clearTimeout(pending.timer); pendingPdfExports.delete(msg.requestId!); pending.reject(err) }
+        send(ws, { type: 'canvas_error', docId: msg.docId, message: err?.message || 'Failed to save PDF', requestId: msg.requestId })
+      }
+    }
+
+    // Client-originated document ops (e.g. user editing a block in the Canvas
+    // pane). Apply them server-side for persistence, then rebroadcast to any
+    // other connected clients (e.g. a relay session watching the same doc).
+    if ((msg as any).type === 'canvas_client_ops') {
+      const { docId, ops } = msg as any
+      try {
+        await updateBlockDocument(DATA_DIR, docId, ops)
+        // Rebroadcast to OTHER clients so they stay in sync.
+        if (wss) {
+          for (const client of wss.clients) {
+            if (client !== ws && client.readyState === WebSocket.OPEN) {
+              client.send(JSON.stringify({ type: 'canvas_update', docId, ops }))
+            }
+          }
+        }
+      } catch (err: any) {
+        send(ws, { type: 'canvas_error', docId, message: err?.message || 'Failed to apply client ops' })
       }
     }
 

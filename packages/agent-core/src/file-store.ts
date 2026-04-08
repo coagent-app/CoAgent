@@ -24,11 +24,6 @@ function createAnthropicClient(): Anthropic {
 interface FileIndexEntry extends FileEntry {
   embedding: number[]
   dirty?: boolean
-  documentMeta?: {
-    template: string        // e.g. 'resume', 'proposal'
-    templateData: any       // the full data object passed to renderTemplatedDocument
-    lastRenderedAt: string  // ISO timestamp
-  }
 }
 
 // ── Index I/O ────────────────────────────────────────────────────────────────
@@ -650,6 +645,36 @@ export async function ingestFile(
 
 
 
+// Overwrite the bytes of an existing file without changing its id or group.
+// Called by the canvas_save_pdf dedupe path so repeated agent-initiated exports
+// on the same doc update a single Files entry rather than creating new ones.
+export async function overwriteFile(
+  dataDir: string,
+  fileId: string,
+  buffer: Buffer,
+  filename: string,
+): Promise<FileEntry | null> {
+  return withIndexLock(async () => {
+    const index = await readIndex(dataDir)
+    const idx = index.findIndex(e => e.id === fileId)
+    if (idx === -1) return null
+    const entry = index[idx]
+    // Write new bytes to the same path.
+    await mkdir(join(dataDir, FILES_DIR, entry.group ? entry.group : ''), { recursive: true }).catch(() => {})
+    await writeFile(entry.path, buffer)
+    // Update metadata in the index.
+    index[idx] = {
+      ...entry,
+      filename,
+      sizeBytes: buffer.length,
+      lastAccessed: new Date().toISOString(),
+    }
+    await writeIndex(dataDir, index)
+    const { embedding: _, dirty: __, ...fileEntry } = index[idx]
+    return fileEntry
+  })
+}
+
 let lastPruneTime = 0
 
 export async function listFiles(dataDir: string): Promise<FileEntry[]> {
@@ -1096,28 +1121,48 @@ export async function updateFileContent(
   })
 }
 
-// ── Document metadata (template re-rendering support) ────────────────────────
+// ── Block document index integration ─────────────────────────────────────────
 
-export async function updateDocumentMeta(
+/**
+ * Upsert a FileEntry for a Canvas block document (.cadoc). Used by agent.ts
+ * after creating or updating a BlockDocument so the doc shows up in FilesPane
+ * alongside uploaded files. Keyed by FileEntry.id === doc.id.
+ */
+export async function upsertBlockDocEntry(
   dataDir: string,
-  fileId: string,
-  meta: { template: string; templateData: any; lastRenderedAt: string }
+  entry: FileEntry,
 ): Promise<void> {
   return withIndexLock(async () => {
     const index = await readIndex(dataDir)
-    const entry = index.find(e => e.id === fileId)
-    if (!entry) throw new Error(`File ${fileId} not found`)
-    const updated = index.map(e => e.id === fileId ? { ...e, documentMeta: meta } : e)
-    await writeIndex(dataDir, updated)
+    const existingIdx = index.findIndex(e => e.id === entry.id)
+    // Try to generate an embedding so semantic search covers doc titles
+    let embedding: number[] = []
+    if (getOpenAIProxy()) {
+      try {
+        embedding = await embedText(`${entry.group ? entry.group + '/' : ''}${entry.filename} ${entry.summary}`)
+      } catch (err) {
+        console.warn('[FileStore] Block doc embedding failed:', (err as Error).message)
+      }
+    }
+    const full: FileIndexEntry = { ...entry, embedding }
+    if (existingIdx >= 0) {
+      index[existingIdx] = { ...index[existingIdx], ...full, embedding: embedding.length ? embedding : index[existingIdx].embedding }
+    } else {
+      index.push(full)
+    }
+    await writeIndex(dataDir, index)
   })
 }
 
-export async function getDocumentMeta(
+export async function removeBlockDocEntry(
   dataDir: string,
-  fileId: string
-): Promise<{ template: string; templateData: any; lastRenderedAt: string } | null> {
-  const index = await readIndex(dataDir)
-  const entry = index.find(e => e.id === fileId)
-  if (!entry) return null
-  return entry.documentMeta ?? null
+  docId: string,
+): Promise<void> {
+  return withIndexLock(async () => {
+    const index = await readIndex(dataDir)
+    const filtered = index.filter(e => e.id !== docId)
+    if (filtered.length !== index.length) {
+      await writeIndex(dataDir, filtered)
+    }
+  })
 }

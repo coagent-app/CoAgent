@@ -231,6 +231,7 @@ export type WSClientMessage =
   | { type: 'canvas_open_doc'; docId: string }
   | { type: 'canvas_close' }
   | { type: 'canvas_save_pdf'; docId: string; base64: string; requestId?: string }
+  | { type: 'canvas_client_ops'; docId: string; ops: DocumentUpdateOp[] }
 
 export type WSServerMessage =
   | { type: 'queue_update'; items: ApprovalItem[] }
