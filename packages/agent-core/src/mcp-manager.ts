@@ -67,6 +67,12 @@ export interface LocalHandler {
   handler: (toolName: string, args: Record<string, unknown>) => Promise<string>
 }
 
+type ReconnectInfo =
+  | { kind: 'stdio'; config: MCPServerConfig }
+  | { kind: 'http'; url: string; bearerToken?: string }
+
+const RECONNECT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000]
+
 export class MCPManager {
   private clients: Map<string, Client> = new Map()
   private localHandlers: Map<string, LocalHandler> = new Map()
@@ -76,6 +82,12 @@ export class MCPManager {
   // Pending startup connection promises, keyed by source name (e.g. 'composio', 'stdio').
   // ready() awaits all of these so startup-fired triggers see the full tool list.
   private pendingInits: Map<string, Promise<unknown>> = new Map()
+  // Reconnect state — keeps enough info to re-establish each connection if it drops.
+  private serverConfigs: Map<string, ReconnectInfo> = new Map()
+  private reconnectTimers: Map<string, NodeJS.Timeout> = new Map()
+  private reconnectAttempts: Map<string, number> = new Map()
+  // Dedupe concurrent reconnect attempts for the same server.
+  private connectingNow: Map<string, Promise<void>> = new Map()
 
   /**
    * Register an in-flight MCP connection/init promise so that ready() can await it.
@@ -108,53 +120,155 @@ export class MCPManager {
   }
 
   async connect(configs: MCPServerConfig[]): Promise<void> {
-    const results = await Promise.allSettled(configs.map(async (config) => {
-      const transport = new StdioClientTransport({
-        command: config.command,
-        args: config.args ?? [],
-        env: (config.name.startsWith('custom:')
-          ? {
-              PATH: process.env.PATH ?? '',
-              HOME: process.env.HOME ?? '',
-              NODE_ENV: process.env.NODE_ENV ?? 'production',
-              LANG: process.env.LANG ?? '',
-              COAGENT_DATA_DIR: process.env.COAGENT_DATA_DIR ?? '',
-              ...config.env,
-            }
-          : { ...process.env, ...config.env }
-        ) as Record<string, string>,
-        stderr: 'pipe'
-      })
-
-      // Capture stderr for debugging
-      const lines: string[] = []
-      this.stderrBuffers.set(config.name, lines)
-      transport.stderr?.on('data', (chunk: Buffer) => {
-        const text = chunk.toString()
-        for (const line of text.split('\n').filter(Boolean)) {
-          lines.push(line)
-          if (lines.length > MAX_STDERR_LINES) lines.shift()
-          console.error(`[MCP:${config.name}] ${line}`)
-        }
-      })
-
-      const client = new Client(
-        { name: 'coagent-core', version: '0.0.1' },
-        { capabilities: {} }
-      )
-      await client.connect(transport)
-      return { name: config.name, client }
-    }))
-
-    for (const result of results) {
-      if (result.status === 'fulfilled') {
-        this.clients.set(result.value.name, result.value.client)
-      } else {
-        console.error(`[MCP] Failed to connect:`, result.reason?.message ?? result.reason)
+    // Store configs up-front so failed initial connections can still be retried by the background reconnect loop.
+    for (const config of configs) {
+      this.serverConfigs.set(config.name, { kind: 'stdio', config })
+    }
+    const results = await Promise.allSettled(
+      configs.map((config) => this.connectStdioOne(config))
+    )
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i]
+      if (r.status === 'rejected') {
+        const name = configs[i].name
+        console.error(`[MCP] Initial connect failed for ${name}:`, (r.reason as Error)?.message ?? r.reason)
+        // Schedule a background reconnect so the server comes back automatically once the issue clears.
+        this.scheduleReconnect(name)
       }
     }
     this.cacheVersion++
     this.toolCache = null
+  }
+
+  /** Connect a single stdio MCP server. Stores the config + installs the onclose reconnect trigger. */
+  private async connectStdioOne(config: MCPServerConfig): Promise<void> {
+    // Close any previous client for this name (e.g. during a reconnect).
+    const prev = this.clients.get(config.name)
+    if (prev) {
+      await prev.close().catch(() => {})
+      this.clients.delete(config.name)
+    }
+
+    const transport = new StdioClientTransport({
+      command: config.command,
+      args: config.args ?? [],
+      env: (config.name.startsWith('custom:')
+        ? {
+            PATH: process.env.PATH ?? '',
+            HOME: process.env.HOME ?? '',
+            NODE_ENV: process.env.NODE_ENV ?? 'production',
+            LANG: process.env.LANG ?? '',
+            COAGENT_DATA_DIR: process.env.COAGENT_DATA_DIR ?? '',
+            ...config.env,
+          }
+        : { ...process.env, ...config.env }
+      ) as Record<string, string>,
+      stderr: 'pipe'
+    })
+
+    // Capture stderr for debugging
+    const lines: string[] = []
+    this.stderrBuffers.set(config.name, lines)
+    transport.stderr?.on('data', (chunk: Buffer) => {
+      const text = chunk.toString()
+      for (const line of text.split('\n').filter(Boolean)) {
+        lines.push(line)
+        if (lines.length > MAX_STDERR_LINES) lines.shift()
+        console.error(`[MCP:${config.name}] ${line}`)
+      }
+    })
+
+    const client = new Client(
+      { name: 'coagent-core', version: '0.0.1' },
+      { capabilities: {} }
+    )
+    await client.connect(transport)
+    this.attachReconnectHooks(config.name, client)
+    this.clients.set(config.name, client)
+    this.reconnectAttempts.delete(config.name)
+    this.cacheVersion++
+    this.toolCache = null
+    console.log(`[MCP] Connected stdio: ${config.name}`)
+  }
+
+  /** Wire up client.onclose/onerror so transport drops trigger a reconnect. */
+  private attachReconnectHooks(name: string, client: Client): void {
+    client.onclose = () => {
+      // Only auto-reconnect if the user hasn't explicitly disconnected this server.
+      if (!this.serverConfigs.has(name)) return
+      if (this.clients.get(name) !== client) return  // superseded by a newer client
+      console.warn(`[MCP] ${name} transport closed — scheduling reconnect`)
+      this.clients.delete(name)
+      this.cacheVersion++
+      this.toolCache = null
+      this.scheduleReconnect(name)
+    }
+    client.onerror = (err: Error) => {
+      console.error(`[MCP] ${name} transport error: ${err.message}`)
+    }
+  }
+
+  /** Schedule a reconnect attempt with exponential backoff. Idempotent. */
+  private scheduleReconnect(name: string): void {
+    if (!this.serverConfigs.has(name)) return  // disconnected — don't reconnect
+    if (this.reconnectTimers.has(name)) return  // already scheduled
+    if (this.connectingNow.has(name)) return    // already connecting
+    const attempt = this.reconnectAttempts.get(name) ?? 0
+    const delay = RECONNECT_BACKOFF_MS[Math.min(attempt, RECONNECT_BACKOFF_MS.length - 1)]
+    this.reconnectAttempts.set(name, attempt + 1)
+    console.log(`[MCP] ${name} reconnect scheduled in ${delay}ms (attempt ${attempt + 1})`)
+    const timer = setTimeout(() => {
+      this.reconnectTimers.delete(name)
+      this.reconnectNow(name).catch(() => {
+        // reconnectNow already logs; schedule the next backoff step.
+        this.scheduleReconnect(name)
+      })
+    }, delay)
+    this.reconnectTimers.set(name, timer)
+  }
+
+  /** Reconnect a known server right now (no backoff). Dedupes concurrent callers. */
+  private async reconnectNow(name: string): Promise<void> {
+    const existing = this.connectingNow.get(name)
+    if (existing) return existing
+    const info = this.serverConfigs.get(name)
+    if (!info) return
+    const p = (async () => {
+      try {
+        if (info.kind === 'stdio') {
+          await this.connectStdioOne(info.config)
+        } else {
+          await this.connectHttpOne(name, info.url, info.bearerToken)
+        }
+      } catch (err: any) {
+        console.error(`[MCP] Reconnect failed for ${name}: ${err?.message ?? err}`)
+        throw err
+      }
+    })()
+    this.connectingNow.set(name, p)
+    try {
+      await p
+    } finally {
+      this.connectingNow.delete(name)
+    }
+  }
+
+  /** If the server is known but not connected, try to reconnect right now before a tool call. */
+  private async ensureConnected(name: string): Promise<void> {
+    if (this.clients.has(name) || this.localHandlers.has(name)) return
+    if (!this.serverConfigs.has(name)) return
+    // Cancel any pending backoff timer — we're doing it now.
+    const timer = this.reconnectTimers.get(name)
+    if (timer) {
+      clearTimeout(timer)
+      this.reconnectTimers.delete(name)
+    }
+    try {
+      await this.reconnectNow(name)
+    } catch {
+      // Swallow — caller will see missing client and throw its own error, and backoff will retry.
+      this.scheduleReconnect(name)
+    }
   }
 
   /** Register an in-process local tool handler (no subprocess needed) */
@@ -240,6 +354,10 @@ export class MCPManager {
       return local.handler(toolName, args)
     }
 
+    // On-demand reconnect: if the client is missing but we know how to connect it, try now.
+    if (!this.clients.has(serverName)) {
+      await this.ensureConnected(serverName)
+    }
     const client = this.clients.get(serverName)
     if (!client) throw new Error(`MCP server not found: ${serverName}`)
     try {
@@ -252,20 +370,49 @@ export class MCPManager {
       return text
     } catch (err: any) {
       const code = err?.code
-      if (code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED' || err?.message?.includes('EPIPE')) {
-        console.error(`[MCP] ${serverName} pipe broken during ${toolName} — server likely crashed`)
+      const isPipeError = code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED' || err?.message?.includes('EPIPE')
+      if (isPipeError) {
+        console.error(`[MCP] ${serverName} pipe broken during ${toolName} — server likely crashed, attempting reconnect`)
         // Invalidate tool cache so getAllTools() won't return stale tools for this crashed server
+        this.clients.delete(serverName)
         this.cacheVersion++
         this.toolCache = null
+        // Try to reconnect immediately and retry the call once.
+        try {
+          await this.ensureConnected(serverName)
+          const retryClient = this.clients.get(serverName)
+          if (retryClient) {
+            const result = await retryClient.callTool({ name: toolName, arguments: args })
+            const content = result.content as Array<{ type: string; text?: string }>
+            return content.filter(c => c.type === 'text').map(c => c.text ?? '').join('\n')
+          }
+        } catch (retryErr: any) {
+          console.error(`[MCP] ${serverName} retry after reconnect also failed: ${retryErr?.message ?? retryErr}`)
+        }
+        // Schedule a background reconnect so the next call works even if this one fails.
+        this.scheduleReconnect(serverName)
         const stderr = this.getStderr(serverName)
         const detail = stderr ? `\n\nServer stderr:\n${stderr}` : ''
-        return `[Error: ${serverName} server crashed during ${toolName}.${detail}]`
+        return `[Error: ${serverName} server crashed during ${toolName}. Reconnecting in background.${detail}]`
       }
       throw err
     }
   }
 
   async connectHttp(name: string, url: string, bearerToken?: string): Promise<void> {
+    this.serverConfigs.set(name, { kind: 'http', url, bearerToken })
+    try {
+      await this.connectHttpOne(name, url, bearerToken)
+    } catch (err) {
+      console.error(`[MCP] Initial HTTP connect failed for ${name}:`, (err as Error)?.message ?? err)
+      // Schedule background reconnect so the endpoint comes back automatically once reachable.
+      this.scheduleReconnect(name)
+      throw err
+    }
+  }
+
+  /** Connect a single HTTP MCP endpoint. Installs the onclose reconnect trigger. */
+  private async connectHttpOne(name: string, url: string, bearerToken?: string): Promise<void> {
     // Disconnect existing client for this name if any
     const existing = this.clients.get(name)
     if (existing) {
@@ -283,7 +430,9 @@ export class MCPManager {
       { capabilities: {} }
     )
     await client.connect(transport)
+    this.attachReconnectHooks(name, client)
     this.clients.set(name, client)
+    this.reconnectAttempts.delete(name)
     // Invalidate AFTER client is registered so getAllTools() sees the new client
     this.cacheVersion++
     this.toolCache = null
@@ -291,6 +440,15 @@ export class MCPManager {
   }
 
   async disconnect(name: string): Promise<void> {
+    // Remove reconnect state first so onclose doesn't kick off a reconnect loop.
+    this.serverConfigs.delete(name)
+    const timer = this.reconnectTimers.get(name)
+    if (timer) {
+      clearTimeout(timer)
+      this.reconnectTimers.delete(name)
+    }
+    this.reconnectAttempts.delete(name)
+
     // Remove local handler if present
     const hadLocal = this.localHandlers.delete(name)
 
@@ -307,6 +465,11 @@ export class MCPManager {
   }
 
   async disconnectAll(): Promise<void> {
+    // Clear reconnect state first so in-flight closes don't trigger reconnect loops.
+    this.serverConfigs.clear()
+    for (const timer of this.reconnectTimers.values()) clearTimeout(timer)
+    this.reconnectTimers.clear()
+    this.reconnectAttempts.clear()
     for (const [name, client] of this.clients) {
       await client.close().catch(err => console.warn(`[MCP] Error closing ${name}:`, (err as Error).message))
     }

@@ -669,7 +669,7 @@ export function getInternalTools(context: ToolContext, activeSkillTools?: Set<st
 const AUTONOMY_DESCRIPTIONS: Record<string, string> = {
   ask_first: 'Queue everything except read-only lookups.',
   balanced: 'Act on routine/read-only. Queue sends, edits, outreach.',
-  agent: 'Act freely on user requests. Background tasks auto-queue write actions for approval.',
+  agent: 'User-initiated: act freely, execute writes directly. Self-initiated (heartbeat, trigger, routine): act on reads, queue every write for approval.',
   autonomous: 'Act freely. Only queue destructive actions (bulk deletes).'
 }
 
@@ -699,7 +699,6 @@ function listMemoryFiles(dataDir: string): string[] {
 
 function buildSystemPrompt(connectedServices: string[], agentProfilePath: string, settings: AgentSettings, dataDir: string, teamRoster?: any[], teamName?: string, googleCalendarConnected = false, composioSlugs: string[] = []): string {
   const memoryFiles = listMemoryFiles(dataDir)
-  const exaConnected = connectedServices.includes('exa')
 
   const composioSection = composioSlugs.length > 0
     ? `\nThe user has these apps connected: ${composioSlugs.map(s => s.toUpperCase()).join(', ')}. You CAN access their email, calendar, etc. through these. Do NOT tell the user an integration is missing if it's listed here.`
@@ -736,7 +735,7 @@ Active: ${formatHour(settings.active_hours.start)}–${formatHour(settings.activ
 Autonomy: ${settings.autonomy} — ${AUTONOMY_DESCRIPTIONS[settings.autonomy]}${settings.autonomy_notes ? `\nAutonomy rules:\n${settings.autonomy_notes}` : ''}
 ${settings.heartbeat_interval > 0 ? `Heartbeat: every ${settings.heartbeat_interval}min — process triggers, check memory, escalate. After each heartbeat, call set_status_line with a brief status (3-8 words) summarizing what you found — e.g. "3 things in your queue", "All caught up", "2 new emails".` : ''}
 
-Memory: search first (parallel, semantic) before writing. Edit existing files over creating new ones. Be selective — signal, not archive. Before saving a person or topic, verify relevance: recent activity? recurring contact? someone the user actually engages with? Skip incidental noise — one-time CC's, strangers looped into threads, form senders, names mentioned in passing. Save only what the user will still care about next week. When the user dismisses, corrects, or asks you to remove something ("don't need X", "that's old", "clean that up"), edit memory in the SAME turn — never just acknowledge. heartbeat.md defines what to check each heartbeat.${memoryFiles.length > 0 ? `\nRecent memories: ${memoryFiles.join(', ')} — search to find others.` : ''}
+Memory: search first (parallel, semantic) before writing. Edit existing files over creating new ones. Save people/topics the user actively engages with, recurring contacts, rules and preferences you'd otherwise repeat, and facts the user will still care about a week from now. Skip one-time CC's, strangers looped into threads, form senders, and names mentioned in passing. Importance beats recency — a single email from a prospect the user cares about: save. A CC on a thread they're not part of: skip. When the user dismisses, corrects, or asks you to remove something ("don't need X", "that's old", "clean that up"), edit memory in the SAME turn — never just acknowledge. heartbeat.md defines what to check each heartbeat.${memoryFiles.length > 0 ? `\nRecent memories: ${memoryFiles.join(', ')} — search to find others.` : ''}
 Files: grep to search contents (PDF/DOCX/XLSX/text). create_folder/move to organize. get_pdf_fields + fill_pdf for fillable forms. [filename](coagent-file:ID) to open. coagent_file_ids to attach files to emails.
 Canvas: use write_canvas to create any document (proposals, reports, flyers, letters, invoices, dashboards, one-pagers). Call skills(action: 'execute', name: 'canvas-design') before writing to load the scope reference and design patterns. Use patch_canvas for iterations on an existing canvas.
   Canvases are TSX — default-export a React component. Allowed imports: '@brand' (brand, Logo, Signature), 'recharts', 'lucide-react', 'react'. Nothing else.
@@ -744,22 +743,19 @@ Canvas: use write_canvas to create any document (proposals, reports, flyers, let
 Schedule: create/update/delete/complete/list — routines (cron), tasks (one-time), followups. Call get_current_time in parallel when scheduling — never guess the date.${googleCalendarConnected ? ' Google Calendar synced — schedule(action: "list") includes Google events. To modify/delete Google events, use call_external_tool with GOOGLECALENDAR_UPDATE_EVENT or GOOGLECALENDAR_DELETE_EVENT (not the schedule tool).' : ''}
 Skills: skills(action: 'list') to see available, skills(action: 'execute', name: 'skill-name') to run. Run proactively when they match the request.
 Integrations: create_custom_integration + @integration-builder for new API integrations.
-Approvals: queue_approval for high-stakes actions. add_done_item after routine tasks.
+Approvals: what to queue vs execute directly is defined by the Autonomy mode above — follow it. Heartbeats and triggers always queue writes regardless of mode (except in autonomous). When you queue a send (email, message, post, reply), draft the full text in the queue item — the user should be able to approve and send without rewriting. Never queue a placeholder like "draft a response" — write the actual draft. add_done_item after routine tasks.
 Followups: after sending emails/messages/proposals, ask "Want me to follow up?" — never auto-create.
-Integration notes: when you see "[integration notes]:" in a search_tools result, those are YOUR saved rules — follow them without asking. Write new notes after learning a reusable ID, a user preference/rule, or a correction you'd otherwise repeat. Not for one-off facts (use memory).
+Integration notes: rules about how to USE a specific tool — a reusable ID (default spreadsheet, default calendar), a per-integration preference ("always CC legal on contracts"), or a quirk you'd otherwise repeat. They attach to a tool and surface when you search for it; follow them without asking when you see "[integration notes]:" in a search_tools result. Rule of thumb: if the fact is needed to call a tool correctly → integration note. Everything else (people, topics, general context) → memory.
 
 Keep responses short and direct — lead with the answer, skip filler and preamble. No emojis. Markdown only when it adds clarity.
 No markdown in call_external_tool content (emails, messages, notes) — plain text only, it renders literally in Gmail.
 ${connectedServices.includes('coagent:imessage') ? `iMessage connected. Queue sends for approval unless autonomous.` : ''}
 ${connectedServices.includes('coagent:contacts') ? `Contacts connected via search_tools.` : ''}
-VOICE MODE: When the user's message ends with [voice], this is spoken input. Your ENTIRE response must be 1-2 short sentences MAX — under 30 words total. No markdown, no lists, no code, no bullet points. Talk like a person, not a document. NEVER write "[voice]" anywhere in your response — it is a marker on the user's message only, never yours. Violating the length limit ruins the voice experience.
+VOICE MODE: When the user's message ends with [voice], the input is spoken and your reply gets read aloud. Reply in 1–2 spoken sentences, ≤30 words — the limit is hard. Natural spoken English: no markdown, no lists, no bullets, no code, no symbols that read as characters (&, #, *), no "[voice]" token in your reply. If the full answer won't fit, give the shortest useful version and add "I'll put the details on screen."
 Notifications: title 2-4 words, body one sentence.
-${exaConnected ? `
-Exa: web search, lead gen, competitor research.
-research tool: ALWAYS present your planned queries to the user first and wait for confirmation before calling. Each query dispatches a parallel sub-agent. Use 3-5 queries from different angles/keywords.
-spawn_agents: run parallel sub-agents for independent tasks. Each gets its own instruction and tools (search, memory, documents) but cannot send emails or perform external actions. Use for: parallel analysis, drafting multiple versions, research + prep simultaneously.
-exa tool: use directly ONLY for get_contents (enrich specific URLs), find_similar (expand from a reference URL), or quick single lookups.
-After research, save structured findings to memory. monitor tool sets up recurring searches.` : ''}${onboardingSection}${teamRoster && teamRoster.length > 0 ? `\n\n## Team: ${teamName || 'Your Team'}\n\nYou are part of a team. Each member has their own AI agent — when you message someone, you're talking to their agent (another AI like you), not the person directly.\nMembers:\n${teamRoster.map((m: any) => `- ${m.name} (${m.role})`).join('\n')}\n\nUse send_team_message with to="name" to message their agent. You'll wait for and receive their agent's response. Omit "to" to broadcast.\nInclude agent_context with relevant background for the receiving agent.` : ''}`
+
+Web search: use composio_search (search_tools → call_external_tool) for any web lookups. The exa tool is disabled.
+spawn_agents: run parallel sub-agents for independent tasks (parallel analysis, drafting multiple versions, research + prep). Sub-agents get search, memory, and document tools but cannot send emails or perform external actions.${onboardingSection}${teamRoster && teamRoster.length > 0 ? `\n\n## Team: ${teamName || 'Your Team'}\n\nYou are part of a team. Each member has their own AI agent — when you message someone, you're talking to their agent (another AI like you), not the person directly.\nMembers:\n${teamRoster.map((m: any) => `- ${m.name} (${m.role})`).join('\n')}\n\nUse send_team_message with to="name" to message their agent. You'll wait for and receive their agent's response. Omit "to" to broadcast.\nInclude agent_context with relevant background for the receiving agent.` : ''}`
 }
 
 export class Agent {
@@ -1286,21 +1282,11 @@ Rules:
     // This means tools never change between API calls, so the cache prefix stays warm.
     const isBackground = context === 'heartbeat'
     const contextTools = getInternalTools(context, this.activeSkillTools, !!this.teamClient)
-    // Add research tool when Exa is available — uses parallel Haiku sub-agents
-    const researchTool: Anthropic.Tool[] = exaTools.length > 0 ? [{
-      name: 'research',
-      description: 'Parallel web research. Provide multiple search queries — each runs simultaneously via a sub-agent. Returns combined results. Use for broad research; use exa directly for quick single lookups.',
-      input_schema: {
-        type: 'object' as const,
-        properties: {
-          queries: { type: 'array', items: { type: 'string' }, description: 'Search queries to run in parallel (3-5 recommended). Each should target a different angle.' },
-        },
-        required: ['queries']
-      }
-    }] : []
+    // Exa tool + research tool temporarily disabled — use Composio search_tools for web search.
+    // Exa MCP may still be connected for routing, but we don't expose the tools to the model.
     // HTML document tools are always available in non-heartbeat contexts.
     const canvasTools: Anthropic.Tool[] = context !== 'heartbeat' ? CANVAS_TOOLS : []
-    const stableTools = [...contextTools, ...exaTools, ...researchTool, ...canvasTools].map(trimToolSchema)
+    const stableTools = [...contextTools, ...canvasTools].map(trimToolSchema)
     console.log(`[Agent] Tools available: ${stableTools.map(t => t.name).join(', ')}`)
 
     let finalText = ''
