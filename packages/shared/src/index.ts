@@ -4,6 +4,7 @@ export * from './blocks.js'
 // HTML document model — see ./document.ts
 export * from './document.js'
 import type { BlockDocument, DocumentUpdateOp } from './blocks.js'
+import type { HtmlDocument } from './document.js'
 
 export type Autonomy = 'ask_first' | 'balanced' | 'agent' | 'autonomous'
 
@@ -46,6 +47,9 @@ export interface AgentSettings {
   auto_brief_minutes: number   // minutes before meeting to fire brief (default 30)
   agent_name: string           // user-chosen name for their agent (e.g. "Jarvis")
   autonomy_notes: string       // freeform autonomy rules written during onboarding, injected into system prompt
+  experimental: {
+    htmlDocuments: boolean     // Phase 2: render HtmlDocument in sandboxed iframe instead of CanvasPane
+  }
 }
 
 export type TriggerSource = 'heartbeat' | 'webhook' | 'manual' | 'memory_cleanup' | 'todo_due' | 'routine' | 'task_due' | 'meeting_brief'
@@ -235,6 +239,7 @@ export type WSClientMessage =
   | { type: 'canvas_close' }
   | { type: 'canvas_save_pdf'; docId: string; base64: string; requestId?: string }
   | { type: 'canvas_client_ops'; docId: string; ops: DocumentUpdateOp[] }
+  | { type: 'html_doc_open'; docId: string }
 
 export type WSServerMessage =
   | { type: 'queue_update'; items: ApprovalItem[] }
@@ -300,6 +305,8 @@ export type WSServerMessage =
   | { type: 'canvas_export_request'; doc: BlockDocument; requestId: string }
   | { type: 'canvas_pdf_exported'; docId: string; fileId: string; filename: string; requestId?: string }
   | { type: 'canvas_error'; docId?: string; message: string; requestId?: string }
+  | { type: 'html_doc_opened'; doc: HtmlDocument }
+  | { type: 'html_doc_error'; docId?: string; message: string }
 
 export interface AdminUser {
   userId: string

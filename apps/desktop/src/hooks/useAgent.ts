@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { open } from '@tauri-apps/plugin-shell'
 import { invoke } from '@tauri-apps/api/core'
 import { save } from '@tauri-apps/plugin-dialog'
-import type { ApprovalItem, DoneItem, AgentMessage, WSServerMessage, WSClientMessage, Integration, AgentSettings, FileEntry, AuthStatus, AuthMethod, RelayUsage, UsageSummary, CalendarEntry, AdminUser, GoogleCalendarInfo, WSServerMessage as WSSMsg, BlockDocument, DocumentUpdateOp } from '@coagent/shared'
+import type { ApprovalItem, DoneItem, AgentMessage, WSServerMessage, WSClientMessage, Integration, AgentSettings, FileEntry, AuthStatus, AuthMethod, RelayUsage, UsageSummary, CalendarEntry, AdminUser, GoogleCalendarInfo, WSServerMessage as WSSMsg, BlockDocument, DocumentUpdateOp, HtmlDocument } from '@coagent/shared'
 import { applyDocumentOps } from '@/lib/canvas'
 
 // ── Path C export: hidden WKWebView → PDF via Tauri command ─────────────────
@@ -117,6 +117,9 @@ export function useAgent() {
   // (showing a reopen chip) without losing the doc, and new agent activity
   // auto-reopens it.
   const [canvasVisible, setCanvasVisible] = useState(false)
+  // HTML document state (Phase 2 — experimental.htmlDocuments flag)
+  const [htmlDoc, setHtmlDoc] = useState<HtmlDocument | null>(null)
+  const [htmlDocVisible, setHtmlDocVisible] = useState(false)
   // Feedback toast shown after a user-initiated PDF export finishes. Auto-
   // cleared by the component rendering it. Agent-initiated exports skip this
   // toast — they happen silently during a chat turn.
@@ -495,6 +498,11 @@ export function useAgent() {
           setCanvasStreaming(false)
           setCanvasVisible(false)
         }
+        if ((msg as any).type === 'html_doc_opened') {
+          const { doc } = msg as any
+          setHtmlDoc(doc as HtmlDocument)
+          setHtmlDocVisible(true)
+        }
         if ((msg as any).type === 'canvas_export_request') {
           const { doc, requestId } = msg as any
           // Prefer the live Canvas doc (React state) over the disk copy the
@@ -859,6 +867,18 @@ export function useAgent() {
     send({ type: 'canvas_open_doc', docId } as any)
   }, [send])
 
+  const openHtmlDoc = useCallback((docId: string) => {
+    send({ type: 'html_doc_open', docId } as any)
+  }, [send])
+
+  const closeHtmlDoc = useCallback(() => {
+    setHtmlDocVisible(false)
+  }, [])
+
+  const patchHtmlDocLocally = useCallback((updatedDoc: HtmlDocument) => {
+    setHtmlDoc(updatedDoc)
+  }, [])
+
   // Send client-originated document ops to the server for persistence.
   // Called by CanvasPane after every local edit so the server stays in sync.
   const sendCanvasClientOps = useCallback((docId: string, ops: DocumentUpdateOp[]) => {
@@ -952,5 +972,5 @@ export function useAgent() {
     send({ type: 'trigger_heartbeat' })
   }, [send])
 
-  return { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, pendingFields, setPendingFields, setModel, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, getTeamInfo, getTeamHistory, triggerPrompt, setTriggerPrompt, canvasDoc, canvasStreaming, canvasExporting, canvasVisible, openCanvasDoc, closeCanvas, reopenCanvas, exportCanvasPdf, saveCanvasToFiles, exportToast, dismissExportToast, sendCanvasClientOps, setCanvasDocFromClient }
+  return { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, pendingFields, setPendingFields, setModel, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, getTeamInfo, getTeamHistory, triggerPrompt, setTriggerPrompt, canvasDoc, canvasStreaming, canvasExporting, canvasVisible, openCanvasDoc, closeCanvas, reopenCanvas, exportCanvasPdf, saveCanvasToFiles, exportToast, dismissExportToast, sendCanvasClientOps, setCanvasDocFromClient, htmlDoc, htmlDocVisible, openHtmlDoc, closeHtmlDoc, patchHtmlDocLocally }
 }

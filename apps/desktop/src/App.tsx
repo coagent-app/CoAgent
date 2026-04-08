@@ -13,6 +13,7 @@ import { SkillsPane } from '@/components/SkillsPane'
 import { TeamPane } from '@/components/TeamPane'
 import { CanvasPane } from '@/components/CanvasPane'
 import { CanvasReopenChip } from '@/components/CanvasReopenChip'
+import { HtmlDocumentPane } from '@/components/HtmlDocumentPane'
 import { OnboardingTour } from '@/components/OnboardingTour'
 import { useAgent } from '@/hooks/useAgent'
 import { useUpdater } from '@/hooks/useUpdater'
@@ -71,7 +72,7 @@ function ExportToast({ filename, filePath, onShowInFiles, onDismiss }: { filenam
   )
 }
 export default function App() {
-  const { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, error, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, settings, updateSettings, authStatus, updateAuth, verifyAuth, files, folders, searchResults, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, relayActive, relayModel, setRelayModel, relayUsage, activateRelay, refreshRelayStatus, pendingFields, setPendingFields, setModel, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, triggerPrompt, setTriggerPrompt, canvasDoc, canvasStreaming, canvasExporting, canvasVisible, openCanvasDoc, closeCanvas, reopenCanvas, exportCanvasPdf, saveCanvasToFiles, exportToast, dismissExportToast, sendCanvasClientOps, setCanvasDocFromClient } = useAgent()
+  const { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, error, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, settings, updateSettings, authStatus, updateAuth, verifyAuth, files, folders, searchResults, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, relayActive, relayModel, setRelayModel, relayUsage, activateRelay, refreshRelayStatus, pendingFields, setPendingFields, setModel, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, triggerPrompt, setTriggerPrompt, canvasDoc, canvasStreaming, canvasExporting, canvasVisible, openCanvasDoc, closeCanvas, reopenCanvas, exportCanvasPdf, saveCanvasToFiles, exportToast, dismissExportToast, sendCanvasClientOps, setCanvasDocFromClient, htmlDoc, htmlDocVisible, openHtmlDoc, closeHtmlDoc, patchHtmlDocLocally } = useAgent()
   const { dark, toggle: toggleTheme } = useTheme()
   const updater = useUpdater()
   const [view, setView] = useState<View>('chat')
@@ -167,26 +168,41 @@ export default function App() {
         {view === 'chat' && (
           <div className="relative flex-1 flex overflow-hidden">
             <ChatPane messages={messages} streamingText={streamingText} thinking={thinking} processing={processing} toolLabel={toolLabel} researchAgents={researchAgents} connected={connected} onChat={chat} onSteer={steer} onStop={stopAgent} onIngestFile={ingestFile} files={files} onNavigateToSettings={() => setView('settings')} lastHeartbeat={lastHeartbeat} heartbeatLog={heartbeatLog} onTriggerHeartbeat={triggerHeartbeat} statusLine={statusLine} skills={skills} capabilityCard={capabilityCard} onConfirmCapabilities={confirmCapabilities} userName={settings?.name} userRole={settings?.role} onboarded={settings?.onboarded} agentName={settings?.agent_name} onOpenCanvasDoc={openCanvasDoc} className="flex-1" />
-            {canvasDoc && canvasVisible && (
-              <CanvasPane
-                doc={canvasDoc}
-                streaming={canvasStreaming}
-                brand={settings ? {
-                  companyName: settings.brand_company || undefined,
-                  primary: settings.brand_primary || undefined,
-                  secondary: settings.brand_secondary || undefined,
-                  tertiary: settings.brand_tertiary || undefined,
-                  logoDataUri: settings.brand_logo || undefined,
-                } : undefined}
-                onClose={closeCanvas}
-                onExportPdf={exportCanvasPdf}
-                onSaveToFiles={saveCanvasToFiles}
-                exporting={canvasExporting}
-                onDocumentChange={next => setCanvasDocFromClient(next)}
-                onEmit={(docId, ops) => sendCanvasClientOps(docId, ops)}
-              />
+            {settings?.experimental?.htmlDocuments ? (
+              // Phase 2: render HtmlDocument in sandboxed iframe when flag is on
+              htmlDoc && htmlDocVisible && (
+                <HtmlDocumentPane
+                  doc={htmlDoc}
+                  streaming={false}
+                  onClose={closeHtmlDoc}
+                  onPatchDocument={(args) => {
+                    console.log('[App] patchDocument (Phase 3 stub):', args)
+                  }}
+                  onDocumentChange={(next) => patchHtmlDocLocally(next)}
+                />
+              )
+            ) : (
+              canvasDoc && canvasVisible && (
+                <CanvasPane
+                  doc={canvasDoc}
+                  streaming={canvasStreaming}
+                  brand={settings ? {
+                    companyName: settings.brand_company || undefined,
+                    primary: settings.brand_primary || undefined,
+                    secondary: settings.brand_secondary || undefined,
+                    tertiary: settings.brand_tertiary || undefined,
+                    logoDataUri: settings.brand_logo || undefined,
+                  } : undefined}
+                  onClose={closeCanvas}
+                  onExportPdf={exportCanvasPdf}
+                  onSaveToFiles={saveCanvasToFiles}
+                  exporting={canvasExporting}
+                  onDocumentChange={next => setCanvasDocFromClient(next)}
+                  onEmit={(docId, ops) => sendCanvasClientOps(docId, ops)}
+                />
+              )
             )}
-            {canvasDoc && !canvasVisible && (
+            {!settings?.experimental?.htmlDocuments && canvasDoc && !canvasVisible && (
               <CanvasReopenChip
                 title={canvasDoc.title}
                 streaming={canvasStreaming}

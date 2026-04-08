@@ -12,6 +12,7 @@ import { readSettings, writeSettings } from './settings.js'
 
 import { listFiles, listFolders, ingestFile, overwriteFile, deleteFileEntry, createFolder, moveFile, moveFolder, renameFile, renameFolder, deleteFolder, saveFolderOrder, searchFiles, autoOrganizeFiles } from './file-store.js'
 import { readBlockDocument, updateBlockDocument } from './block-document-store.js'
+import { readHtmlDocument } from './html-document-store.js'
 import { randomUUID } from 'crypto'
 import { IMESSAGE_TOOLS, handleImessageTool } from './local-tools-imessage.js'
 import { CONTACTS_TOOLS, handleContactsTool } from './local-tools-contacts.js'
@@ -3209,6 +3210,20 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
       // Just a client state signal — nothing to do server-side, but other
       // clients may want to know, so broadcast it.
       broadcast({ type: 'canvas_close' })
+    }
+
+    // ── HTML Document (Phase 2) ───────────────────────────────────────────
+    if (msg.type === 'html_doc_open') {
+      try {
+        const doc = await readHtmlDocument(DATA_DIR, msg.docId)
+        if (!doc) {
+          send(ws, { type: 'html_doc_error', docId: msg.docId, message: 'HTML document not found' })
+        } else {
+          send(ws, { type: 'html_doc_opened', doc })
+        }
+      } catch (err: any) {
+        send(ws, { type: 'html_doc_error', docId: msg.docId, message: err?.message || 'Failed to open HTML document' })
+      }
     }
 
     if (msg.type === 'canvas_save_pdf') {
