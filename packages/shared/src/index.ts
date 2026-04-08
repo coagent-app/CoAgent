@@ -240,6 +240,8 @@ export type WSClientMessage =
   | { type: 'canvas_save_pdf'; docId: string; base64: string; requestId?: string }
   | { type: 'canvas_client_ops'; docId: string; ops: DocumentUpdateOp[] }
   | { type: 'html_doc_open'; docId: string }
+  | { type: 'html_doc_write'; title: string; html: string; kind?: string; theme?: Partial<import('./document.js').DocumentTheme> }
+  | { type: 'html_doc_patch'; docId: string; targetId: string; op: string; content?: string; theme?: Partial<import('./document.js').DocumentTheme> }
 
 export type WSServerMessage =
   | { type: 'queue_update'; items: ApprovalItem[] }
@@ -306,6 +308,7 @@ export type WSServerMessage =
   | { type: 'canvas_pdf_exported'; docId: string; fileId: string; filename: string; requestId?: string }
   | { type: 'canvas_error'; docId?: string; message: string; requestId?: string }
   | { type: 'html_doc_opened'; doc: HtmlDocument }
+  | { type: 'html_doc_updated'; doc: HtmlDocument }
   | { type: 'html_doc_error'; docId?: string; message: string }
 
 export interface AdminUser {

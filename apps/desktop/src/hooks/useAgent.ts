@@ -503,6 +503,12 @@ export function useAgent() {
           setHtmlDoc(doc as HtmlDocument)
           setHtmlDocVisible(true)
         }
+        if ((msg as any).type === 'html_doc_updated') {
+          const { doc } = msg as any
+          setHtmlDoc(doc as HtmlDocument)
+          // Auto-open the pane if it was hidden (e.g. user closed, agent patched)
+          setHtmlDocVisible(true)
+        }
         if ((msg as any).type === 'canvas_export_request') {
           const { doc, requestId } = msg as any
           // Prefer the live Canvas doc (React state) over the disk copy the

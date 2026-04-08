@@ -12,7 +12,19 @@ import { searchEventStore, markEventsDone, getUnprocessedEvents } from './relay-
 import { readSettings, writeSettings } from './settings.js'
 import type { AgentSettings } from './settings.js'
 import type { AgentTrigger } from '@coagent/shared'
-import { searchFiles, readFileContent, readFileBase64, deleteFileEntry, getStorageStats, listFiles, ingestFile, createFolder, moveFile, grepFiles, getPdfFormFields, fillPdfForm, updateDocumentMeta, getDocumentMeta, updateFileContent } from './file-store.js'
+import { searchFiles, readFileContent, readFileBase64, deleteFileEntry, getStorageStats, listFiles, ingestFile, createFolder, moveFile, grepFiles, getPdfFormFields, fillPdfForm, updateFileContent, upsertBlockDocEntry, removeBlockDocEntry } from './file-store.js'
+import {
+  createBlockDocument,
+  readBlockDocument,
+  updateBlockDocument,
+  listBlockDocuments,
+  deleteBlockDocument,
+  loadPreset,
+  listPresets,
+  buildBlockDocFileEntry,
+  applyOps as applyDocOps,
+} from './block-document-store.js'
+import type { DocumentBlock, DocumentUpdateOp, BlockDocument } from '@coagent/shared'
 import { embedTools, searchToolsAndSchema, setToolEmbeddingsDir } from './tool-embeddings.js'
 import { logToolCall, extractIntegration, searchToolLogs } from './service-logger.js'
 import { recordUsage } from './usage-tracker.js'
@@ -20,6 +32,14 @@ import { getRelayConfig } from './auth.js'
 import { runResearch } from './research.js'
 import { runSubAgents, type SubAgentTask } from './sub-agent.js'
 import { streamOpenAI } from './openai-provider.js'
+import {
+  createHtmlDocument,
+  readHtmlDocument,
+  updateHtmlDocument,
+} from './html-document-store.js'
+import type { DocumentTheme } from '@coagent/shared'
+import { validateHtml } from './html-whitelist.js'
+import { parse as parseHtml, HTMLElement as HtmlElement } from 'node-html-parser'
 
 /** Returns true if the model should use the Anthropic SDK */
 function isAnthropicModel(model: string): boolean {
@@ -30,6 +50,78 @@ const MOONSHOT_BASE_URL = 'https://api.moonshot.ai/v1'
 
 const HISTORY_WINDOW = 50        // total pool — recent messages
 const HISTORY_CAP = 200          // hard in-memory cap — trim from front when exceeded
+
+// Composition guide injected into the create_document tool RESULT (not the
+// tool description). This keeps the ~600 tokens of layout variant guidance
+// out of the agent's context on every turn — it only appears after the
+// model has committed to creating a doc, for the lifetime of that
+// composition session.
+const DOC_COMPOSITION_GUIDE = `
+COMPOSITION GUIDE — read this, then stream blocks in via update_document.
+
+Compose freely. Don't use the same skeleton every time. Pick blocks based on what the content actually is, and vary the structure so no two docs look identical.
+
+BLOCK TYPES:
+- header — eyebrow + title + subtitle. Usually one, at top.
+- text — markdown prose, sub-headings, bullets, inline tables. Workhorse.
+- kpis — 2–6 label/value/delta cards for numbers at a glance.
+- table — headers + rows. {emphasis:true} on totals rows.
+- callout — boxed note, variant: info|warn|success|tip.
+- two_column — side-by-side blocks with {left,right,ratio}.
+- image — with optional caption.
+- chart — bar|line|pie. {kind,data,xKey,yKeys} or {kind,data,nameKey,valueKey}.
+- divider — section break.
+- signoff — name/title/date for letters.
+- footer — one, at bottom.
+- section — layout variant wrapper for 1–4 child blocks (see below).
+
+LAYOUT VARIANTS (via section block) — the ONLY way to get non-stack layouts. Mix 1–3 variant sections per doc with flat top-level blocks. Don't wrap every block in a section.
+- standard — vertical stack with optional title. "Just group these together".
+- hero — full-bleed image backdrop with title+eyebrow overlay. First image child becomes backdrop. For doc openers or topic lead-ins. 1 image + 1 short text child works best.
+- two_column — two children side by side, equal width. For "read these in parallel" (e.g. chart + takeaway text). Exactly 2 children.
+- kpi_band — slab background with a single KpisBlock child. Makes stats feel distinct from surrounding text.
+- gallery — 2-up or 3-up image grid. For multiple product shots, screenshots, brand images.
+- quote_pull — oversized serif italic quote with side rule. For a single forceful customer quote or stat. 1 text child.
+- comparison — strict 2-column split with tinted left side and divider. For before/after, old/new, A/B. Exactly 2 children.
+- timeline — reserved, renders as standard for now.
+
+STRUCTURE EXAMPLES (suggestions, not rules — vary them):
+- Data-heavy → header → section(kpi_band, [kpis]) → chart → text → table → callout
+- Narrative → header → section(hero, [image, text]) → text → callout → table → signoff
+- Briefing → header → kpis → section(two_column, [text, text]) → callout
+- Proposal → header → text → section(comparison, [text, text]) → table → callout → signoff
+- Portfolio → header → section(hero, [image, text]) → section(gallery, [image, image, image]) → text → signoff
+
+RULES:
+- Real content only. Never emit {{...}}, TBD, [fill in]. Skip a block rather than fake data.
+- Stream one top-level block per update_document call. When inserting a section, include all its children in the section's blocks array on that one op — you can't stream children into an existing section.
+- Text blocks use markdown (# headings, **bold**, - bullets).
+- Sections can't nest and can't contain header/footer/signoff.
+`.trim()
+
+// Document design skill — injected into write_document / patch_document tool results.
+// Loaded once at module level from the skills directory bundled with agent-core.
+let _docDesignSkill: string | null = null
+async function loadDocDesignSkill(): Promise<string> {
+  if (_docDesignSkill !== null) return _docDesignSkill
+  // Bundled skills live next to this file's compiled output at dist/skills/
+  // In source: packages/agent-core/skills/document-design.md
+  const candidates = [
+    // Compiled output path (dist/skills/…)
+    join(__dirname, 'skills', 'document-design.md'),
+    // Source path for ts-node / vitest runs
+    join(__dirname, '..', 'skills', 'document-design.md'),
+  ]
+  for (const p of candidates) {
+    try {
+      _docDesignSkill = await readFile(p, 'utf-8')
+      return _docDesignSkill
+    } catch { /* try next */ }
+  }
+  // Fallback — empty string; agent still works, just without the skill context
+  _docDesignSkill = ''
+  return _docDesignSkill
+}
 
 // --- Skills ---
 const DEFAULT_SKILL_NAMES = new Set(['skill-creator', 'integration-builder', 'spreadsheet-pro', 'lead-generation'])
@@ -210,11 +302,11 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'queue_approval',
-    description: 'Queue action for user approval. Always fill ALL fields with full context.',
+    description: 'Queue a drafted action for user approval (send email, create event, delete, etc.). `detail` must contain the full draft so the user can approve as-is. NOT for asking questions or surfacing "I\'m stuck" — finish with an explanation instead. Always fill all fields.',
     input_schema: {
       type: 'object' as const,
       properties: {
-        type: { type: 'string', enum: ['task', 'document', 'message', 'request', 'other'] },
+        type: { type: 'string', enum: ['task', 'document', 'message', 'other'] },
         title: { type: 'string', description: 'Short title (e.g. "Reply to Nathan — Code Review")' },
         description: { type: 'string', description: 'What this is and why (1-2 sentences)' },
         detail: { type: 'string', description: 'Full draft content. For emails: include To, Subject, Body. For tasks: include steps. Markdown OK.' },
@@ -385,383 +477,67 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'create_document',
-    description: `Create a professional PDF. Two modes:
+    description: `Open a visual document in the Canvas pane. This tool OPENS the doc — it does NOT fill the body. Pass a \`title\` (and optionally a \`preset\`); the tool result will include a composition guide showing the block types and layout variants available. Then stream the body in with follow-up \`update_document\` insert ops so the user sees it being written live. Output is a .cadoc file you can attach to emails or other send/upload tools.
 
-TEMPLATE MODE (preferred for structured documents): Provide \`template\` + \`data\`. No markdown needed. Templates produce structurally distinct, professionally designed layouts:
-- "resume" — two-column layout, sidebar with skills/education, experience entries with dates
-- "proposal" — cover page, executive summary with accent border, scope checklist, timeline table, pricing table
-- "invoice" — INVOICE header, bill-to block, line items table with alternating rows, right-aligned totals
-- "letter" — letterhead, date, recipient address block, body paragraphs, closing/signature
-- "report" — title page, page-numbered body with section numbering (1. 1.1), running header, footnotes
-- "brief" — MEMORANDUM header, TO/FROM/DATE/RE fields, key takeaways box, action items table
-- "newsletter" — masthead banner, two-column article layout, pull quotes, section dividers
-
-MARKDOWN MODE (for freeform/custom content): Provide \`markdown\` + optionally \`style\` + \`layout\`. Write COMPLETE, DENSE content — every section should have real body text.`,
+Rules:
+- NEVER write placeholder tokens like {{TITLE}}, "TBD", "[fill in]". Real content only.
+- Stream one block per update_document call — don't batch.
+- Brand kit auto-applies from settings; don't pass it.`,
     input_schema: {
       type: 'object' as const,
       properties: {
-        filename: { type: 'string', description: 'e.g. "Q1 Report.pdf" or "John_Smith_Resume.pdf"' },
-        // Template mode
-        template: { type: 'string', enum: ['resume', 'proposal', 'invoice', 'letter', 'report', 'brief', 'newsletter'], description: 'Template name. When set, provide structured `data` instead of markdown.' },
-        data: {
-          type: 'object' as const,
-          description: `Structured data for the chosen template. Shape depends on \`template\`. REQUIRED fields (no "?") must never be omitted or empty. Arrays must have at least one item.`,
-          additionalProperties: true,
-          properties: {
-            // ── resume ────────────────────────────────────────────────────────
-            name: {
-              type: 'string',
-              description: '[resume] Full name of the candidate. REQUIRED for resume.',
-            },
-            contact: {
-              type: 'object',
-              description: '[resume] Contact details block. REQUIRED for resume.',
-              properties: {
-                email: { type: 'string' },
-                phone: { type: 'string' },
-                location: { type: 'string' },
-                linkedin: { type: 'string' },
-                website: { type: 'string' },
-              },
-            },
-            summary: {
-              type: 'string',
-              description: '[resume] 2-4 sentence professional summary. Optional for resume.',
-            },
-            experience: {
-              type: 'array',
-              description: '[resume] Work history. REQUIRED for resume. Each entry must include company, role, dates (e.g. "Jan 2021 – Mar 2024"), and at least 2 bullets describing achievements.',
-              items: {
-                type: 'object',
-                properties: {
-                  company: { type: 'string', description: 'Employer name. REQUIRED.' },
-                  role: { type: 'string', description: 'Job title. REQUIRED.' },
-                  dates: { type: 'string', description: 'Date range, e.g. "Jan 2021 – Mar 2024". REQUIRED — never omit.' },
-                  bullets: {
-                    type: 'array',
-                    description: 'Achievement bullets. REQUIRED — at least 2 per role.',
-                    items: { type: 'string' },
-                    minItems: 2,
-                  },
-                },
-                required: ['company', 'role', 'dates', 'bullets'],
-              },
-              minItems: 1,
-            },
-            skills: {
-              type: 'array',
-              description: '[resume] Skills grouped by category. REQUIRED for resume — must include at least one group. Example: [{ category: "Languages", items: ["Python", "TypeScript"] }, { category: "Tools", items: ["Docker", "Postgres"] }]',
-              items: {
-                type: 'object',
-                properties: {
-                  category: { type: 'string', description: 'Skill group label, e.g. "Languages", "Frameworks", "Tools". REQUIRED.' },
-                  items: {
-                    type: 'array',
-                    description: 'Individual skills in this category. REQUIRED — at least one item.',
-                    items: { type: 'string' },
-                    minItems: 1,
-                  },
-                },
-                required: ['category', 'items'],
-              },
-              minItems: 1,
-            },
-            education: {
-              type: 'array',
-              description: '[resume] Education history. REQUIRED for resume.',
-              items: {
-                type: 'object',
-                properties: {
-                  school: { type: 'string', description: 'Institution name. REQUIRED.' },
-                  degree: { type: 'string', description: 'Degree and field, e.g. "B.S. Computer Science". REQUIRED.' },
-                  dates: { type: 'string', description: 'Graduation year or date range, e.g. "2019" or "2015 – 2019". Optional.' },
-                },
-                required: ['school', 'degree'],
-              },
-              minItems: 1,
-            },
-            certifications: {
-              type: 'array',
-              description: '[resume] Optional list of certifications, e.g. ["AWS Certified Solutions Architect", "PMP"].',
-              items: { type: 'string' },
-            },
-            // ── proposal ─────────────────────────────────────────────────────
-            title: {
-              type: 'string',
-              description: '[proposal, report] Document or proposal title. REQUIRED for proposal and report.',
-            },
-            client: {
-              type: 'string',
-              description: '[proposal] Client name. REQUIRED for proposal.',
-            },
-            company: {
-              type: 'string',
-              description: '[proposal, invoice] Your company name. Optional.',
-            },
-            date: {
-              type: 'string',
-              description: '[proposal, invoice, letter, report] Document date, e.g. "April 3, 2026". REQUIRED for invoice and letter.',
-            },
-            scope: {
-              type: 'array',
-              description: '[proposal] Scope checklist items. REQUIRED for proposal — at least one.',
-              items: { type: 'string' },
-              minItems: 1,
-            },
-            timeline: {
-              type: 'array',
-              description: '[proposal] Project timeline phases. Optional.',
-              items: {
-                type: 'object',
-                properties: {
-                  phase: { type: 'string' },
-                  dates: { type: 'string' },
-                  description: { type: 'string' },
-                },
-                required: ['phase', 'dates'],
-              },
-            },
-            pricing: {
-              type: 'array',
-              description: '[proposal] Line items for the pricing table. REQUIRED for proposal.',
-              items: {
-                type: 'object',
-                properties: {
-                  item: { type: 'string', description: 'REQUIRED.' },
-                  description: { type: 'string' },
-                  amount: { type: 'string', description: 'Formatted amount, e.g. "$2,500". REQUIRED.' },
-                },
-                required: ['item', 'amount'],
-              },
-              minItems: 1,
-            },
-            total: {
-              type: 'string',
-              description: '[proposal, invoice] Grand total, e.g. "$10,000". REQUIRED for proposal and invoice.',
-            },
-            terms: {
-              type: 'string',
-              description: '[proposal] Payment or engagement terms. Optional.',
-            },
-            // ── invoice ───────────────────────────────────────────────────────
-            invoiceNumber: {
-              type: 'string',
-              description: '[invoice] Invoice number, e.g. "INV-0042". REQUIRED for invoice.',
-            },
-            dueDate: {
-              type: 'string',
-              description: '[invoice] Payment due date. REQUIRED for invoice.',
-            },
-            from: {
-              type: 'object',
-              description: '[invoice, letter] Sender/your details. REQUIRED for invoice and letter.',
-              properties: {
-                name: { type: 'string' },
-                company: { type: 'string' },
-                address: { type: 'string' },
-                email: { type: 'string' },
-                phone: { type: 'string' },
-              },
-            },
-            to: {
-              type: 'object',
-              description: '[invoice, letter] Recipient details. REQUIRED for invoice and letter.',
-              properties: {
-                name: { type: 'string' },
-                company: { type: 'string' },
-                address: { type: 'string' },
-                email: { type: 'string' },
-              },
-            },
-            lineItems: {
-              type: 'array',
-              description: '[invoice] Invoice line items. REQUIRED for invoice.',
-              items: {
-                type: 'object',
-                properties: {
-                  description: { type: 'string', description: 'REQUIRED.' },
-                  quantity: { type: 'number', description: 'REQUIRED.' },
-                  rate: { type: 'string', description: 'Unit rate, e.g. "$150/hr". REQUIRED.' },
-                  amount: { type: 'string', description: 'Line total. REQUIRED.' },
-                },
-                required: ['description', 'quantity', 'rate', 'amount'],
-              },
-              minItems: 1,
-            },
-            subtotal: {
-              type: 'string',
-              description: '[invoice] Subtotal before tax, e.g. "$4,800". REQUIRED for invoice.',
-            },
-            tax: {
-              type: 'string',
-              description: '[invoice] Tax amount, e.g. "$384". Optional.',
-            },
-            taxRate: {
-              type: 'string',
-              description: '[invoice] Tax rate, e.g. "8%". Optional.',
-            },
-            notes: {
-              type: 'string',
-              description: '[invoice] Footer notes or bank details. Optional.',
-            },
-            paymentTerms: {
-              type: 'string',
-              description: '[invoice] Payment terms, e.g. "Net 30". Optional.',
-            },
-            // ── letter ────────────────────────────────────────────────────────
-            salutation: {
-              type: 'string',
-              description: '[letter] Opening salutation, e.g. "Dear Ms. Johnson,". REQUIRED for letter.',
-            },
-            body: {
-              type: 'array',
-              description: '[letter, brief] Body paragraphs as an array of strings. REQUIRED for letter and brief — at least one paragraph.',
-              items: { type: 'string' },
-              minItems: 1,
-            },
-            closing: {
-              type: 'string',
-              description: '[letter] Closing phrase, e.g. "Sincerely,". REQUIRED for letter.',
-            },
-            senderName: {
-              type: 'string',
-              description: '[letter] Printed name below closing. REQUIRED for letter.',
-            },
-            senderTitle: {
-              type: 'string',
-              description: '[letter] Sender job title below name. Optional.',
-            },
-            // ── report ────────────────────────────────────────────────────────
-            subtitle: {
-              type: 'string',
-              description: '[report] Optional subtitle below the main title.',
-            },
-            author: {
-              type: 'string',
-              description: '[report] Author name. Optional.',
-            },
-            abstract: {
-              type: 'string',
-              description: '[report] Executive summary paragraph. Optional but recommended.',
-            },
-            sections: {
-              type: 'array',
-              description: '[report] Report sections. REQUIRED for report.',
-              items: {
-                type: 'object',
-                properties: {
-                  heading: { type: 'string', description: 'Section heading. REQUIRED.' },
-                  subheading: { type: 'string' },
-                  body: { type: 'string', description: 'Full section body text. REQUIRED — must be substantive.' },
-                  figures: {
-                    type: 'array',
-                    items: {
-                      type: 'object',
-                      properties: {
-                        caption: { type: 'string' },
-                        note: { type: 'string' },
-                      },
-                    },
-                  },
-                },
-                required: ['heading', 'body'],
-              },
-              minItems: 1,
-            },
-            footnotes: {
-              type: 'array',
-              description: '[report] Optional footnote strings.',
-              items: { type: 'string' },
-            },
-            // ── brief ─────────────────────────────────────────────────────────
-            re: {
-              type: 'string',
-              description: '[brief] Subject / RE field. REQUIRED for brief.',
-            },
-            keyTakeaways: {
-              type: 'array',
-              description: '[brief] Key takeaway bullets. REQUIRED for brief — at least one.',
-              items: { type: 'string' },
-              minItems: 1,
-            },
-            actionItems: {
-              type: 'array',
-              description: '[brief] Action items table. REQUIRED for brief.',
-              items: {
-                type: 'object',
-                properties: {
-                  action: { type: 'string', description: 'REQUIRED.' },
-                  owner: { type: 'string', description: 'REQUIRED.' },
-                  deadline: { type: 'string', description: 'REQUIRED.' },
-                },
-                required: ['action', 'owner', 'deadline'],
-              },
-              minItems: 1,
-            },
-            // ── newsletter ────────────────────────────────────────────────────
-            issue: {
-              type: 'string',
-              description: '[newsletter] Issue identifier, e.g. "Vol. 3, Issue 7". Optional.',
-            },
-            articles: {
-              type: 'array',
-              description: '[newsletter] Articles. REQUIRED for newsletter — at least one.',
-              items: {
-                type: 'object',
-                properties: {
-                  title: { type: 'string', description: 'Article headline. REQUIRED.' },
-                  body: { type: 'string', description: 'Article body text. REQUIRED — must be substantive.' },
-                  pullQuote: { type: 'string', description: 'Optional pull quote to highlight.' },
-                },
-                required: ['title', 'body'],
-              },
-              minItems: 1,
-            },
-            tableOfContents: {
-              type: 'array',
-              description: '[newsletter] Optional TOC entries.',
-              items: { type: 'string' },
-            },
-          },
+        title: { type: 'string', description: 'Document title, shown in Canvas header and used for the filename. e.g. "Q2 Status — Acme Corp".' },
+        preset: {
+          type: 'string',
+          enum: ['client-status', 'daily-briefing', 'marketing-audit'],
+          description: 'Optional starting template. When set, the doc opens with a branded header and you get back a plan describing which blocks to stream in via update_document.',
         },
-        // Markdown mode
-        markdown: { type: 'string', description: 'Full document markdown (markdown mode only). Formatting: # H1, ## H2, ### H3, **bold**, *italic*, - bullets, 1. numbered, | tables | (need header row + |---|---| separator). --- = horizontal rule. === = page break.' },
-        style: { type: 'string', enum: ['professional', 'minimal', 'report'], description: 'Markdown mode only. professional = dark accent, header lines, page numbers. minimal = clean. report = formal with running header.' },
-        layout: {
-          type: 'object',
-          description: 'Markdown mode only. Optional visual overrides.',
-          properties: {
-            accentColor: { type: 'string', description: 'Hex color override, e.g. "#2563eb"' },
-            columns: { type: 'number', enum: [1, 2], description: '2 = two-column body layout' },
-            density: { type: 'string', enum: ['compact', 'normal', 'spacious'] },
-            headerStyle: { type: 'string', enum: ['left', 'centered', 'banner'] },
-            tableStyle: { type: 'string', enum: ['striped', 'bordered', 'minimal'] },
-            pageNumbers: { type: 'boolean' }
-          }
-        }
+        blocks: {
+          type: 'array',
+          description: 'Optional initial blocks. Most of the time, leave this empty (or pass only a header) and stream the body in via update_document for the live-writing effect. Each block needs a unique id and type plus its type-specific fields.',
+          items: { type: 'object', additionalProperties: true },
+        },
       },
-      required: ['filename']
-    }
+      required: ['title'],
+    },
   },
   {
     name: 'update_document',
-    description: `Update an existing templated PDF document. Provide the file ID and a partial data patch — only include the fields you want to change. Arrays (experience, skills, etc.) are replaced entirely; objects (contact, from/to) are shallow-merged.
-
-Example: To update just the summary on a resume, send: { "summary": "New summary text" }
-Example: To replace all experience entries, send the full new experience array.
-Example: To update one contact field, send: { "contact": { "email": "new@email.com" } }`,
+    description: 'Edit a Canvas document that already exists. Provide the doc id (from create_document response or list_documents) and an array of ops. Each op is replace (swap one block for a new one), insert (add a block at an index), delete (remove a block), or set_title. Use this for incremental updates like refreshing a KPI strip or rewriting a text block — don\'t recreate the whole doc.',
     input_schema: {
       type: 'object' as const,
       properties: {
-        file_id: { type: 'string', description: 'ID of the document to update (from files list)' },
-        data_patch: {
-          type: 'object',
-          description: 'Partial data object with fields to change. Arrays are replaced entirely, objects are shallow-merged.',
-          additionalProperties: true
+        doc_id: { type: 'string', description: 'ID returned by create_document or list_documents.' },
+        ops: {
+          type: 'array',
+          description: 'Array of ops. Each is one of: {op:"replace", blockId, block}, {op:"insert", index, block}, {op:"delete", blockId}, {op:"set_title", title}.',
+          items: { type: 'object', additionalProperties: true },
+          minItems: 1,
         },
       },
-      required: ['file_id', 'data_patch']
-    }
+      required: ['doc_id', 'ops'],
+    },
+  },
+  {
+    name: 'list_documents',
+    description: 'List Canvas documents (.cadoc files). Use to find an existing doc to update or attach. Returns recent docs sorted by most recently updated.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        limit: { type: 'number', description: 'Max docs to return (default 20)' },
+      },
+    },
+  },
+  {
+    name: 'export_document_pdf',
+    description: 'Render a Canvas document to a PDF file and register it. Returns a coagent_file_id you can attach to any send/upload tool that accepts file attachments (email, messaging, Slack, WhatsApp, Drive, etc.). Rendering happens client-side so the PDF matches exactly what the user sees in Canvas. Call this right before attaching the finished document.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        doc_id: { type: 'string', description: 'ID of the Canvas document to export (from create_document or list_documents).' },
+      },
+      required: ['doc_id'],
+    },
   },
   {
     name: 'call_external_tool',
@@ -836,6 +612,72 @@ Example: To update one contact field, send: { "contact": { "email": "new@email.c
   },
 ]
 
+// HTML document tools — only registered when experimental.htmlDocuments is enabled.
+// Kept separate from INTERNAL_TOOLS so flag-off doesn't shift the stable tool array
+// index or disturb the API cache prefix.
+const HTML_DOC_TOOLS: Anthropic.Tool[] = [
+  {
+    name: 'write_document',
+    description: `Create or fully rewrite an HTML document in the Document pane.
+Use for: new documents, major regenerations ("make this a flyer"), full rewrites.
+For scoped edits (change a headline, update a price, swap a color), use patch_document instead.
+
+The tool result includes the full document-design skill — read it before writing any HTML.
+
+Rules:
+- Always assign stable id attributes to every top-level .sec-* and every .ed-* leaf so patch_document can address them.
+- Populate theme from the user's brand kit (brand_primary, brand_company, brand_logo from settings).
+- Real content only — no {{placeholders}}, TBD, or "fill in later".`,
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        title: { type: 'string', description: 'Document title shown in the pane header.' },
+        html: { type: 'string', description: 'Full HTML fragment using the doc vocabulary. Root element must be <div class="doc"> with all CSS variables set inline.' },
+        kind: { type: 'string', description: 'Document archetype — e.g. "proposal", "flyer", "report", "letter", "invoice". Agent picks based on intent.' },
+        theme: {
+          type: 'object',
+          description: 'Theme overrides. Partial — unset fields fall back to brand kit defaults. Keys: background, foreground, muted, mutedForeground, primary, primaryForeground, secondary, secondaryForeground, accent, accentForeground, border, radius, fontDisplay, fontBody, logoDataUri, footerText.',
+          additionalProperties: true,
+        },
+      },
+      required: ['title', 'html'],
+    },
+  },
+  {
+    name: 'patch_document',
+    description: `Apply a targeted edit to an existing HTML document.
+Use for: changing text, updating a color, adding/removing a section, adjusting theme.
+Prefer this over write_document for any scoped change.
+
+ops:
+- replace_text: set content to new plain text (target must be an .ed-* leaf)
+- replace_node: replace the entire element (target is any element with an id)
+- insert_before / insert_after: insert HTML adjacent to the target
+- delete: remove the target element
+- restyle: replace the class attribute of the target element
+- set_theme: merge theme object into doc.theme (use target_id "doc")`,
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        doc_id: { type: 'string', description: 'ID of the document to patch (from write_document response).' },
+        target_id: { type: 'string', description: 'The id attribute of the element to operate on, or "doc" for set_theme.' },
+        op: {
+          type: 'string',
+          enum: ['replace_text', 'replace_node', 'insert_before', 'insert_after', 'delete', 'restyle', 'set_theme'],
+          description: 'Operation to perform.',
+        },
+        content: { type: 'string', description: 'New content. Plain text for replace_text; HTML for replace_node / insert_*; class string for restyle. Omit for delete and set_theme.' },
+        theme: {
+          type: 'object',
+          description: 'Theme partial to merge — only for set_theme op.',
+          additionalProperties: true,
+        },
+      },
+      required: ['doc_id', 'target_id', 'op'],
+    },
+  },
+]
+
 // Map consolidated memory actions → MCP tool names
 const MEMORY_MCP_MAP: Record<string, string> = {
   search: 'search_memory', read: 'read_memory', write: 'write_memory',
@@ -874,6 +716,10 @@ const TOOL_LABELS: Record<string, string> = {
   monitor: 'Managing Monitors',
   create_document: 'Creating Document',
   update_document: 'Updating Document',
+  list_documents: 'Listing Documents',
+  export_document_pdf: 'Exporting PDF',
+  write_document: 'Creating Document',
+  patch_document: 'Updating Document',
   create_custom_integration: 'Building Integration',
   set_status_line: 'Updating Status',
   notify_user: 'Sending Notification',
@@ -1064,7 +910,14 @@ ${settings.heartbeat_interval > 0 ? `Heartbeat: every ${settings.heartbeat_inter
 
 Memory: search first (parallel, semantic) before writing. Edit existing files over creating new ones. Be selective — signal, not archive. Before saving a person or topic, verify relevance: recent activity? recurring contact? someone the user actually engages with? Skip incidental noise — one-time CC's, strangers looped into threads, form senders, names mentioned in passing. Save only what the user will still care about next week. When the user dismisses, corrects, or asks you to remove something ("don't need X", "that's old", "clean that up"), edit memory in the SAME turn — never just acknowledge. heartbeat.md defines what to check each heartbeat.${memoryFiles.length > 0 ? `\nRecent memories: ${memoryFiles.join(', ')} — search to find others.` : ''}
 Files: grep to search contents (PDF/DOCX/XLSX/text). create_folder/move to organize. get_pdf_fields + fill_pdf for fillable forms. [filename](coagent-file:ID) to open. coagent_file_ids to attach files to emails.
-Documents: create_document for new PDFs (templates: resume, proposal, invoice, letter, report, brief, newsletter). update_document to patch existing documents — only send changed fields. Prefer update over recreate.
+Documents (Canvas): create_document opens a live Canvas doc, update_document streams the body in block-by-block so the user watches it being written. Always stream — never batch the whole doc into create_document.
+  Start: { title } or { title, blocks: [header] }. Preset shortcut { preset: 'client-status'|'daily-briefing'|'marketing-audit' } exists for recurring exact-format deliverables, but compose freely by default — don't let every report look the same. Pick blocks that fit the content and vary the structure.
+  Blocks: header {eyebrow,title,subtitle}, text {markdown} (# headings, **bold**, - bullets, | tables |), kpis {items:[{label,value,delta?}]}, table {headers,rows:[{cells}]}, callout {variant:'info'|'warn'|'success'|'tip', title?, markdown}, two_column {left,right,ratio?}, image {src,caption?}, chart {kind:'bar'|'line'|'pie', data, xKey?, yKeys?, nameKey?, valueKey?}, divider, signoff {name,title?,date?}, footer {note?}.
+  update_document ops: {op:'insert',index,block}, {op:'replace',blockId,block}, {op:'delete',blockId}, {op:'set_title',title}. One block per call.
+  Agentic reports: (1) create_document, (2) gather data in parallel from memory/files/research/tools, (3) plan a structure that fits THIS content (not a fixed skeleton), (4) stream blocks in with update_document. Skip any block you lack data for.
+  NEVER emit placeholder tokens ({{TITLE}}, "TBD", "[fill in]") — real content only or skip the block.
+  list_documents: find an existing Canvas doc. export_document_pdf: render a finished doc to PDF (returns coagent_file_id) before attaching to send/upload tools.${settings.experimental?.htmlDocuments ? `
+HTML Documents (experimental): write_document creates a new HTML document rendered in the Document pane. patch_document applies targeted edits. Use write_document for new docs or full rewrites; patch_document for scoped changes (fix a headline, update a stat, change a color). Always assign stable id attributes to every .sec-* and .ed-* element. The tool result includes the full design skill — read it before writing HTML.` : ''}
 Schedule: create/update/delete/complete/list — routines (cron), tasks (one-time), followups. Call get_current_time in parallel when scheduling — never guess the date.${googleCalendarConnected ? ' Google Calendar synced — schedule(action: "list") includes Google events. To modify/delete Google events, use call_external_tool with GOOGLECALENDAR_UPDATE_EVENT or GOOGLECALENDAR_DELETE_EVENT (not the schedule tool).' : ''}
 Skills: skills(action: 'list') to see available, skills(action: 'execute', name: 'skill-name') to run. Run proactively when they match the request.
 Integrations: create_custom_integration + @integration-builder for new API integrations.
@@ -1084,6 +937,107 @@ research tool: ALWAYS present your planned queries to the user first and wait fo
 spawn_agents: run parallel sub-agents for independent tasks. Each gets its own instruction and tools (search, memory, documents) but cannot send emails or perform external actions. Use for: parallel analysis, drafting multiple versions, research + prep simultaneously.
 exa tool: use directly ONLY for get_contents (enrich specific URLs), find_similar (expand from a reference URL), or quick single lookups.
 After research, save structured findings to memory. monitor tool sets up recurring searches.` : ''}${onboardingSection}${teamRoster && teamRoster.length > 0 ? `\n\n## Team: ${teamName || 'Your Team'}\n\nYou are part of a team. Each member has their own AI agent — when you message someone, you're talking to their agent (another AI like you), not the person directly.\nMembers:\n${teamRoster.map((m: any) => `- ${m.name} (${m.role})`).join('\n')}\n\nUse send_team_message with to="name" to message their agent. You'll wait for and receive their agent's response. Omit "to" to broadcast.\nInclude agent_context with relevant background for the receiving agent.` : ''}`
+}
+
+// ── HTML document helpers ────────────────────────────────────────────────────
+
+/** Build a default DocumentTheme from the user's brand kit settings. */
+function themeFromSettings(settings: AgentSettings): DocumentTheme {
+  const primary = settings.brand_primary || '#1a2744'
+  // Derive a readable foreground for the primary swatch.
+  // Simple luminance heuristic: light colors get dark text, dark colors get white.
+  const primaryFg = isLightColor(primary) ? '#111111' : '#ffffff'
+  const secondary = settings.brand_secondary || '#6b7280'
+  const secondaryFg = isLightColor(secondary) ? '#111111' : '#ffffff'
+  return {
+    background: '#ffffff',
+    foreground: '#111111',
+    muted: '#f4f4f5',
+    mutedForeground: '#71717a',
+    primary,
+    primaryForeground: primaryFg,
+    secondary,
+    secondaryForeground: secondaryFg,
+    accent: '#e11d48',
+    accentForeground: '#ffffff',
+    border: '#e4e4e7',
+    radius: '0.5rem',
+    fontDisplay: 'system-ui, sans-serif',
+    fontBody: 'system-ui, sans-serif',
+    logoDataUri: settings.brand_logo || undefined,
+    footerText: settings.brand_company || undefined,
+  }
+}
+
+/** Very lightweight luminance check — only used for primary-foreground derivation. */
+function isLightColor(hex: string): boolean {
+  const h = hex.replace('#', '')
+  if (h.length < 6) return false
+  const r = parseInt(h.slice(0, 2), 16)
+  const g = parseInt(h.slice(2, 4), 16)
+  const b = parseInt(h.slice(4, 6), 16)
+  // WCAG relative luminance approximation
+  return (0.299 * r + 0.587 * g + 0.114 * b) > 128
+}
+
+type PatchOp = 'replace_text' | 'replace_node' | 'insert_before' | 'insert_after' | 'delete' | 'restyle'
+
+/** Apply a structural HTML patch. Returns { ok: true, html } or { ok: false, error }. */
+function applyHtmlPatch(
+  html: string,
+  targetId: string,
+  op: PatchOp,
+  content?: string,
+): { ok: true; html: string } | { ok: false; error: string } {
+  let root
+  try {
+    root = parseHtml(html, { lowerCaseTagName: true, comment: false })
+  } catch (err: any) {
+    return { ok: false, error: `Failed to parse document HTML: ${err.message}` }
+  }
+
+  // Find element by id — node-html-parser supports basic CSS selectors
+  const target = root.querySelector(`#${CSS.escape(targetId)}`)
+  if (!target || !(target instanceof HtmlElement)) {
+    return { ok: false, error: `Element with id="${targetId}" not found in document. Ensure you passed a stable id that was assigned during write_document.` }
+  }
+
+  switch (op) {
+    case 'replace_text': {
+      // Replace the text content of the node (not the whole element)
+      target.set_content(content ?? '')
+      break
+    }
+    case 'replace_node': {
+      if (!content) return { ok: false, error: 'replace_node requires content (the replacement HTML).' }
+      target.replaceWith(content)
+      break
+    }
+    case 'insert_before': {
+      if (!content) return { ok: false, error: 'insert_before requires content (the HTML to insert).' }
+      target.insertAdjacentHTML('beforebegin', content)
+      break
+    }
+    case 'insert_after': {
+      if (!content) return { ok: false, error: 'insert_after requires content (the HTML to insert).' }
+      target.insertAdjacentHTML('afterend', content)
+      break
+    }
+    case 'delete': {
+      target.remove()
+      break
+    }
+    case 'restyle': {
+      if (content === undefined) return { ok: false, error: 'restyle requires content (the new class string).' }
+      target.setAttribute('class', content)
+      break
+    }
+    default: {
+      return { ok: false, error: `Unknown op: ${op}` }
+    }
+  }
+
+  return { ok: true, html: root.toString() }
 }
 
 export class Agent {
@@ -1127,6 +1081,7 @@ export class Agent {
   public onResearchProgress?: (agents: { query: string; status: string; detail?: string }[]) => void
   public onCustomIntegration?: (action: string, data: any) => Promise<string>
   public onBroadcast?: (event: any) => void
+  public onExportDocumentPdf?: (docId: string) => Promise<{ fileId: string; filename: string }>
   public activeSkillTools = new Set<string>()
 
   async getSkills(): Promise<{ name: string; description: string; instructions: string; placeholder?: string; builtin: boolean }[]> {
@@ -1169,6 +1124,9 @@ export class Agent {
     this.teamHistoryPath = join(dataDir, 'team-history.json')
     this.agentProfilePath = join(dataDir, 'memory', 'profile.md')
     this.mcpReady = this.mcpManager.connect(mcpConfigs).catch(err => console.error('[Agent] MCP connect error:', err))
+    // Register the stdio connect so mcpManager.ready() waits for memory/exa to finish
+    // coming up before any startup-fired trigger (scheduled task, webhook) runs.
+    this.mcpManager.registerPending('stdio', this.mcpReady)
     this.loadHistory().catch(console.error)
     this.loadTeamHistory().catch(console.error)
     setToolEmbeddingsDir(dataDir)
@@ -1315,8 +1273,10 @@ export class Agent {
     onChunk?: (text: string) => void,
     onToolCall?: (tool: string, label: string) => void
   ): Promise<void> {
-    // Ensure MCP servers (memory, exa) are ready before processing
-    await this.mcpReady
+    // Ensure ALL MCP servers (stdio + composio + custom) are ready before processing.
+    // Without this, triggers firing during the first few seconds after boot — scheduled
+    // tasks, webhooks, heartbeat — can run with a partial tool list (e.g. no Gmail).
+    await this.mcpManager.ready()
 
     const isHeartbeat = trigger.source === 'heartbeat'
     const isTodoDue = trigger.source === 'todo_due' || trigger.source === 'task_due'
@@ -1407,7 +1367,9 @@ export class Agent {
     extraContent?: any[]
   ): Promise<string> {
     this.isProcessing = true
-    await this.mcpReady
+    // Wait for ALL MCP servers (including Composio HTTP) so first-message-after-boot
+    // sees Gmail/Calendar tools just like a later message would.
+    await this.mcpManager.ready()
     const resolved = await resolveSkillMentions(this.dataDir, message)
 
     // If files were attached, build a multi-part content block so Claude can see them
@@ -1615,7 +1577,11 @@ Rules:
         required: ['queries']
       }
     }] : []
-    const stableTools = [...contextTools, ...exaTools, ...researchTool].map(trimToolSchema)
+    // Add html document tools when the experimental flag is on
+    const htmlDocTools: Anthropic.Tool[] = (context !== 'heartbeat' && settings.experimental?.htmlDocuments)
+      ? HTML_DOC_TOOLS
+      : []
+    const stableTools = [...contextTools, ...exaTools, ...researchTool, ...htmlDocTools].map(trimToolSchema)
     console.log(`[Agent] Tools available: ${stableTools.map(t => t.name).join(', ')}`)
 
     let finalText = ''
@@ -2366,85 +2332,195 @@ Rules:
             result = 'Notification sent.'
 
           } else if (block.name === 'create_document') {
-            const input = block.input as { filename: string; markdown?: string; style?: string; layout?: any; template?: string; data?: any }
+            const input = block.input as { title: string; preset?: string; blocks?: DocumentBlock[] }
             try {
-              const filename = input.filename.endsWith('.pdf') ? input.filename : `${input.filename}.pdf`
-              // Pass brand kit from settings if configured
-              const brand = (settings.brand_company || settings.brand_color || settings.brand_logo)
-                ? { companyName: settings.brand_company || undefined, accentColor: settings.brand_color || undefined, logoBase64: settings.brand_logo || undefined }
-                : undefined
-              let buf: Buffer
-              if (input.template && input.data) {
-                const { renderTemplatedDocument } = await import('./document-renderer.js')
-                // Ensure discriminant field is set on data
-                const templateData = { ...input.data, template: input.template }
-                console.log(`[Agent] Template data keys:`, Object.keys(input.data))
-                console.log(`[Agent] Template data:`, JSON.stringify(input.data).slice(0, 500))
-                this.onBroadcast?.({ type: 'document_building', template: input.template, data: input.data })
-                buf = await renderTemplatedDocument(templateData as any, brand)
-                console.log(`[Agent] Created document: ${filename} (${buf.length} bytes, template: ${input.template})`)
-              } else {
-                const { renderMarkdownToPdf } = await import('./document-renderer.js')
-                const style = (input.style || 'professional') as 'professional' | 'minimal' | 'report'
-                buf = await renderMarkdownToPdf(input.markdown || '', style, filename.replace('.pdf', ''), brand, input.layout)
-                console.log(`[Agent] Created document: ${filename} (${buf.length} bytes, style: ${style})`)
+              let initialBlocks: DocumentBlock[] = Array.isArray(input.blocks) ? input.blocks : []
+              let title = input.title || 'Untitled Document'
+              let presetPlan: string | undefined
+              if (input.preset) {
+                const preset = await loadPreset(input.preset)
+                if (preset) {
+                  // Preset provides a default skeleton — user-supplied blocks (if any) override
+                  if (initialBlocks.length === 0) initialBlocks = preset.blocks
+                  if (!input.title) title = preset.title
+                  presetPlan = preset.plan
+                }
               }
-              const entry = await ingestFile(this.dataDir, filename, buf, 'application/pdf')
-              if (input.template && input.data) {
-                await updateDocumentMeta(this.dataDir, entry.id, {
-                  template: input.template,
-                  templateData: input.data,
-                  lastRenderedAt: new Date().toISOString()
-                })
-              }
-              this.onBroadcast?.({ type: 'document_ready', fileId: entry.id, filename: entry.filename })
-              result = `Document created: "${entry.filename}" (${Math.round(buf.length / 1024)}KB)\ncoagent_file_id: ${entry.id}\n\nUse this ID to attach the document to emails or share it.`
+              const doc = await createBlockDocument(this.dataDir, {
+                title,
+                blocks: initialBlocks,
+                presetId: input.preset,
+              })
+              const entry = buildBlockDocFileEntry(doc, this.dataDir)
+              await upsertBlockDocEntry(this.dataDir, entry)
+              // Stream: open the Canvas and push the initial doc
+              this.onBroadcast?.({ type: 'canvas_open', doc, streaming: true })
+              console.log(`[Agent] Created Canvas document: ${doc.title} (${doc.id}, ${doc.blocks.length} blocks)`)
+              const planSection = presetPlan
+                ? `\n\nPLAN — stream these blocks in now via update_document insert ops:\n\n${presetPlan}`
+                : ''
+              result = `Canvas document created: "${doc.title}"\ndoc_id: ${doc.id}\ncoagent_file_id: ${doc.id}${planSection}\n\n${DOC_COMPOSITION_GUIDE}`
             } catch (err: any) {
               result = `Document creation failed: ${err.message}`
               console.error('[Agent] Document creation error:', err)
             }
 
           } else if (block.name === 'update_document') {
-            const input = block.input as { file_id: string; data_patch: any }
+            const input = block.input as { doc_id: string; ops: DocumentUpdateOp[] }
             try {
-              const meta = await getDocumentMeta(this.dataDir, input.file_id)
-              if (!meta) {
-                result = 'Error: This document has no stored template data. It may have been created before update support was added, or created in markdown mode. Please use create_document to recreate it.'
+              if (!input.doc_id || !Array.isArray(input.ops) || input.ops.length === 0) {
+                result = 'Error: update_document requires doc_id and a non-empty ops array.'
               } else {
-                // Deep merge: arrays replaced, objects shallow-merged
-                const merged = { ...meta.templateData }
-                for (const [key, value] of Object.entries(input.data_patch)) {
-                  if (Array.isArray(value)) {
-                    merged[key] = value  // arrays: replace entirely
-                  } else if (value && typeof value === 'object' && !Array.isArray(value)) {
-                    merged[key] = { ...(merged[key] || {}), ...value }  // objects: shallow merge
-                  } else {
-                    merged[key] = value  // primitives: replace
-                  }
+                const updated = await updateBlockDocument(this.dataDir, input.doc_id, input.ops)
+                if (!updated) {
+                  result = `Error: no Canvas document found with id "${input.doc_id}". Use list_documents to find the right id.`
+                } else {
+                  const entry = buildBlockDocFileEntry(updated, this.dataDir)
+                  await upsertBlockDocEntry(this.dataDir, entry)
+                  this.onBroadcast?.({ type: 'canvas_update', docId: updated.id, ops: input.ops })
+                  result = `Updated "${updated.title}" (${input.ops.length} op${input.ops.length === 1 ? '' : 's'}). ${updated.blocks.length} blocks total.`
                 }
-
-                const brand = (settings.brand_company || settings.brand_color || settings.brand_logo)
-                  ? { companyName: settings.brand_company || undefined, accentColor: settings.brand_color || undefined, logoBase64: settings.brand_logo || undefined }
-                  : undefined
-
-                const { renderTemplatedDocument } = await import('./document-renderer.js')
-                const buf = await renderTemplatedDocument({ ...merged, template: meta.template }, brand)
-
-                // Overwrite existing file in place (same ID, same path)
-                await updateFileContent(this.dataDir, input.file_id, Buffer.from(buf))
-                await updateDocumentMeta(this.dataDir, input.file_id, {
-                  template: meta.template,
-                  templateData: merged,
-                  lastRenderedAt: new Date().toISOString()
-                })
-
-                const files = await listFiles(this.dataDir)
-                const updatedFile = files.find(f => f.id === input.file_id)
-                const filename = updatedFile?.filename || 'Document'
-                result = `Updated document "${filename}" (${Math.round(buf.length / 1024)}KB). File ID: ${input.file_id}`
               }
             } catch (err: any) {
               result = `Error updating document: ${err.message}`
+            }
+
+          } else if (block.name === 'list_documents') {
+            const input = block.input as { limit?: number }
+            try {
+              const limit = Math.max(1, Math.min(input.limit || 20, 100))
+              const docs = await listBlockDocuments(this.dataDir)
+              const sliced = docs.slice(0, limit)
+              if (sliced.length === 0) {
+                result = 'No Canvas documents yet.'
+              } else {
+                result = `${sliced.length} Canvas document${sliced.length === 1 ? '' : 's'}:\n` +
+                  sliced.map(d => `- ${d.title} (id: ${d.id}, updated: ${d.updatedAt}${d.presetId ? `, preset: ${d.presetId}` : ''})`).join('\n')
+              }
+            } catch (err: any) {
+              result = `Error listing documents: ${err.message}`
+            }
+
+          } else if (block.name === 'export_document_pdf') {
+            const input = block.input as { doc_id: string }
+            try {
+              if (!input.doc_id) {
+                result = 'Error: export_document_pdf requires doc_id.'
+              } else if (!this.onExportDocumentPdf) {
+                result = 'Error: PDF export is not available (no desktop client connected).'
+              } else {
+                const { fileId, filename } = await this.onExportDocumentPdf(input.doc_id)
+                result = `PDF exported: "${filename}"\ncoagent_file_id: ${fileId}\n\nAttach this id to GMAIL_SEND_EMAIL (or similar) to send it.`
+              }
+            } catch (err: any) {
+              result = `Error exporting PDF: ${err.message}`
+              console.error('[Agent] export_document_pdf error:', err)
+            }
+
+          } else if (block.name === 'write_document') {
+            const input = block.input as {
+              title: string
+              html: string
+              kind?: string
+              theme?: Partial<DocumentTheme>
+            }
+            try {
+              if (!input.title || !input.html) {
+                result = 'Error: write_document requires title and html.'
+              } else {
+                // Validate HTML before persisting
+                const validation = validateHtml(input.html)
+                if (!validation.ok) {
+                  result = JSON.stringify({
+                    error: 'invalid_html',
+                    reason: validation.reason,
+                    detail: validation.detail,
+                    hint: 'Fix the HTML and call write_document again. Check the document-design skill for the allowed vocabulary.',
+                  })
+                } else {
+                  // Build theme: brand kit defaults + caller overrides
+                  const baseTheme: DocumentTheme = themeFromSettings(settings)
+                  const mergedTheme: DocumentTheme = { ...baseTheme, ...input.theme }
+                  const doc = await createHtmlDocument(this.dataDir, {
+                    title: input.title,
+                    html: validation.html,
+                    theme: mergedTheme,
+                    kind: input.kind,
+                  })
+                  // Open the HtmlDocumentPane immediately
+                  this.onBroadcast?.({ type: 'html_doc_opened', doc })
+                  console.log(`[Agent] Created HTML document: "${doc.title}" (${doc.id})`)
+                  const skill = await loadDocDesignSkill()
+                  result = `HTML document created: "${doc.title}"\ndoc_id: ${doc.id}\n\nUse patch_document with this doc_id for targeted edits.\n\n${skill}`
+                }
+              }
+            } catch (err: any) {
+              result = `Error creating document: ${err.message}`
+              console.error('[Agent] write_document error:', err)
+            }
+
+          } else if (block.name === 'patch_document') {
+            const input = block.input as {
+              doc_id: string
+              target_id: string
+              op: 'replace_text' | 'replace_node' | 'insert_before' | 'insert_after' | 'delete' | 'restyle' | 'set_theme'
+              content?: string
+              theme?: Partial<DocumentTheme>
+            }
+            try {
+              if (!input.doc_id || !input.target_id || !input.op) {
+                result = 'Error: patch_document requires doc_id, target_id, and op.'
+              } else {
+                const doc = await readHtmlDocument(this.dataDir, input.doc_id)
+                if (!doc) {
+                  result = `Error: HTML document "${input.doc_id}" not found. Use write_document to create it first.`
+                } else if (input.op === 'set_theme') {
+                  // Theme-only update — no HTML mutation needed
+                  if (!input.theme) {
+                    result = 'Error: set_theme op requires a theme object.'
+                  } else {
+                    const updated = await updateHtmlDocument(this.dataDir, input.doc_id, { theme: input.theme })
+                    if (!updated) {
+                      result = `Error: Failed to update theme for document "${input.doc_id}".`
+                    } else {
+                      this.onBroadcast?.({ type: 'html_doc_updated', doc: updated })
+                      result = JSON.stringify({ ok: true, updated_html: updated.html })
+                    }
+                  }
+                } else {
+                  // HTML-mutating ops — parse, find target, mutate, validate, save
+                  const patchResult = applyHtmlPatch(doc.html, input.target_id, input.op, input.content)
+                  if (!patchResult.ok) {
+                    result = JSON.stringify({
+                      error: 'patch_failed',
+                      detail: patchResult.error,
+                      hint: 'Check that the target_id exists in the document and the op is valid for that element type.',
+                    })
+                  } else {
+                    // Validate patched HTML
+                    const validation = validateHtml(patchResult.html)
+                    if (!validation.ok) {
+                      result = JSON.stringify({
+                        error: 'invalid_html',
+                        reason: validation.reason,
+                        detail: validation.detail,
+                        hint: 'The patched HTML failed validation. Fix the content and retry.',
+                      })
+                    } else {
+                      const updated = await updateHtmlDocument(this.dataDir, input.doc_id, { html: validation.html })
+                      if (!updated) {
+                        result = `Error: Failed to save patch for document "${input.doc_id}".`
+                      } else {
+                        this.onBroadcast?.({ type: 'html_doc_updated', doc: updated })
+                        result = JSON.stringify({ ok: true, updated_html: updated.html })
+                      }
+                    }
+                  }
+                }
+              }
+            } catch (err: any) {
+              result = `Error patching document: ${err.message}`
+              console.error('[Agent] patch_document error:', err)
             }
 
           } else if (block.name === 'research') {
@@ -2511,70 +2587,65 @@ Rules:
                   return matched.map(t => `${t.name}: ${t.description || ''}`).join('\n') || 'No tools found.'
                 }
                 if (name === 'create_document') {
-                  const settings = await readSettings(this.dataDir)
-                  const fname = ((inp.filename as string) || 'document.pdf').endsWith('.pdf')
-                    ? (inp.filename as string)
-                    : `${inp.filename as string}.pdf`
-                  const brand = (settings.brand_company || settings.brand_color || settings.brand_logo)
-                    ? { companyName: settings.brand_company || undefined, accentColor: settings.brand_color || undefined, logoBase64: settings.brand_logo || undefined }
-                    : undefined
-                  let buf: Buffer
-                  if (inp.template && inp.data) {
-                    const { renderTemplatedDocument } = await import('./document-renderer.js')
-                    const templateData = { ...(inp.data as any), template: inp.template as string }
-                    this.onBroadcast?.({ type: 'document_building', template: inp.template, data: inp.data })
-                    buf = await renderTemplatedDocument(templateData as any, brand)
-                  } else {
-                    const { renderMarkdownToPdf } = await import('./document-renderer.js')
-                    const style = (inp.style as string) || 'professional'
-                    buf = await renderMarkdownToPdf(inp.markdown as string, style as any, fname.replace('.pdf', ''), brand, inp.layout as any)
-                  }
-                  const entry = await ingestFile(this.dataDir, fname, buf, 'application/pdf')
-                  if (inp.template && inp.data) {
-                    await updateDocumentMeta(this.dataDir, entry.id, {
-                      template: inp.template as string,
-                      templateData: inp.data,
-                      lastRenderedAt: new Date().toISOString()
-                    })
-                  }
-                  this.onBroadcast?.({ type: 'document_ready', fileId: entry.id, filename: entry.filename })
-                  return `Document created: ${entry.filename} (${buf.length} bytes). File ID: ${entry.id}`
-                }
-                if (name === 'update_document') {
-                  const fileId = inp.file_id as string
-                  const dataPatch = inp.data_patch as any
-                  const meta = await getDocumentMeta(this.dataDir, fileId)
-                  if (!meta) {
-                    return 'Error: This document has no stored template data. It may have been created before update support was added, or created in markdown mode. Please use create_document to recreate it.'
-                  }
-                  // Deep merge: arrays replaced, objects shallow-merged
-                  const merged = { ...meta.templateData }
-                  for (const [key, value] of Object.entries(dataPatch)) {
-                    if (Array.isArray(value)) {
-                      merged[key] = value
-                    } else if (value && typeof value === 'object' && !Array.isArray(value)) {
-                      merged[key] = { ...(merged[key] || {}), ...value }
-                    } else {
-                      merged[key] = value
+                  const title = (inp.title as string) || 'Untitled Document'
+                  const presetId = inp.preset as string | undefined
+                  let initialBlocks: DocumentBlock[] = Array.isArray(inp.blocks) ? (inp.blocks as DocumentBlock[]) : []
+                  let finalTitle = title
+                  let presetPlan: string | undefined
+                  if (presetId) {
+                    const preset = await loadPreset(presetId)
+                    if (preset) {
+                      if (initialBlocks.length === 0) initialBlocks = preset.blocks
+                      if (!inp.title) finalTitle = preset.title
+                      presetPlan = preset.plan
                     }
                   }
-                  const subSettings = await readSettings(this.dataDir)
-                  const brand = (subSettings.brand_company || subSettings.brand_color || subSettings.brand_logo)
-                    ? { companyName: subSettings.brand_company || undefined, accentColor: subSettings.brand_color || undefined, logoBase64: subSettings.brand_logo || undefined }
-                    : undefined
-                  const { renderTemplatedDocument } = await import('./document-renderer.js')
-                  const buf = await renderTemplatedDocument({ ...merged, template: meta.template }, brand)
-                  // Overwrite existing file in place (same ID, same path)
-                  await updateFileContent(this.dataDir, fileId, Buffer.from(buf))
-                  await updateDocumentMeta(this.dataDir, fileId, {
-                    template: meta.template,
-                    templateData: merged,
-                    lastRenderedAt: new Date().toISOString()
+                  const doc = await createBlockDocument(this.dataDir, {
+                    title: finalTitle,
+                    blocks: initialBlocks,
+                    presetId,
                   })
-                  const files = await listFiles(this.dataDir)
-                  const updatedFile = files.find(f => f.id === fileId)
-                  const filename = updatedFile?.filename || 'Document'
-                  return `Updated document "${filename}" (${Math.round(buf.length / 1024)}KB). File ID: ${fileId}`
+                  const entry = buildBlockDocFileEntry(doc, this.dataDir)
+                  await upsertBlockDocEntry(this.dataDir, entry)
+                  this.onBroadcast?.({ type: 'canvas_open', doc, streaming: true })
+                  const planSection = presetPlan
+                    ? `\n\nPLAN — stream these blocks in now via update_document insert ops. Never use placeholder tokens:\n\n${presetPlan}`
+                    : `\n\nUse update_document with this doc_id to add blocks one at a time. Never write placeholder tokens.`
+                  return `Canvas document created: "${doc.title}" (doc_id: ${doc.id}).${planSection}`
+                }
+                if (name === 'update_document') {
+                  const docId = inp.doc_id as string
+                  const ops = inp.ops as DocumentUpdateOp[]
+                  if (!docId || !Array.isArray(ops) || ops.length === 0) {
+                    return 'Error: update_document requires doc_id and a non-empty ops array.'
+                  }
+                  const updated = await updateBlockDocument(this.dataDir, docId, ops)
+                  if (!updated) {
+                    return `Error: no Canvas document found with id "${docId}".`
+                  }
+                  const entry = buildBlockDocFileEntry(updated, this.dataDir)
+                  await upsertBlockDocEntry(this.dataDir, entry)
+                  this.onBroadcast?.({ type: 'canvas_update', docId: updated.id, ops })
+                  return `Updated "${updated.title}" (${ops.length} op${ops.length === 1 ? '' : 's'}). ${updated.blocks.length} blocks total.`
+                }
+                if (name === 'list_documents') {
+                  const limit = Math.max(1, Math.min((inp.limit as number) || 20, 100))
+                  const docs = await listBlockDocuments(this.dataDir)
+                  const sliced = docs.slice(0, limit)
+                  if (sliced.length === 0) return 'No Canvas documents yet.'
+                  return `${sliced.length} Canvas document${sliced.length === 1 ? '' : 's'}:\n` +
+                    sliced.map(d => `- ${d.title} (id: ${d.id}, updated: ${d.updatedAt}${d.presetId ? `, preset: ${d.presetId}` : ''})`).join('\n')
+                }
+                if (name === 'export_document_pdf') {
+                  const docId = inp.doc_id as string
+                  if (!docId) return 'Error: export_document_pdf requires doc_id.'
+                  if (!this.onExportDocumentPdf) return 'Error: PDF export is not available (no desktop client connected).'
+                  try {
+                    const { fileId, filename } = await this.onExportDocumentPdf(docId)
+                    return `PDF exported: "${filename}"\ncoagent_file_id: ${fileId}`
+                  } catch (err: any) {
+                    return `Error exporting PDF: ${err.message}`
+                  }
                 }
                 // Files, schedule, skills — route to the main handler
                 if (name === 'files' || name === 'schedule' || name === 'skills') {
