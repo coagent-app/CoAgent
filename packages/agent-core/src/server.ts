@@ -910,6 +910,28 @@ Start simple (1-2 tools), get it working, then iterate to add more capabilities.
   }
 }
 
+function loadDocDesignSkillInstructions(): string {
+  const candidates = [
+    // Compiled output path (dist/skills/…)
+    join(__dirname, 'skills', 'document-design.md'),
+    // Source path for ts-node / vitest runs
+    join(__dirname, '..', 'skills', 'document-design.md'),
+  ]
+  for (const p of candidates) {
+    if (existsSync(p)) {
+      try { return readFileSync(p, 'utf-8') } catch { /* try next */ }
+    }
+  }
+  return ''
+}
+
+// Extend DEFAULT_SKILLS with the document-design skill loaded from disk
+DEFAULT_SKILLS['document-design'] = {
+  name: 'document-design',
+  description: 'HTML document vocabulary, anti-slop design principles, and archetypes for writing or editing HTML documents via write_document/patch_document.',
+  instructions: loadDocDesignSkillInstructions(),
+}
+
 async function writeDefaultSkills(): Promise<void> {
   const dir = join(DATA_DIR, 'skills')
   await mkdir(dir, { recursive: true })

@@ -99,32 +99,8 @@ RULES:
 - Sections can't nest and can't contain header/footer/signoff.
 `.trim()
 
-// Document design skill — injected into write_document / patch_document tool results.
-// Loaded once at module level from the skills directory bundled with agent-core.
-let _docDesignSkill: string | null = null
-async function loadDocDesignSkill(): Promise<string> {
-  if (_docDesignSkill !== null) return _docDesignSkill
-  // Bundled skills live next to this file's compiled output at dist/skills/
-  // In source: packages/agent-core/skills/document-design.md
-  const candidates = [
-    // Compiled output path (dist/skills/…)
-    join(__dirname, 'skills', 'document-design.md'),
-    // Source path for ts-node / vitest runs
-    join(__dirname, '..', 'skills', 'document-design.md'),
-  ]
-  for (const p of candidates) {
-    try {
-      _docDesignSkill = await readFile(p, 'utf-8')
-      return _docDesignSkill
-    } catch { /* try next */ }
-  }
-  // Fallback — empty string; agent still works, just without the skill context
-  _docDesignSkill = ''
-  return _docDesignSkill
-}
-
 // --- Skills ---
-const DEFAULT_SKILL_NAMES = new Set(['skill-creator', 'integration-builder', 'spreadsheet-pro', 'lead-generation'])
+const DEFAULT_SKILL_NAMES = new Set(['skill-creator', 'integration-builder', 'spreadsheet-pro', 'lead-generation', 'document-design'])
 interface Skill { name: string; description: string; instructions: string; placeholder?: string }
 
 async function skillsDir(dataDir: string): Promise<string> {
@@ -621,8 +597,7 @@ const HTML_DOC_TOOLS: Anthropic.Tool[] = [
     description: `Create or fully rewrite an HTML document in the Document pane.
 Use for: new documents, major regenerations ("make this a flyer"), full rewrites.
 For scoped edits (change a headline, update a price, swap a color), use patch_document instead.
-
-The tool result includes the full document-design skill — read it before writing any HTML.
+Call skills(action: 'execute', name: 'document-design') before writing to load vocabulary and design guidance.
 
 Rules:
 - Always assign stable id attributes to every top-level .sec-* and every .ed-* leaf so patch_document can address them.
@@ -917,7 +892,7 @@ Documents (Canvas): create_document opens a live Canvas doc, update_document str
   Agentic reports: (1) create_document, (2) gather data in parallel from memory/files/research/tools, (3) plan a structure that fits THIS content (not a fixed skeleton), (4) stream blocks in with update_document. Skip any block you lack data for.
   NEVER emit placeholder tokens ({{TITLE}}, "TBD", "[fill in]") — real content only or skip the block.
   list_documents: find an existing Canvas doc. export_document_pdf: render a finished doc to PDF (returns coagent_file_id) before attaching to send/upload tools.${settings.experimental?.htmlDocuments ? `
-HTML Documents (experimental): write_document creates a new HTML document rendered in the Document pane. patch_document applies targeted edits. Use write_document for new docs or full rewrites; patch_document for scoped changes (fix a headline, update a stat, change a color). Always assign stable id attributes to every .sec-* and .ed-* element. The tool result includes the full design skill — read it before writing HTML.` : ''}
+HTML Documents: use write_document to create, patch_document to edit. For vocabulary and design guidance, call skills(action: 'execute', name: 'document-design') before writing.` : ''}
 Schedule: create/update/delete/complete/list — routines (cron), tasks (one-time), followups. Call get_current_time in parallel when scheduling — never guess the date.${googleCalendarConnected ? ' Google Calendar synced — schedule(action: "list") includes Google events. To modify/delete Google events, use call_external_tool with GOOGLECALENDAR_UPDATE_EVENT or GOOGLECALENDAR_DELETE_EVENT (not the schedule tool).' : ''}
 Skills: skills(action: 'list') to see available, skills(action: 'execute', name: 'skill-name') to run. Run proactively when they match the request.
 Integrations: create_custom_integration + @integration-builder for new API integrations.
@@ -1068,8 +1043,6 @@ export class Agent {
   /** Memoized system prompt — only rebuilt when inputs actually change */
   private cachedSystemPrompt: string | null = null
   private cachedPromptKey: string | null = null
-  /** Tracks whether the document-design skill has been injected into a tool result this conversation */
-  private docDesignSkillInjected = false
   // Briefings removed — context now provided via search_tools context param
   public onSkillsChanged?: () => void
   public onSettingsChanged?: () => void
@@ -2452,14 +2425,7 @@ Rules:
                   // Open the HtmlDocumentPane immediately
                   this.onBroadcast?.({ type: 'html_doc_opened', doc })
                   console.log(`[Agent] Created HTML document: "${doc.title}" (${doc.id})`)
-                  const baseResult = `HTML document created: "${doc.title}"\ndoc_id: ${doc.id}\n\nUse patch_document with this doc_id for targeted edits.`
-                  if (!this.docDesignSkillInjected) {
-                    const skill = await loadDocDesignSkill()
-                    this.docDesignSkillInjected = true
-                    result = `=== DOCUMENT DESIGN SKILL ===\n\n${skill}\n\n=== TOOL RESULT ===\n\n${baseResult}`
-                  } else {
-                    result = baseResult
-                  }
+                  result = `HTML document created: "${doc.title}"\ndoc_id: ${doc.id}\n\nUse patch_document with this doc_id for targeted edits.`
                 }
               }
             } catch (err: any) {
@@ -2529,12 +2495,6 @@ Rules:
             } catch (err: any) {
               result = `Error patching document: ${err.message}`
               console.error('[Agent] patch_document error:', err)
-            }
-            // Inject design skill into the first successful patch_document result this conversation
-            if (!this.docDesignSkillInjected && !result.startsWith('Error:')) {
-              const skill = await loadDocDesignSkill()
-              this.docDesignSkillInjected = true
-              result = `=== DOCUMENT DESIGN SKILL ===\n\n${skill}\n\n=== TOOL RESULT ===\n\n${result}`
             }
 
           } else if (block.name === 'research') {
@@ -3355,7 +3315,6 @@ Rules:
   clearHistory(): void {
     this.conversationHistory = []
     this.activeSkillTools.clear()
-    this.docDesignSkillInjected = false
     this.saveHistory().catch(console.error)
   }
 }
