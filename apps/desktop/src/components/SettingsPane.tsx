@@ -666,6 +666,49 @@ function AdminTab({
 
 // --- Brand tab ---
 
+function ColorPickerRow({
+  value,
+  defaultValue,
+  placeholder,
+  clearable,
+  onChange,
+}: {
+  value: string
+  defaultValue: string
+  placeholder?: string
+  clearable?: boolean
+  onChange: (v: string) => void
+}) {
+  return (
+    <div className="flex items-center gap-3">
+      <input
+        type="color"
+        value={value || defaultValue}
+        onChange={e => onChange(e.target.value)}
+        className="w-9 h-9 rounded-lg border border-neutral-200 dark:border-neutral-700 cursor-pointer p-0.5 bg-transparent"
+      />
+      <Input
+        value={value}
+        onChange={e => {
+          const v = e.target.value
+          if (/^#[0-9a-fA-F]{0,6}$/.test(v) || v === '') onChange(v)
+        }}
+        placeholder={placeholder || defaultValue}
+        className="text-[13px] h-9 w-32 font-mono"
+      />
+      {clearable && value && (
+        <button
+          type="button"
+          onClick={() => onChange('')}
+          className="text-[11px] text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300"
+        >
+          Clear
+        </button>
+      )}
+    </div>
+  )
+}
+
 function BrandTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate: (patch: Partial<AgentSettings>) => void }) {
   const [dragOver, setDragOver] = useState(false)
   const [uploading, setUploading] = useState(false)
@@ -709,33 +752,32 @@ function BrandTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate: (
         />
       </FieldRow>
 
-      <FieldRow label="Accent Color">
-        <div className="flex items-center gap-3">
-          <input
-            type="color"
-            value={settings.brand_color || '#1a2744'}
-            onChange={e => onUpdate({ brand_color: e.target.value })}
-            className="w-9 h-9 rounded-lg border border-neutral-200 dark:border-neutral-700 cursor-pointer p-0.5 bg-transparent"
-          />
-          <Input
-            value={settings.brand_color}
-            onChange={e => {
-              const v = e.target.value
-              if (/^#[0-9a-fA-F]{0,6}$/.test(v) || v === '') onUpdate({ brand_color: v })
-            }}
-            placeholder="#1a2744"
-            className="text-[13px] h-9 w-32 font-mono"
-          />
-          {settings.brand_color && (
-            <button
-              type="button"
-              onClick={() => onUpdate({ brand_color: '' })}
-              className="text-[11px] text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300"
-            >
-              Reset
-            </button>
-          )}
-        </div>
+      <FieldRow label="Primary Color">
+        <ColorPickerRow
+          value={settings.brand_primary}
+          defaultValue="#1a2744"
+          onChange={v => onUpdate({ brand_primary: v })}
+        />
+      </FieldRow>
+
+      <FieldRow label="Secondary Color">
+        <ColorPickerRow
+          value={settings.brand_secondary}
+          defaultValue="#8b5cf6"
+          placeholder="Optional"
+          clearable
+          onChange={v => onUpdate({ brand_secondary: v })}
+        />
+      </FieldRow>
+
+      <FieldRow label="Tertiary Color">
+        <ColorPickerRow
+          value={settings.brand_tertiary}
+          defaultValue="#10b981"
+          placeholder="Optional"
+          clearable
+          onChange={v => onUpdate({ brand_tertiary: v })}
+        />
       </FieldRow>
 
       <FieldRow label="Logo">
@@ -816,7 +858,7 @@ function BrandTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate: (
       </FieldRow>
 
       {/* Preview */}
-      {(settings.brand_company || settings.brand_color || logoSrc) && (
+      {(settings.brand_company || settings.brand_primary || logoSrc) && (
         <>
           <Separator className="my-5" />
           <p className="text-[11px] font-semibold text-neutral-400 dark:text-neutral-500 uppercase tracking-widest mb-3">Preview</p>
@@ -826,11 +868,11 @@ function BrandTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate: (
             )}
             <div
               className="h-1 rounded-full mb-3"
-              style={{ backgroundColor: settings.brand_color || '#1a2744', width: '100%' }}
+              style={{ backgroundColor: settings.brand_primary || '#1a2744', width: '100%' }}
             />
             <h3
               className="text-[16px] font-bold mb-1"
-              style={{ color: settings.brand_color || '#1a2744' }}
+              style={{ color: settings.brand_primary || '#1a2744' }}
             >
               Sample Document Title
             </h3>
