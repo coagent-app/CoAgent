@@ -5,12 +5,13 @@
 // a same-origin iframe for style isolation and PDF export (window.print).
 
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
-import { X, Download, Loader2 } from 'lucide-react'
+import { X, Download, Save, Loader2 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { Canvas, AgentSettings } from '@coagent/shared'
 import { buildBrandCSS, brandFromSettings } from '@/lib/canvas-brand'
+import { renderCanvasPdf } from '@/lib/canvas-pdf'
 
 interface Props {
   canvas: Canvas
@@ -18,14 +19,16 @@ interface Props {
   streamingCode?: string
   settings: AgentSettings | null | undefined
   onClose: () => void
+  onSaveToFiles?: (filename: string, mimeType: string, data: string) => void
 }
 
 // Debounce interval for streaming updates (ms)
 const STREAM_DEBOUNCE_MS = 120
 
-export function CanvasPane({ canvas, streaming = false, streamingCode, settings, onClose }: Props) {
+export function CanvasPane({ canvas, streaming = false, streamingCode, settings, onClose, onSaveToFiles }: Props) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const [debouncedCode, setDebouncedCode] = useState<string>(canvas.code || '')
+  const [saving, setSaving] = useState(false)
 
   const brand = useMemo(() => brandFromSettings(settings), [
     settings?.brand_company,
@@ -122,6 +125,28 @@ ${markdownHtml}
     }
   }, [])
 
+  const handleSaveToFiles = useCallback(async () => {
+    if (!onSaveToFiles || saving) return
+    setSaving(true)
+    try {
+      const blob = await renderCanvasPdf(canvas.code, brand, canvas.title)
+      const reader = new FileReader()
+      reader.onload = () => {
+        const base64 = (reader.result as string).split(',')[1] ?? ''
+        onSaveToFiles(`${canvas.title || 'document'}.pdf`, 'application/pdf', base64)
+        setSaving(false)
+      }
+      reader.onerror = () => {
+        console.error('[CanvasPane] FileReader error')
+        setSaving(false)
+      }
+      reader.readAsDataURL(blob)
+    } catch (err) {
+      console.error('[CanvasPane] save to files failed:', err)
+      setSaving(false)
+    }
+  }, [onSaveToFiles, saving, canvas.code, canvas.title, brand])
+
   return (
     <div className="flex flex-col h-full w-full max-w-[760px] border-l border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-950 relative">
       {/* Toolbar */}
@@ -146,6 +171,17 @@ ${markdownHtml}
             <Download size={12} />
             Export PDF
           </button>
+          {onSaveToFiles && (
+            <button
+              onClick={handleSaveToFiles}
+              disabled={saving}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11.5px] font-medium text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors disabled:opacity-50"
+              title="Save PDF to Files"
+            >
+              {saving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+              Save
+            </button>
+          )}
           <button
             onClick={onClose}
             className="p-1 rounded-md text-neutral-500 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"

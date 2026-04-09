@@ -148,6 +148,7 @@ export interface FileEntry {
   summary: string       // AI-written 2-3 sentence description
   group: string         // agent-assigned folder name e.g. "Contracts"
   sizeBytes: number
+  transcript?: string   // whisper transcription for audio/video files
 }
 
 export type WSClientMessage =
@@ -291,6 +292,7 @@ export type WSServerMessage =
   | { type: 'canvas_updated'; canvas: Canvas }
   | { type: 'canvas_streaming'; canvasId: string; title?: string; partialCode: string }
   | { type: 'canvas_error'; canvasId?: string; message: string }
+  | { type: 'canvas_save_to_files'; canvasId: string; title: string; code: string }
   | { type: 'python_run'; requestId: string; conversationId: string; code: string; timeoutMs?: number }
   | { type: 'code_cell_start'; cellId: string; code: string }
   | { type: 'code_cell_event'; cellId: string; event: PythonEvent }

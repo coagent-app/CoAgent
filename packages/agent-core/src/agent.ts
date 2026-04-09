@@ -496,6 +496,7 @@ Rules:
         title: { type: 'string', description: 'Canvas title shown in the pane header.' },
         code: { type: 'string', description: 'Full markdown document. GFM syntax with optional Mermaid fenced blocks.' },
         kind: { type: 'string', description: 'Document archetype — e.g. "proposal", "flyer", "report", "letter", "invoice", "dashboard". Agent picks based on intent.' },
+        save_to_files: { type: 'boolean', description: 'If true, also save the canvas as a PDF file in the user\'s files.' },
       },
       required: ['title', 'code'],
     },
@@ -509,6 +510,7 @@ Rules:
         canvas_id: { type: 'string', description: 'ID of the canvas to patch (from write_canvas response).' },
         code: { type: 'string', description: 'Full new markdown content. Replaces existing content entirely.' },
         title: { type: 'string', description: 'Optional new title.' },
+        save_to_files: { type: 'boolean', description: 'If true, also save the canvas as a PDF file in the user\'s files.' },
       },
       required: ['canvas_id', 'code'],
     },
@@ -2218,6 +2220,7 @@ Rules:
               title: string
               code: string
               kind?: string
+              save_to_files?: boolean
             }
             try {
               if (!input.title || !input.code) {
@@ -2229,6 +2232,9 @@ Rules:
                   kind: input.kind,
                 })
                 this.onBroadcast?.({ type: 'canvas_opened', canvas })
+                if (input.save_to_files) {
+                  this.onBroadcast?.({ type: 'canvas_save_to_files', canvasId: canvas.id, title: canvas.title, code: canvas.code })
+                }
                 console.log(`[Agent] Created canvas: "${canvas.title}" (${canvas.id})`)
                 result = `Canvas created: "${canvas.title}"\ncanvas_id: ${canvas.id}\n\nUse patch_canvas with this canvas_id for iterations.`
               }
@@ -2242,6 +2248,7 @@ Rules:
               canvas_id: string
               code: string
               title?: string
+              save_to_files?: boolean
             }
             try {
               if (!input.canvas_id || !input.code) {
@@ -2255,6 +2262,9 @@ Rules:
                   result = `Error: Canvas "${input.canvas_id}" not found. Use write_canvas to create it first.`
                 } else {
                   this.onBroadcast?.({ type: 'canvas_updated', canvas: updated })
+                  if (input.save_to_files) {
+                    this.onBroadcast?.({ type: 'canvas_save_to_files', canvasId: updated.id, title: updated.title, code: updated.code })
+                  }
                   result = `Canvas updated: "${updated.title}"`
                 }
               }

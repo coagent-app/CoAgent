@@ -133,6 +133,7 @@ export default function App() {
                 streamingCode={canvasStreamingCode || undefined}
                 settings={settings}
                 onClose={closeCanvas}
+                onSaveToFiles={ingestFile}
               />
             )}
           </div>

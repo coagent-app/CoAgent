@@ -419,6 +419,27 @@ export function useAgent() {
           const s = msg as any
           setTeamStatus(s.status === 'idle' ? null : { status: s.status, from: s.from })
         }
+        if ((msg as any).type === 'canvas_save_to_files') {
+          const m = msg as any
+          import('@/lib/canvas-pdf').then(({ renderCanvasPdf }) => {
+            import('@/lib/canvas-brand').then(({ brandFromSettings }) => {
+              const brand = brandFromSettings(settingsRef.current)
+              renderCanvasPdf(m.code, brand, m.title).then((blob: Blob) => {
+                const reader = new FileReader()
+                reader.onload = () => {
+                  const base64 = (reader.result as string).split(',')[1] ?? ''
+                  wsRef.current?.send(JSON.stringify({
+                    type: 'ingest_file',
+                    filename: `${m.title || 'document'}.pdf`,
+                    mimeType: 'application/pdf',
+                    data: base64,
+                  }))
+                }
+                reader.readAsDataURL(blob)
+              }).catch((err: unknown) => console.error('[useAgent] canvas_save_to_files error:', err))
+            })
+          })
+        }
         if (msg.type === 'canvas_opened' || msg.type === 'canvas_updated') {
           setCanvas(msg.canvas)
           setCanvasVisible(true)
