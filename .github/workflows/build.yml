@@ -98,7 +98,7 @@ jobs:
               cmake -B build -DCMAKE_OSX_ARCHITECTURES=arm64 -DWHISPER_METAL=ON -DCMAKE_BUILD_TYPE=Release
               ;;
             x86_64-apple-darwin)
-              cmake -B build -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_BUILD_TYPE=Release
+              cmake -B build -DCMAKE_OSX_ARCHITECTURES=x86_64 -DGGML_NATIVE=OFF -DGGML_METAL=OFF -DCMAKE_BUILD_TYPE=Release
               ;;
           esac
           cmake --build build --target whisper-cli -j$(sysctl -n hw.logicalcpu)
