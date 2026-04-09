@@ -52,6 +52,7 @@ type WorkerOutMessage =
   | { type: 'init_error'; error: string }
   | { type: 'stdout'; requestId: string; line: string }
   | { type: 'stderr'; requestId: string; line: string }
+  | { type: 'image'; requestId: string; dataUrl: string }
   | { type: 'done'; requestId: string; resultRepr?: string; durationMs: number }
   | { type: 'error'; requestId: string; errorType: string; message: string; traceback: string }
 
@@ -72,6 +73,45 @@ async function init() {
     const mod = await import(/* @vite-ignore */ pyodideUrl)
     const loadPyodide = mod.loadPyodide as (opts: { indexURL: string }) => Promise<PyodideAPI>
     pyodide = await loadPyodide({ indexURL })
+
+    // Force matplotlib to use the non-interactive 'agg' backend before any
+    // user code runs. The default 'webagg' backend tries to import `document`
+    // from the `js` module, which doesn't exist inside a Web Worker.
+    // Also monkey-patch plt.show() to capture figures as base64 PNG and send
+    // them to the main thread as image messages.
+    await pyodide.runPythonAsync(`
+import matplotlib
+matplotlib.use('agg')
+
+def _setup_chart_capture():
+    import matplotlib.pyplot as _plt
+    import io as _io
+    import base64 as _b64
+    from js import postMessage
+    from pyodide.ffi import to_js
+
+    _original_show = _plt.show
+
+    def _capturing_show(*args, **kwargs):
+        for fig_num in _plt.get_fignums():
+            fig = _plt.figure(fig_num)
+            buf = _io.BytesIO()
+            fig.savefig(buf, format='png', dpi=150, bbox_inches='tight',
+                        facecolor='white', edgecolor='none')
+            buf.seek(0)
+            b64 = _b64.b64encode(buf.read()).decode('ascii')
+            data_url = f'data:image/png;base64,{b64}'
+            buf.close()
+            req_id = globals().get('_current_request_id', '')
+            postMessage(to_js({"type": "image", "requestId": req_id, "dataUrl": data_url}))
+        _plt.close('all')
+
+    _plt.show = _capturing_show
+
+_setup_chart_capture()
+del _setup_chart_capture
+`)
+
     post({ type: 'ready' })
   } catch (err) {
     post({ type: 'init_error', error: err instanceof Error ? err.message : String(err) })
@@ -92,6 +132,9 @@ async function execute(requestId: string, code: string) {
 
   currentRequestId = requestId
   const startedAt = performance.now()
+
+  // Set requestId in Python globals so plt.show() capture includes it
+  pyodide.globals.set('_current_request_id', requestId)
 
   // Wire stdout/stderr to stream lines back to the main thread.
   // batched fires once per print() call (or chunk of output).

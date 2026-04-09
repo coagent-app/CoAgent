@@ -89,6 +89,22 @@ jobs:
           workspaces: apps/desktop/src-tauri
           key: ${{ matrix.rust-target }}
 
+      - name: Compile whisper sidecar
+        run: |
+          git clone --depth 1 https://github.com/ggerganov/whisper.cpp /tmp/whisper.cpp
+          cd /tmp/whisper.cpp
+          case "${{ matrix.rust-target }}" in
+            aarch64-apple-darwin)
+              cmake -B build -DCMAKE_OSX_ARCHITECTURES=arm64 -DWHISPER_METAL=ON -DCMAKE_BUILD_TYPE=Release
+              ;;
+            x86_64-apple-darwin)
+              cmake -B build -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_BUILD_TYPE=Release
+              ;;
+          esac
+          cmake --build build --target whisper-cli -j$(sysctl -n hw.logicalcpu)
+          cp build/bin/whisper-cli $GITHUB_WORKSPACE/apps/desktop/src-tauri/binaries/whisper-${{ matrix.rust-target }}
+          chmod +x $GITHUB_WORKSPACE/apps/desktop/src-tauri/binaries/whisper-${{ matrix.rust-target }}
+
       # macOS: Import signing certificate
       - name: Import Apple certificate
         env:
@@ -128,11 +144,12 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           ENTITLEMENTS="apps/desktop/src-tauri/Entitlements.plist"
-          # Sign coagent-server, coagent-memory, and bundled node for this target
+          # Sign coagent-server, coagent-memory, bundled node, and whisper for this target
           for bin in \
             apps/desktop/src-tauri/binaries/coagent-server-${{ matrix.rust-target }} \
             apps/desktop/src-tauri/binaries/coagent-memory-${{ matrix.rust-target }} \
-            apps/desktop/src-tauri/binaries/node-${{ matrix.rust-target }}; do
+            apps/desktop/src-tauri/binaries/node-${{ matrix.rust-target }} \
+            apps/desktop/src-tauri/binaries/whisper-${{ matrix.rust-target }}; do
             if [ ! -f "$bin" ]; then continue; fi
             echo "Signing $bin"
             codesign --force --options runtime --entitlements "$ENTITLEMENTS" \

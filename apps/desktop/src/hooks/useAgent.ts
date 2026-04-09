@@ -20,6 +20,7 @@ export interface CodeCell {
   status: 'running' | 'done' | 'error' | 'cancelled'
   stdout: string
   stderr: string
+  images?: string[]
   resultRepr?: string
   errorType?: string
   errorMessage?: string
@@ -65,6 +66,7 @@ export function useAgent() {
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const reconnectDelay = useRef(RECONNECT_BASE)
+  const processingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pollIntervals = useRef<ReturnType<typeof setInterval>[]>([])
   const recentIngestedFiles = useRef<{ id: string; filename: string }[]>([])
   const wasStreamingRef = useRef(false)
@@ -107,7 +109,7 @@ export function useAgent() {
   const [teamStatus, setTeamStatus] = useState<{ status: 'processing' | 'idle'; from?: string } | null>(null)
   const [triggerPrompt, setTriggerPrompt] = useState<Integration | null>(null)
   const [googleCalendarStatus, setGoogleCalendarStatus] = useState<{ connected: boolean; calendars: GoogleCalendarInfo[]; lastSync: string | null }>({ connected: false, calendars: [], lastSync: null })
-  // Canvas state (react-runner artifact)
+  // Canvas state
   const [canvas, setCanvas] = useState<Canvas | null>(null)
   const [canvasVisible, setCanvasVisible] = useState(false)
   const [canvasStreamingCode, setCanvasStreamingCode] = useState<string | null>(null)
@@ -261,6 +263,7 @@ export function useAgent() {
           }
           setThinking(false)
           setToolLabel(null)
+          if (processingTimeoutRef.current) { clearTimeout(processingTimeoutRef.current); processingTimeoutRef.current = null }
           setProcessing(false)
           // Dismiss voice pill if it was active (covers both normal completion and stop)
           if ((window as any).__voiceActive) {
@@ -273,6 +276,7 @@ export function useAgent() {
           setStreamingText(null)
           setThinking(false)
           setToolLabel(null)
+          if (processingTimeoutRef.current) { clearTimeout(processingTimeoutRef.current); processingTimeoutRef.current = null }
           setProcessing(false)
           if ((window as any).__voiceActive) {
             ;(window as any).__voiceActive = false
@@ -415,41 +419,30 @@ export function useAgent() {
           const s = msg as any
           setTeamStatus(s.status === 'idle' ? null : { status: s.status, from: s.from })
         }
-        if ((msg as any).type === 'canvas_opened') {
-          const { canvas: c } = msg as any
-          setCanvas(c as Canvas)
+        if (msg.type === 'canvas_opened' || msg.type === 'canvas_updated') {
+          setCanvas(msg.canvas)
           setCanvasVisible(true)
           setCanvasStreaming(false)
           setCanvasStreamingCode(null)
         }
-        if ((msg as any).type === 'canvas_updated') {
-          const { canvas: c } = msg as any
-          setCanvas(c as Canvas)
-          // Auto-open the pane if hidden (agent patched while closed)
-          setCanvasVisible(true)
-          setCanvasStreaming(false)
-          setCanvasStreamingCode(null)
-        }
-        if ((msg as any).type === 'canvas_streaming') {
-          const m = msg as any
+        if (msg.type === 'canvas_streaming') {
           // Show the pane immediately with a synthetic placeholder canvas so
           // the user sees the draft materialize in real time. When the tool
           // call finishes, canvas_opened will replace this with the persisted
           // canvas from disk.
-          setCanvas(prev => prev && prev.id === m.canvasId ? prev : {
-            id: m.canvasId,
-            title: m.title || 'Drafting…',
+          setCanvas(prev => prev && prev.id === msg.canvasId ? prev : {
+            id: msg.canvasId,
+            title: msg.title || 'Drafting…',
             code: '',
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
+            createdAt: '',
+            updatedAt: '',
           })
-          setCanvasStreamingCode(m.partialCode || '')
+          setCanvasStreamingCode(msg.partialCode || '')
           setCanvasStreaming(true)
           setCanvasVisible(true)
         }
-        if ((msg as any).type === 'canvas_error') {
-          const m = msg as any
-          setError(m.message || 'Canvas error')
+        if (msg.type === 'canvas_error') {
+          setError(msg.message || 'Canvas error')
           setTimeout(() => setError(null), 5000)
         }
         if ((msg as any).type === 'python_run') {
@@ -494,6 +487,8 @@ export function useAgent() {
                 if (ws?.readyState === WebSocket.OPEN) {
                   ws.send(JSON.stringify({ type: 'python_event', requestId: cellId, event: { type: 'stderr', line: event.line } }))
                 }
+              } else if (event.type === 'image') {
+                setCodeCells(prev => prev[cellId] ? { ...prev, [cellId]: { ...prev[cellId], images: [...(prev[cellId].images || []), event.dataUrl] } } : prev)
               } else if (event.type === 'done') {
                 setCodeCells(prev => prev[cellId] ? { ...prev, [cellId]: { ...prev[cellId], status: 'done', resultRepr: event.resultRepr, durationMs: event.durationMs } } : prev)
                 if (ws?.readyState === WebSocket.OPEN) {
@@ -548,6 +543,7 @@ export function useAgent() {
     return () => {
       unmounted = true
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current)
+      if (processingTimeoutRef.current) { clearTimeout(processingTimeoutRef.current); processingTimeoutRef.current = null }
       pollIntervals.current.forEach(clearInterval)
       wsRef.current?.close()
     }
@@ -622,6 +618,14 @@ export function useAgent() {
 
   const chat = useCallback((message: string) => {
     setProcessing(true)
+    // Safety net: if the WebSocket dies mid-flight the server never responds,
+    // so processing would stay true forever. Auto-reset after 120 s.
+    if (processingTimeoutRef.current) clearTimeout(processingTimeoutRef.current)
+    processingTimeoutRef.current = setTimeout(() => {
+      console.warn('[useAgent] processing timeout — auto-resetting (WS may have dropped)')
+      processingTimeoutRef.current = null
+      setProcessing(false)
+    }, 120_000)
     setMessages(prev => [...prev, { role: 'user' as const, content: message, timestamp: new Date().toISOString() }].slice(-100))
     const fileIds = recentIngestedFiles.current.map(f => f.id)
     recentIngestedFiles.current = []
@@ -653,6 +657,7 @@ export function useAgent() {
     setThinking(false)
     setStreamingText(null)
     setToolLabel(null)
+    if (processingTimeoutRef.current) { clearTimeout(processingTimeoutRef.current); processingTimeoutRef.current = null }
     setProcessing(false)
     // Always reset voice pill state
     if ((window as any).__voiceActive) {

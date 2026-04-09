@@ -5,6 +5,7 @@ import { join, extname, basename, dirname } from 'path'
 import type { FileEntry } from '@coagent/shared'
 import { getRelayConfig } from './auth.js'
 import { recordUsage, recordUsageGlobal } from './usage-tracker.js'
+import { transcribeFile } from './transcribe.js'
 
 const INDEX_FILE = 'file-index.json'
 const FILES_DIR = 'files'
@@ -617,6 +618,17 @@ export async function ingestFile(
   const filePath = join(targetDir, safeFilename)
   await writeFile(filePath, buffer)
 
+  // Fire-and-forget transcription for media files — don't block file ingest
+  if (isMedia) {
+    transcribeFile(filePath, dataDir).then(transcript => {
+      if (transcript) {
+        console.log(`[FileStore] Transcription complete for ${safeFilename} (${transcript.length} chars)`)
+      }
+    }).catch(err => {
+      console.warn(`[FileStore] Transcription failed for ${safeFilename}:`, err.message)
+    })
+  }
+
   // Embed the summary (fall back gracefully if no relay)
   let embedding: number[] = []
   if (getOpenAIProxy()) {
@@ -861,9 +873,17 @@ async function extractText(entry: FileIndexEntry): Promise<string | null> {
         return wb.SheetNames.map(s => XLSX.utils.sheet_to_csv(wb.Sheets[s])).join('\n')
       } catch { return null }
     }
-    // Images/video/audio — not searchable
+    // Images/video/audio — check for transcript file, otherwise not searchable
     const binaryExts = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v', '.wmv', '.flv', '.mp3', '.m4a', '.wav', '.aac', '.ogg']
-    if (binaryExts.includes(ext)) return null
+    if (binaryExts.includes(ext)) {
+      // Check for transcript file created by the transcription pipeline
+      const transcriptPath = entry.path + '.transcript.txt'
+      try {
+        const transcript = await readFile(transcriptPath, 'utf-8')
+        if (transcript.trim()) return transcript
+      } catch { /* no transcript yet */ }
+      return null
+    }
     const text = buffer.toString('utf-8')
     const binaryCount = (text.slice(0, 500).match(/[\x00-\x08\x0e-\x1f\x7f-\x9f]/g) ?? []).length
     if (binaryCount > 50) return null

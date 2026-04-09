@@ -76,12 +76,24 @@ export async function runSubAgents(
     }))
   )
 
+  const PER_AGENT_CAP = 8000
+  const COMBINED_CAP = 32000
+
   const combined = results
-    .map((r, i) => `### ${capped[i].label}\n${r}`)
+    .map((r, i) => {
+      const capped_result = r.length > PER_AGENT_CAP
+        ? r.slice(0, PER_AGENT_CAP) + `\n[Truncated: result exceeded ${PER_AGENT_CAP} chars]`
+        : r
+      return `### ${capped[i].label}\n${capped_result}`
+    })
     .join('\n\n---\n\n')
 
-  console.log(`[SubAgent] All ${capped.length} done — ${combined.length} chars total`)
-  return combined
+  const finalResult = combined.length > COMBINED_CAP
+    ? combined.slice(0, COMBINED_CAP) + `\n\n[Combined result truncated at ${COMBINED_CAP} chars]`
+    : combined
+
+  console.log(`[SubAgent] All ${capped.length} done — ${finalResult.length} chars total`)
+  return finalResult
 }
 
 async function runSingle(

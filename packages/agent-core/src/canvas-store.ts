@@ -2,8 +2,7 @@
 // document architecture.
 // See docs/plans/2026-04-08-react-runner-artifacts-design.md for the full design.
 
-import { readFile, writeFile, mkdir, unlink, rename } from 'fs/promises'
-import { existsSync } from 'fs'
+import { readFile, readdir, writeFile, mkdir, unlink, rename } from 'fs/promises'
 import { join } from 'path'
 import type { Canvas } from '@coagent/shared'
 
@@ -27,10 +26,15 @@ function canvasPath(dataDir: string, id: string): string {
 // both create `<path>.tmp`; the first rename wins, the second ENOENTs.
 const writeLocks = new Map<string, Promise<void>>()
 
+let canvasDirCreated = false
+
 async function writeCanvasAtomic(path: string, canvas: Canvas): Promise<void> {
   const prev = writeLocks.get(path) || Promise.resolve()
   const next = prev.catch(() => {}).then(async () => {
-    await mkdir(join(path, '..'), { recursive: true })
+    if (!canvasDirCreated) {
+      await mkdir(join(path, '..'), { recursive: true })
+      canvasDirCreated = true
+    }
     const tmpPath = `${path}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`
     await writeFile(tmpPath, JSON.stringify(canvas, null, 2), 'utf-8')
     await rename(tmpPath, path)
@@ -74,10 +78,8 @@ export async function readCanvas(
   dataDir: string,
   id: string,
 ): Promise<Canvas | null> {
-  const path = canvasPath(dataDir, id)
-  if (!existsSync(path)) return null
   try {
-    const raw = await readFile(path, 'utf-8')
+    const raw = await readFile(canvasPath(dataDir, id), 'utf-8')
     return JSON.parse(raw) as Canvas
   } catch {
     return null
@@ -98,9 +100,10 @@ export async function updateCanvas(
   const canvas = await readCanvas(dataDir, id)
   if (!canvas) return null
 
-  // Snapshot current code into versions before mutating
-  const snapshot = { savedAt: canvas.updatedAt, code: canvas.code }
-  const versions = [snapshot, ...(canvas.versions || [])].slice(0, MAX_VERSIONS)
+  // Only snapshot when code actually changes
+  const versions = patch.code !== undefined && patch.code !== canvas.code
+    ? [{ savedAt: canvas.updatedAt, code: canvas.code }, ...(canvas.versions || [])].slice(0, MAX_VERSIONS)
+    : (canvas.versions || [])
 
   const updated: Canvas = {
     ...canvas,
@@ -119,32 +122,31 @@ export async function listCanvases(
   dataDir: string,
 ): Promise<Array<{ id: string; title: string; kind?: string; createdAt: string; updatedAt: string }>> {
   const dir = join(dataDir, CANVASES_DIR)
-  if (!existsSync(dir)) return []
-  const { readdir } = await import('fs/promises')
-  const entries = await readdir(dir)
-  const canvases: Array<{ id: string; title: string; kind?: string; createdAt: string; updatedAt: string }> = []
-  for (const file of entries) {
-    if (!file.endsWith('.canvas')) continue
-    const id = file.replace(/\.canvas$/, '')
-    const canvas = await readCanvas(dataDir, id)
-    if (canvas) {
-      canvases.push({
-        id: canvas.id,
-        title: canvas.title,
-        kind: canvas.kind,
-        createdAt: canvas.createdAt,
-        updatedAt: canvas.updatedAt,
-      })
-    }
+  let entries: string[]
+  try {
+    entries = await readdir(dir)
+  } catch {
+    return []
   }
+  const canvasFiles = entries.filter(f => f.endsWith('.canvas'))
+  const results = await Promise.all(
+    canvasFiles.map(async (file) => {
+      const id = file.replace(/\.canvas$/, '')
+      const canvas = await readCanvas(dataDir, id)
+      if (!canvas) return null
+      return { id: canvas.id, title: canvas.title, kind: canvas.kind, createdAt: canvas.createdAt, updatedAt: canvas.updatedAt }
+    }),
+  )
   // Most recent first
-  canvases.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-  return canvases
+  return results.filter((c): c is NonNullable<typeof c> => c !== null)
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
 }
 
 export async function deleteCanvas(dataDir: string, id: string): Promise<boolean> {
-  const path = canvasPath(dataDir, id)
-  if (!existsSync(path)) return false
-  await unlink(path)
-  return true
+  try {
+    await unlink(canvasPath(dataDir, id))
+    return true
+  } catch {
+    return false
+  }
 }

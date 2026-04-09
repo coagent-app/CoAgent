@@ -99,10 +99,24 @@ export function CodeCell({ cell, onCancel }: CodeCellProps) {
         </pre>
       )}
 
+      {/* Chart images from matplotlib */}
+      {cell.images && cell.images.length > 0 && (
+        <div className="px-3 py-2 border-t border-neutral-100 dark:border-neutral-800 space-y-2">
+          {cell.images.map((src, i) => (
+            <img
+              key={i}
+              src={src}
+              alt={`Chart ${i + 1}`}
+              className="max-w-full rounded-lg"
+            />
+          ))}
+        </div>
+      )}
+
       {/* result (last expression value) */}
       {cell.resultRepr && (
         <div className="px-3 py-2 border-t border-neutral-100 dark:border-neutral-800 text-[12px] font-mono text-neutral-900 dark:text-neutral-100">
-          <span className="text-neutral-400 dark:text-neutral-500 mr-2">→</span>
+          <span className="text-neutral-400 dark:text-neutral-500 mr-2">&rarr;</span>
           {cell.resultRepr}
         </div>
       )}

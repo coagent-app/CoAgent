@@ -547,7 +547,7 @@ const TOOL_LABELS: Record<string, string> = {
   skills: 'Managing Skills',
   memory: 'Checking Memory',
   spawn_agents: 'Running Agents',
-  run_python: 'Running Python',
+  run_python: 'Coding',
   call_external_tool: 'Calling Tool',
   exa: 'Searching the Web',
   research: 'Researching',

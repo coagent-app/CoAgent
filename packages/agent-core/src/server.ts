@@ -958,6 +958,7 @@ let voiceProcessing = false
 let chatInProgress = false
 let agentBusy = false
 let nextHeartbeatAt: string | undefined
+let pendingChatMessage: { message: string; fileIds?: string[] } | null = null
 
 const scheduler = startScheduler(agent, DATA_DIR, {
   onHeartbeat: (status, summary, nextAt) => {
@@ -1659,14 +1660,20 @@ console.log(`[Server] WS auth nonce written to ${noncePath}`)
 wss.on('error', (err: any) => {
   if (err.code === 'EADDRINUSE') {
     console.error(`[Server] Port ${PORT} already in use — attempting to reclaim...`)
-    const { execSync } = require('child_process')
+    const { execSync, execFileSync } = require('child_process')
+    const isValidPidRetry = (p: string): boolean => /^\d+$/.test(p)
     try {
       if (process.platform === 'win32') {
         const out = execSync(`netstat -ano | findstr ":${PORT}" | findstr LISTENING`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }).trim()
-        const pids: string[] = out.split('\n').map((l: string) => l.trim().split(/\s+/).pop() || '').filter(Boolean)
-        for (const pid of pids) { try { execSync(`taskkill /PID ${pid} /F`, { stdio: 'ignore' }) } catch {} }
+        const pids: string[] = out.split('\n').map((l: string) => l.trim().split(/\s+/).pop() || '').filter(isValidPidRetry)
+        for (const pid of pids) { try { execFileSync('taskkill', ['/PID', pid, '/F'], { stdio: 'ignore' }) } catch {} }
       } else {
-        execSync(`lsof -ti:${PORT} | xargs kill -9`, { stdio: 'ignore', timeout: 3000 })
+        let lsofRetry = ''
+        try { lsofRetry = execFileSync('lsof', ['-t', `-i:${PORT}`], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }).toString().trim() } catch {}
+        if (lsofRetry) {
+          const staleRetry = lsofRetry.split('\n').map((p: string) => p.trim()).filter(isValidPidRetry)
+          if (staleRetry.length > 0) { try { execFileSync('kill', ['-9', ...staleRetry], { stdio: 'ignore' }) } catch {} }
+        }
       }
       console.log(`[Server] Killed stale process(es) on port ${PORT}, retrying in 1s...`)
     } catch {
@@ -2140,7 +2147,8 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
 
     if (msg.type === 'chat') {
       if (chatInProgress || agentBusy) {
-        send(ws, { type: 'error', message: 'Please wait — still processing your last message.' } as any)
+        pendingChatMessage = { message: msg.message, fileIds: msg.fileIds }
+        send(ws, { type: 'chat_queued' } as any)
         return
       }
       if (!getRelayConfig()) {
@@ -2190,6 +2198,13 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
       } finally {
         chatInProgress = false
         agentBusy = false
+        // Drain the pending message, if any arrived while we were busy
+        if (pendingChatMessage) {
+          const pending = pendingChatMessage
+          pendingChatMessage = null
+          // Re-dispatch as a synthetic chat message through the same handler
+          setImmediate(() => ws.emit('message', JSON.stringify({ type: 'chat', message: pending.message, fileIds: pending.fileIds })))
+        }
       }
     }
 
@@ -2351,6 +2366,12 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
         console.error('[Voice] Transcription/chat error:', err.message)
         send(ws, { type: 'error', message: `Voice failed: ${err.message}` })
         send(ws, { type: 'agent_stopped' })
+      } finally {
+        if (pendingChatMessage) {
+          const pending = pendingChatMessage
+          pendingChatMessage = null
+          setImmediate(() => ws.emit('message', JSON.stringify({ type: 'chat', message: pending.message, fileIds: pending.fileIds })))
+        }
       }
     }
 
@@ -2422,6 +2443,11 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
       } finally {
         chatInProgress = false
         agentBusy = false
+        if (pendingChatMessage) {
+          const pending = pendingChatMessage
+          pendingChatMessage = null
+          setImmediate(() => ws.emit('message', JSON.stringify({ type: 'chat', message: pending.message, fileIds: pending.fileIds })))
+        }
       }
     }
 
@@ -3256,14 +3282,14 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
     // equivalent of the old html_doc_write / html_doc_patch here.
     if (msg.type === 'canvas_open') {
       try {
-        const canvas = await readCanvas(DATA_DIR, (msg as any).canvasId)
+        const canvas = await readCanvas(DATA_DIR, msg.canvasId)
         if (!canvas) {
-          send(ws, { type: 'canvas_error', canvasId: (msg as any).canvasId, message: 'Canvas not found' })
+          send(ws, { type: 'canvas_error', canvasId: msg.canvasId, message: 'Canvas not found' })
         } else {
           send(ws, { type: 'canvas_opened', canvas })
         }
       } catch (err: any) {
-        send(ws, { type: 'canvas_error', canvasId: (msg as any).canvasId, message: err?.message || 'Failed to open canvas' })
+        send(ws, { type: 'canvas_error', canvasId: msg.canvasId, message: err?.message || 'Failed to open canvas' })
       }
     }
 

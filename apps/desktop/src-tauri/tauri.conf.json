@@ -54,7 +54,8 @@
     "externalBin": [
       "binaries/coagent-server",
       "binaries/coagent-memory",
-      "binaries/node"
+      "binaries/node",
+      "binaries/whisper"
     ],
     "resources": [
       "vendor/**/*"
