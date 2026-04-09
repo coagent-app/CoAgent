@@ -233,7 +233,7 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'add_done_item',
-    description: 'Log completed action.',
+    description: 'Log a completed action so it shows in the done feed. Call after finishing routine tasks, background work, or anything the user should know happened.',
     input_schema: {
       type: 'object' as const,
       properties: { description: { type: 'string' } },
@@ -242,7 +242,7 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'integration_notes',
-    description: 'Persistent per-integration IDs/rules/preferences. Auto-injects on search_tools — don\'t read unless updating. WRITE when you learn: IDs to reuse (primary calendar, channel IDs, default labels), user rules ("never email X — use Slack"), workflow prefs ("tag leads 2026Q2"), corrections ("skip newsletters"). NOT for one-off facts — use memory. <500 chars, facts only, replaces prior notes.',
+    description: 'Save and recall per-integration facts and preferences. These auto-inject into search_tools results so you remember them next time. Save things like: default IDs (primary calendar, Slack channel), user rules ("always CC legal", "never email X — use Slack"), and workflow preferences. Not for general knowledge — use memory for that. Keep under 500 chars, facts only.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -255,7 +255,7 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'update_settings',
-    description: 'Update user profile/settings.',
+    description: 'Update profile and agent settings. Use this to change name, email, timezone, role, agent name, autonomy level, active hours, heartbeat interval, or custom instructions. Custom instructions persist across conversations.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -275,7 +275,7 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'files',
-    description: 'File management. grep searches contents (PDF/DOCX/XLSX/text) by regex, scoped by id or folder. get_pdf_fields/fill_pdf for fillable PDF forms only.',
+    description: 'File management. grep searches contents (PDF/DOCX/XLSX/text) by regex, scoped by id or folder. get_pdf_fields/fill_pdf for fillable PDF forms only. Link files inline as [name](coagent-file:ID) so the user can open them. Attach files to emails via coagent_file_ids.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -293,7 +293,7 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'schedule',
-    description: 'Manage routines (recurring cron+instruction), tasks (one-time due+instruction), followups (due+instruction — check status then ask user: reschedule/nudge/done). Tasks and followups with due MUST have detailed instruction. Followup example: "Check Gmail for reply from sarah@acme.com re Q1 proposal. If replied, summarize. If not, ask user about nudge." Ask user for followup timing — never assume.\n\nBEFORE creating ANY routine/task/followup: search memory for the static facts the instruction will need every time it fires (recipient emails, home/work addresses, account selectors, project IDs, doc URLs, file paths) and INLINE them into the instruction. The fire-time agent should not have to re-discover these. If a required fact is missing from memory, ask the user for it BEFORE creating — do not create with placeholders.',
+    description: 'Manage routines (recurring cron+instruction), tasks (one-time due+instruction), followups (due+instruction — check status then ask user: reschedule/nudge/done). Always call get_current_time in parallel when scheduling — never guess the date. Ask user for followup timing — never assume.\n\nBEFORE creating: search memory for static facts the instruction will need at fire time (emails, addresses, IDs) and inline them. The fire-time agent should not have to re-discover these. If a fact is missing, ask the user first.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -313,7 +313,7 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'skills',
-    description: 'Reusable automations invoked via @name. execute loads full instructions.',
+    description: 'Reusable workflow automations. Use list to see available skills, execute to run one by name. Skills contain step-by-step instructions for specific workflows (e.g. canvas design, cold outreach, lead research). Run them proactively when they match what the user is asking for.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -473,32 +473,28 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
 ]
 
+// Canvas tool names — single source of truth for streaming guards and dispatch.
+const CANVAS_TOOL_NAMES = new Set(['write_canvas', 'patch_canvas'])
 // Canvas tools — always registered (non-heartbeat contexts only).
-// The agent writes TSX that renders inside react-runner. Brand, charts, and
-// icons are pre-injected via scope — see apps/desktop/src/lib/canvas-scope.ts.
+// The agent writes GFM markdown rendered in a branded iframe.
 const CANVAS_TOOLS: Anthropic.Tool[] = [
   {
     name: 'write_canvas',
-    description: `Create a new canvas — a TSX document rendered live in the canvas pane. Use this for any document the user asks for — proposals, reports, flyers, letters, invoices, one-pagers, dashboards. Call skills(execute, 'canvas-design') first if you haven't this conversation to load the scope reference and design patterns.
+    description: `Creates a markdown document rendered live with brand styling. Use this for any document the user asks for — proposals, reports, flyers, letters, invoices, one-pagers, dashboards.
 
-The code prop is a full TSX module with a default-exported React component. It has access to these imports:
-- import { brand, Logo, Signature } from '@brand'  — brand kit from the user's settings
-- import { LineChart, BarChart, PieChart, ... } from 'recharts'  — charts
-- import { FileText, Mail, Check, ... } from 'lucide-react'  — icons
-- React hooks (useState, useMemo, etc.) from 'react'
+Write GFM markdown: headings, bold, italic, links, GFM tables, Mermaid fenced blocks, horizontal rules.
 
 Rules:
-- Default export a React function component.
-- Use Tailwind classes for layout (max-w-3xl, p-12, grid, flex, etc.) — Tailwind Play is loaded in the render sandbox.
-- Use brand.primary / brand.accent / brand.fontBody for color and typography.
-- Use <Logo /> for the user's logo. No external image URLs unless the user gave one.
 - Real content only — no {{placeholders}}, TBD, or "fill in later".
-- No inline <script>, no dangerouslySetInnerHTML, no fetch/localStorage/window access.`,
+- Do not reference colors or fonts — branding is applied automatically.
+- Use tables for structured data.
+- Use Mermaid fenced blocks for diagrams.
+- No HTML tags.`,
     input_schema: {
       type: 'object' as const,
       properties: {
         title: { type: 'string', description: 'Canvas title shown in the pane header.' },
-        code: { type: 'string', description: 'Full TSX source. Must default-export a React function component. Imports are restricted to @brand, recharts, lucide-react, and react.' },
+        code: { type: 'string', description: 'Full markdown document. GFM syntax with optional Mermaid fenced blocks.' },
         kind: { type: 'string', description: 'Document archetype — e.g. "proposal", "flyer", "report", "letter", "invoice", "dashboard". Agent picks based on intent.' },
       },
       required: ['title', 'code'],
@@ -506,14 +502,12 @@ Rules:
   },
   {
     name: 'patch_canvas',
-    description: `Replace the code of an existing canvas. Use this for any edit — the canvas pane will compile the new code and swap in the new render with last-good-render fallback if there's a parse error.
-
-Prefer patch_canvas over write_canvas when the user is iterating on an existing document ("change the color to green", "add a chart", "make the title bigger"). For structural rewrites, write the full new code.`,
+    description: `Replace the content of an existing canvas. The canvas pane will re-render the new markdown immediately. Prefer patch_canvas for iterations, write full new content for structural rewrites.`,
     input_schema: {
       type: 'object' as const,
       properties: {
         canvas_id: { type: 'string', description: 'ID of the canvas to patch (from write_canvas response).' },
-        code: { type: 'string', description: 'Full new TSX source. Replaces the existing code entirely.' },
+        code: { type: 'string', description: 'Full new markdown content. Replaces existing content entirely.' },
         title: { type: 'string', description: 'Optional new title.' },
       },
       required: ['canvas_id', 'code'],
@@ -708,21 +702,11 @@ export function getInternalTools(context: ToolContext, activeSkillTools?: Set<st
 }
 
 const AUTONOMY_DESCRIPTIONS: Record<string, string> = {
-  ask_first: 'Before you write, send, or change anything, ask the user first. Reading and looking things up is fine without asking.',
-  balanced: 'Act directly on reads and routine tasks. For anything the user would want to review first — sends, edits, outreach — queue it with queue_approval instead of doing it yourself.',
-  agent: 'When the user asks you to do something, do it directly — call the tool yourself without asking for permission first. Do not take actions on your own initiative; wait until the user asks.',
-  autonomous: 'Just go for it. Act freely on anything — user requests or your own initiative. The only thing you should queue is destructive bulk actions like mass deletes.'
+  ask_first: 'Ask before writing, sending, or changing anything. Reads and lookups are fine. On heartbeats and triggers, queue all writes.',
+  balanced: 'Do reads and routine tasks directly. Queue sends, edits, and outreach with queue_approval. On heartbeats and triggers, queue all writes.',
+  agent: 'User asks → execute directly, no confirmation. No user ask (heartbeats, triggers) → queue writes, do not run them.',
+  autonomous: 'Just go. Act on user requests and your own initiative. Queue only destructive bulk actions like mass deletes.'
 }
-
-// Hard guardrail: these tool name patterns ALWAYS require queue_approval, regardless of autonomy level.
-// Matching is case-insensitive substring against the tool name.
-const ALWAYS_QUEUE_TOOLS = [
-  'SEND_EMAIL', 'SEND_MESSAGE', 'SEND_DRAFT',        // Outbound comms
-  'DELETE_MESSAGE', 'BATCH_DELETE', 'DELETE_EMAIL',    // Destructive email ops
-  'CREATE_EVENT', 'DELETE_EVENT', 'UPDATE_EVENT',      // Calendar mutations
-  'CREATE_CONTACT', 'DELETE_CONTACT', 'UPDATE_CONTACT', // CRM mutations
-  'POST_MESSAGE',                                       // Slack/Teams posting
-]
 
 
 function listMemoryFiles(dataDir: string): string[] {
@@ -742,12 +726,12 @@ export function buildSystemPrompt(connectedServices: string[], agentProfilePath:
   const memoryFiles = listMemoryFiles(dataDir)
 
   const serviceSection = connectedServices.length > 0
-    ? `You have these external integrations connected: ${composioSlugs.join(', ')}. You CAN access the user's email, calendar, docs, and so on through these — do not tell the user an integration is missing if it's listed here.
+    ? `You have access to these integrations: ${composioSlugs.join(', ')}. Never tell the user an integration is missing if it's listed here — you can reach their email, calendar, docs, and so on through these.
 
-For any of these external tools, first call search_tools(query, context, schema) to find the exact tool name, then call_external_tool(tool_name, parameters) to run it. When you need context for the search, call memory search in parallel.
+To use one, first call search_tools(query, context, schema) to find the exact tool name, then call_external_tool(tool_name, parameters) to run it. When you need context for the search, run memory search in parallel.
 
-All other tools (memory, files, schedule, skills, send_team_message, etc.) are built-in — call them directly without going through search_tools.`
-    : `You don't have any external integrations connected yet. The user can connect apps in the Integrations panel. Your built-in tools (memory, files, schedule, skills) are always available.`
+Built-in tools (memory, files, schedule, skills, send_team_message, etc.) are always available — call them directly without going through search_tools.`
+    : `You don't have any external integrations connected yet. The user can connect apps in the Integrations panel. Built-in tools (memory, files, schedule, skills) are always available.`
 
   const onboardingSection = !settings.onboarded
     ? '\n\nONBOARDING (MANDATORY): This is a brand new user who has not been set up. You MUST call memory(action: "read", file: "onboarding.md") as your FIRST action — do NOT greet or respond until you have read it. Then follow the onboarding script exactly. One question per message. Save their info via update_settings as you learn it. When done, set onboarded: true and delete onboarding.md from memory.'
@@ -757,68 +741,48 @@ All other tools (memory, files, schedule, skills, send_team_message, etc.) are b
 
   const customInstructions = settings.custom_instructions?.trim()
 
-  return `You are ${settings.agent_name || 'CoAgent'} — a private AI agent running on the user's machine. You work quietly in the background to maintain your own workspace (memory, schedule, files, followups, integration notes) without needing to be asked, and you help with anything the user asks for.
+  return `You are ${settings.agent_name || 'CoAgent'} — a private AI agent on the user's machine. When you receive a request, gather context with your tools first — then act. You can chain tools together for multi-step work. Only ask the user when actually needed.
+
+<tools>
+- memory — long-term knowledge store (search, read, write, edit)
+- files — file management, search contents across PDF/DOCX/XLSX/text
+- run_python — execute Python for analysis, charts, parsing
+- write_canvas / patch_canvas — create and iterate on live documents
+- schedule — routines, one-time tasks, followups
+- skills — reusable automations, run proactively when relevant
+- spawn_agents — run parallel sub-agents for independent work
+- search_tools + call_external_tool — discover and use connected integrations
+- queue_approval — draft actions for the user to review before executing
+- integration_notes — save and recall per-tool facts and preferences
+- get_current_time — current date and time
+- update_settings — update user profile and preferences
+- notify_user — push notification to the user
+- set_status_line — update the status line shown in the app
+- add_done_item — log a completed action
+- create_custom_integration — build new API integrations
+Every tool listed here is real and operational. Use them rather than saying you cannot.
+</tools>
 ${customInstructions ? `\n${customInstructions}\n` : ''}
-Before you ask the user a question, try to answer it with your tools first. If a name, email, topic, or "that thing" isn't immediately obvious, look it up instead of asking.
+This system prompt is your source of truth. If earlier messages in this conversation reference different settings or modes, they are outdated — follow what is here now.
 
-Here's how to gather context in common situations:
-- If the user mentions a person, company, or email you don't recognize: search memory and call search_tools for gmail/contacts in parallel.
-- If the user says "follow up on X" or "that thing we discussed": search memory, check recent tool logs, and read integration notes.
-- If the user asks you to schedule anything: call get_current_time and schedule(action: "list") in parallel. Never guess today's date.
-- If the user asks whether you can do something ("can you..."): call search_tools first to check, then answer.
+<autonomy>
+Mode: ${settings.autonomy}
+${AUTONOMY_DESCRIPTIONS[settings.autonomy]}${settings.autonomy_notes ? `\nUser rules:\n${settings.autonomy_notes}` : ''}
+</autonomy>
 
-Only ask the user directly when no tool can give you the answer. When you have multiple independent lookups, run them all in parallel in a single response — that's faster and cheaper than doing them one at a time. Be deliberate, not shy: prefer a tool call over a guess or an uninformed question.
-
-Think like a context engineer — piece information together across your sources into one coherent answer, and flag any gaps or conflicts you find.
+<user>
+${settings.name || '?'} | ${settings.email || '?'} | ${settings.role || '?'} | ${settings.timezone || '?'}${settings.what_you_do ? `\nWhat they do: ${settings.what_you_do}` : ''}
+Active: ${formatHour(settings.active_hours.start)}–${formatHour(settings.active_hours.end)}, ${settings.active_days.join(', ')}
+</user>
 
 ${serviceSection}
-User: ${settings.name || '?'} | ${settings.email || '?'} | ${settings.role || '?'} | ${settings.timezone || '?'}${settings.what_you_do ? `\nWhat they do: ${settings.what_you_do}` : ''}
-Active: ${formatHour(settings.active_hours.start)}–${formatHour(settings.active_hours.end)}, ${settings.active_days.join(', ')}
-Autonomy: ${settings.autonomy} — ${AUTONOMY_DESCRIPTIONS[settings.autonomy]}${settings.autonomy_notes ? `\nAutonomy rules:\n${settings.autonomy_notes}` : ''}
-${settings.heartbeat_interval > 0 ? `Heartbeat: every ${settings.heartbeat_interval}min — process triggers, check memory, escalate. After each heartbeat, call set_status_line with a brief status (3-8 words) summarizing what you found — e.g. "3 things in your queue", "All caught up", "2 new emails".` : ''}
+${settings.heartbeat_interval > 0 ? `\n<heartbeat>\nEvery ${settings.heartbeat_interval}min. Read heartbeat.md in memory for what to check. After each run, call set_status_line with a 3-8 word summary.\n</heartbeat>` : ''}
+${googleCalendarConnected ? '\nGoogle Calendar is synced into schedule(list). To modify Google events, use GOOGLECALENDAR_UPDATE_EVENT or GOOGLECALENDAR_DELETE_EVENT through call_external_tool.' : ''}
 
-Memory: always search before writing — search in parallel since it's semantic. When you do write, edit an existing file instead of creating a new one whenever possible.
-
-What to save: people and topics the user actively engages with, recurring contacts, rules and preferences you'd otherwise have to repeat, and facts the user will still care about a week from now.
-
-What to skip: one-time CC's, strangers looped into a thread, form senders, and names mentioned only in passing.
-
-Importance beats recency — a single email from a prospect the user cares about is worth saving, but a CC on a thread they're not part of isn't.
-
-When the user dismisses, corrects, or asks you to remove something ("don't need X", "that's old", "clean that up"), edit memory in the same turn — don't just acknowledge it and move on.
-
-heartbeat.md defines what to check on each heartbeat.${memoryFiles.length > 0 ? `\nRecent memories: ${memoryFiles.join(', ')} — search to find others.` : ''}
-Files: use grep to search inside file contents (it works across PDF, DOCX, XLSX, and text). Use create_folder and move to organize files. For fillable PDFs, call get_pdf_fields first and then fill_pdf. Link files inline with [filename](coagent-file:ID) so the user can open them, and attach files to emails via coagent_file_ids.
-
-Canvas: use write_canvas to create any document the user asks for — proposals, reports, flyers, letters, invoices, dashboards, one-pagers. Before you write, always call skills(action: 'execute', name: 'canvas-design') to load the design patterns and scope reference. Use patch_canvas when the user asks you to iterate on an existing canvas.
-
-Canvases are TSX files that default-export a React component. The only imports you can use are '@brand' (brand, Logo, Signature), 'recharts', 'lucide-react', and 'react' — nothing else. Use Tailwind classes for layout, and style with brand.primary and brand.fontBody. Always use real content — never use {{placeholders}}, "TBD", or "[fill in]".
-
-Schedule: use the schedule tool for routines (cron-based), one-time tasks, and followups — the actions are create, update, delete, complete, and list. Always call get_current_time in parallel when you're scheduling something — never guess the date.${googleCalendarConnected ? ' Google Calendar is synced, so schedule(action: "list") includes your Google events too. To modify or delete a Google event, use call_external_tool with GOOGLECALENDAR_UPDATE_EVENT or GOOGLECALENDAR_DELETE_EVENT — not the schedule tool.' : ''}
-
-Skills: call skills(action: 'list') to see what's available, and skills(action: 'execute', name: 'skill-name') to run one. Run skills proactively when they match what the user is asking for.
-
-Integrations: for new API integrations, use create_custom_integration with @integration-builder.
-Approvals: whether to queue an action or execute it directly is determined by the autonomy mode described above — follow that mode. Heartbeats and scheduled triggers always queue writes for approval regardless of mode (the only exception is autonomous mode). When you queue something to send — email, message, post, reply — write the full text into the queue item. The user should be able to approve and send without rewriting anything. Never queue a placeholder like "draft a response"; write the actual draft. Call add_done_item after finishing routine tasks.
-
-Followups: after you send an email, message, or proposal, ask the user "Want me to follow up?" — don't create followups automatically.
-
-Integration notes: save per-tool facts that will help you use that tool correctly next time — IDs to reuse (default calendar, default channel), user rules ("always CC legal"), and quirks. Capture anything like that. Memory is for general information about people and topics; integration notes are scoped to one specific tool. They surface automatically as "[integration notes]:" inside search_tools results — follow them without asking.
-
-Keep responses short and direct. Lead with the answer and skip filler or preamble. Don't use emojis. Use markdown only when it adds clarity.
-
-When writing content inside call_external_tool — emails, messages, notes — use plain text only. Markdown renders literally in Gmail and similar apps, so don't use it there.
-${connectedServices.includes('coagent:imessage') ? `iMessage is connected. Queue iMessage sends for approval unless you're in autonomous mode.` : ''}
-${connectedServices.includes('coagent:contacts') ? `Contacts is connected via search_tools.` : ''}
-VOICE MODE: when the user's message ends with [voice], their input was spoken and your reply will be read aloud. Reply in 1-2 spoken sentences, 30 words or fewer — this limit is hard. Use natural spoken English: no markdown, no lists, no bullets, no code, and no symbols that read as characters (&, #, *). Don't include "[voice]" in your reply. If the full answer won't fit, give the shortest useful version and add "I'll put the details on screen."
-
-Notifications: title is 2-4 words, body is one sentence.
-
-Web search: for any web lookups, use composio_search through search_tools followed by call_external_tool. (The exa tool is disabled.)
-
-spawn_agents: run parallel sub-agents for independent tasks — parallel analysis, drafting multiple versions, research combined with prep. Sub-agents have access to search, memory, and document tools, but they cannot send emails or perform external actions.
-
-run_python: run small Python cells (via Pyodide, in-app) for analysis, charts, or parsing. State persists across cells. Narrate what each cell does in plain language. Skip it for trivial math.${onboardingSection}${teamRoster && teamRoster.length > 0 ? `\n\n## Team: ${teamName || 'Your Team'}\n\nYou are part of a team. Each member has their own AI agent — when you message someone, you're talking to their agent (another AI like you), not the person directly.\nMembers:\n${teamRoster.map((m: any) => `- ${m.name} (${m.role})`).join('\n')}\n\nUse send_team_message with to="name" to message their agent. You'll wait for and receive their agent's response. Omit "to" to broadcast.\nInclude agent_context with relevant background for the receiving agent.` : ''}`
+Keep responses short and direct. No emojis. Use plain text inside emails and messages — markdown renders literally in Gmail.
+${memoryFiles.length > 0 ? `\nRecent memories: ${memoryFiles.join(', ')}.` : ''}
+VOICE: when the message ends with [voice], reply in 1-2 spoken sentences, ≤30 words. Natural English, no markdown or symbols. Don't include "[voice]".
+Notifications: 2-4 word title, one-sentence body.${onboardingSection}${teamRoster && teamRoster.length > 0 ? `\n\n<team name="${teamName || 'Your Team'}">\nYou are part of a team. Each member has their own AI agent — when you message someone, you're talking to their agent, not the person directly.\nMembers:\n${teamRoster.map((m: any) => `- ${m.name} (${m.role})`).join('\n')}\nUse send_team_message to reach them. Include agent_context with relevant background.\n</team>` : ''}`
 }
 
 export class Agent {
@@ -841,6 +805,7 @@ export class Agent {
   private runLoopPromise: Promise<string> | null = null
   private activeStream: { abort: () => void } | null = null
   private stopped = false
+  private stopping = false
   isProcessing = false
   private missedEvents: { source: string; payload: unknown; time: string }[] = []
   private steeringQueue: string[] = []
@@ -974,7 +939,8 @@ export class Agent {
         await this.saveHistory()
       }
       console.log(`[Agent] Loaded ${this.conversationHistory.length} messages from history`)
-    } catch {
+    } catch (err) {
+      console.error('[Agent] Failed to load history:', err instanceof Error ? err.message : String(err))
       // No-op. The field is already initialized to [] at declaration. Resetting
       // here would clobber any entries pushed by callers between construction
       // and this async catch firing (e.g. the eval harness seeding prior turns
@@ -1075,6 +1041,9 @@ export class Agent {
       if (this.heartbeatRunLoop) {
         console.log('[Agent] Heartbeat already running — skipping')
         return
+      }
+      if (this.runLoopPromise) {
+        await this.runLoopPromise.catch((err: unknown) => console.error('[Agent] Chat error (awaited in heartbeat):', err instanceof Error ? err.message : err))
       }
       const events = await getUnprocessedEvents(this.dataDir)
       const eventIds = events.map((e: any) => e.id).filter(Boolean)
@@ -1196,7 +1165,10 @@ export class Agent {
         console.error('[Agent] Previous runLoop failed before chat():', msg)
         // Don't propagate — allow the new message to proceed
       })
-      .then(() => this.runLoop(onChunk, 'chat', onToolCall))
+      .then(async () => {
+        if (this.heartbeatRunLoop) await this.heartbeatRunLoop.catch((err: unknown) => console.error('[Agent] Heartbeat error (awaited in chat):', err instanceof Error ? err.message : err))
+        return this.runLoop(onChunk, 'chat', onToolCall)
+      })
     this.runLoopPromise = next
     try {
       return await next
@@ -1391,6 +1363,7 @@ Rules:
     while (true) {
       // Check for stop
       if (this.stopped) {
+        this.stopping = true
         console.log('[Agent] Stopped by user')
         this.activeStream = null
         // Find ALL assistant messages with tool_use blocks that lack matching tool_results.
@@ -1426,6 +1399,7 @@ Rules:
         }
         // Persist so cancelled results survive process restart
         await saveHistory()
+        this.stopping = false
         return lastText || '_Stopped._'
       }
 
@@ -1492,12 +1466,12 @@ Rules:
               try {
                 if (event.type === 'content_block_start' && (event as any).content_block?.type === 'tool_use') {
                   const name = (event as any).content_block.name
-                  if (name === 'write_canvas' || name === 'patch_canvas') {
+                  if (CANVAS_TOOL_NAMES.has(name)) {
                     streamingCanvasId = (event as any).content_block.id
                   }
                 } else if (event.type === 'content_block_delta' && streamingCanvasId) {
                   const block = (snapshot.content as any[])?.[event.index]
-                  if (block?.type === 'tool_use' && (block.name === 'write_canvas' || block.name === 'patch_canvas')) {
+                  if (block?.type === 'tool_use' && CANVAS_TOOL_NAMES.has(block.name)) {
                     const input = block.input as { title?: string; code?: string; canvas_id?: string }
                     if (input?.code) {
                       const now = Date.now()
@@ -1612,7 +1586,7 @@ Rules:
               tools: stableTools,
               maxTokens,
             }, onChunk, abortController.signal, ({ toolName, toolCallId, argsSoFar }) => {
-              if (toolName !== 'write_canvas' && toolName !== 'patch_canvas') return
+              if (!CANVAS_TOOL_NAMES.has(toolName)) return
               const now = Date.now()
               if (now - lastCanvasBroadcast < 100) return
               const parsed = extractPartialCode(argsSoFar)
@@ -1686,11 +1660,22 @@ Rules:
 
       if (response.stop_reason === 'tool_use') {
         const toolResults: Anthropic.MessageParam = { role: 'user', content: [] }
-        let searchToolCalls = 0
 
         const toolBlocks = response.content.filter(
           (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use'
         )
+
+        // Cap search_tools calls to 6 per turn before parallel execution to avoid race on counter.
+        let searchToolsSeen = 0
+        const searchToolLimitResult = new Map<string, string>()
+        for (const block of toolBlocks) {
+          if (block.name === 'search_tools') {
+            searchToolsSeen++
+            if (searchToolsSeen > 6) {
+              searchToolLimitResult.set(block.id, 'You have enough tools discovered. Use call_external_tool to execute them — the schema will be provided automatically.')
+            }
+          }
+        }
 
         // Fire UI progress callbacks immediately (before parallel execution)
         for (const block of toolBlocks) {
@@ -1729,9 +1714,8 @@ Rules:
             result = now.toLocaleString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit', timeZoneName: 'short' })
 
           } else if (block.name === 'search_tools') {
-            searchToolCalls++
-            if (searchToolCalls > 6) {
-              return 'You have enough tools discovered. Use call_external_tool to execute them — the schema will be provided automatically.'
+            if (searchToolLimitResult.has(block.id)) {
+              return searchToolLimitResult.get(block.id)!
             }
             const input = block.input as { query: string; context?: string; schema?: string }
             const query = input.query
@@ -2263,20 +2247,15 @@ Rules:
               if (!input.canvas_id || !input.code) {
                 result = 'Error: patch_canvas requires canvas_id and code.'
               } else {
-                const existing = await readCanvas(this.dataDir, input.canvas_id)
-                if (!existing) {
+                const updated = await updateCanvas(this.dataDir, input.canvas_id, {
+                  code: input.code,
+                  ...(input.title !== undefined ? { title: input.title } : {}),
+                })
+                if (!updated) {
                   result = `Error: Canvas "${input.canvas_id}" not found. Use write_canvas to create it first.`
                 } else {
-                  const updated = await updateCanvas(this.dataDir, input.canvas_id, {
-                    code: input.code,
-                    ...(input.title !== undefined ? { title: input.title } : {}),
-                  })
-                  if (!updated) {
-                    result = `Error: Failed to save patch for canvas "${input.canvas_id}".`
-                  } else {
-                    this.onBroadcast?.({ type: 'canvas_updated', canvas: updated })
-                    result = `Canvas updated: "${updated.title}"`
-                  }
+                  this.onBroadcast?.({ type: 'canvas_updated', canvas: updated })
+                  result = `Canvas updated: "${updated.title}"`
                 }
               }
             } catch (err: any) {
@@ -2497,7 +2476,11 @@ Rules:
                 const toolDef = toolSchemaMap.get(extToolName)
                 const schemaNote = toolDef ? `\n\n[${extToolName} schema]${formatSchemaForResult(toolDef)}` : ''
 
-                const raw = await this.mcpManager.callTool(serverName, extToolName, toolInput)
+                let toolTimeout: ReturnType<typeof setTimeout>
+                const raw = await Promise.race([
+                  this.mcpManager.callTool(serverName, extToolName, toolInput),
+                  new Promise<string>((_, reject) => { toolTimeout = setTimeout(() => reject(new Error('Tool call timed out after 45s')), 45000) })
+                ]).finally(() => clearTimeout(toolTimeout!))
                 const MAX_TOOL_RESULT = 16000
                 const trimmed = raw.length > MAX_TOOL_RESULT
                   ? raw.slice(0, MAX_TOOL_RESULT) + `\n\n[Truncated: ${raw.length - MAX_TOOL_RESULT} chars omitted]`
@@ -2674,16 +2657,17 @@ Rules:
           }
         }))
 
-        for (let i = 0; i < toolBlocks.length; i++) {
-          ;(toolResults.content as Anthropic.ToolResultBlockParam[]).push({
-            type: 'tool_result',
-            tool_use_id: toolBlocks[i].id,
-            content: toolCallResults[i]
-          })
+        if (!this.stopping) {
+          for (let i = 0; i < toolBlocks.length; i++) {
+            ;(toolResults.content as Anthropic.ToolResultBlockParam[]).push({
+              type: 'tool_result',
+              tool_use_id: toolBlocks[i].id,
+              content: toolCallResults[i]
+            })
+          }
+          history.push(toolResults)
+          loopMessages.push(toolResults)
         }
-
-        history.push(toolResults)
-        loopMessages.push(toolResults)
 
         continue
       }
@@ -2702,6 +2686,7 @@ Rules:
       break
     }
 
+    this.stopping = false
     return finalText
   }
 
@@ -2907,7 +2892,31 @@ Rules:
       console.log(`[Agent] Stripped ${droppedBlocks} old tool blocks — saved ~${savedChars} chars (~${Math.round(savedChars / 4)} tokens)`)
     }
 
-    return result
+    // Post-compaction validation: remove tool_result blocks whose tool_use was stripped.
+    const survivingToolUseIds = new Set<string>()
+    for (const msg of result) {
+      if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue
+      for (const b of msg.content as any[]) {
+        if (b.type === 'tool_use') survivingToolUseIds.add(b.id)
+      }
+    }
+    let orphanedResults = 0
+    const validated = result.map(msg => {
+      if (msg.role !== 'user' || !Array.isArray(msg.content)) return msg
+      const kept = (msg.content as any[]).filter(b => {
+        if (b.type !== 'tool_result') return true
+        if (survivingToolUseIds.has(b.tool_use_id)) return true
+        orphanedResults++
+        return false
+      })
+      if (kept.length === (msg.content as any[]).length) return msg
+      return { ...msg, content: kept }
+    }).filter(msg => !Array.isArray(msg.content) || (msg.content as any[]).length > 0)
+    if (orphanedResults > 0) {
+      console.log(`[Agent] Post-compaction: removed ${orphanedResults} orphaned tool_result(s)`)
+    }
+
+    return validated as Anthropic.MessageParam[]
   }
 
   /**
