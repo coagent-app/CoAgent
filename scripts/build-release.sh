@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="$(rustc -vV | grep host | awk '{print $2}')"
@@ -43,7 +43,7 @@ echo "=== Build Complete ==="
 echo "App: $APP"
 
 # Step 4: Sign + Notarize (if APPLE_SIGNING_IDENTITY is set)
-if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
   echo ""
   echo "=== Code Signing ==="
 
@@ -76,7 +76,7 @@ if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
   codesign --sign "$APPLE_SIGNING_IDENTITY" "$DMG"
 
   # Notarize if credentials are available
-  if [ -n "$APPLE_ID" ] && [ -n "$APPLE_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+  if [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
     echo ""
     echo "=== Notarizing ==="
     echo "  Submitting to Apple..."

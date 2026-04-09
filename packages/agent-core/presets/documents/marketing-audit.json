@@ -1,0 +1,13 @@
+{
+  "title": "Marketing Audit",
+  "plan": "Stream the body in via update_document with insert ops, one block at a time. Recommended structure:\n\n1. replace the header block: set title to the company name and subtitle to their website URL.\n2. insert a kpis block with 4 metrics: Est. Ad Spend, Reviews (avg + count), SEO Score, Domain Age.\n3. insert a text block starting with \"## Summary\" — one paragraph verdict on the prospect.\n4. insert a two_column block with the website screenshot (left) and website issue bullets under \"### Website Issues\" (right). Only insert this if you actually have a screenshot URL — otherwise insert a plain text block with the issues.\n5. insert a text block starting with \"## Advertising Presence\" summarizing their paid channels and estimated spend.\n6. insert a table block with headers [\"Competitor\", \"Est. Monthly Spend\", \"Ad Channels\", \"Rank\"] and real rows (3–5 competitors).\n7. insert a callout variant=\"tip\" title=\"Recommendation\" with a clear pitch — what to sell them and why.\n8. insert a footer block.\n\nGather data in parallel via research / exa / external tools before inserting. Never write literal \"{{PLACEHOLDER}}\" text. Skip any block you don't have real data for rather than inventing numbers.",
+  "blocks": [
+    {
+      "id": "header",
+      "type": "header",
+      "eyebrow": "MARKETING AUDIT",
+      "title": "",
+      "subtitle": ""
+    }
+  ]
+}

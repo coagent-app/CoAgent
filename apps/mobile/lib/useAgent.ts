@@ -97,7 +97,13 @@ export function useAgent() {
       }
 
       socket.onmessage = (event) => {
-        const msg = JSON.parse(event.data) as WSServerMessage
+        let msg: WSServerMessage
+        try {
+          msg = JSON.parse(event.data) as WSServerMessage
+        } catch (err) {
+          console.warn('[useAgent] Dropped malformed WS message:', err)
+          return
+        }
         switch (msg.type) {
           case 'chat_history':
             setMessages(msg.messages)

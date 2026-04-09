@@ -40,6 +40,61 @@ function typeColors(type: string) {
   return TYPE_COLORS[type as keyof typeof TYPE_COLORS] ?? TYPE_COLORS.task
 }
 
+/** Hex (#rrggbb) → rgba string with given alpha */
+function hexToRgba(hex: string, alpha: number): string {
+  const h = hex.replace('#', '')
+  if (h.length !== 6) return `rgba(59, 130, 246, ${alpha})` // fallback blue-500
+  const r = parseInt(h.slice(0, 2), 16)
+  const g = parseInt(h.slice(2, 4), 16)
+  const b = parseInt(h.slice(4, 6), 16)
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`
+}
+
+/** Type fallback colors when no per-calendar color is available */
+const TYPE_HEX: Record<string, string> = {
+  routine: '#0ea5e9',  // sky-500
+  task: '#f59e0b',     // amber-500
+  followup: '#a855f7', // purple-500
+  event: '#3b82f6',    // blue-500
+}
+
+/**
+ * Resolve event styling: per-Google-calendar color if available, else fall back
+ * to type color. Returns inline style values for bg, accent border, and text.
+ */
+function getEventStyle(
+  entry: CalendarEntry,
+  calendars: GoogleCalendarInfo[] | undefined,
+  isDark: boolean,
+): { bg: string; accent: string; text: string } {
+  let baseHex: string | undefined
+  if (entry.source === 'google' && entry.googleCalendarId && calendars) {
+    const cal = calendars.find(c => c.id === entry.googleCalendarId)
+    if (cal?.color) baseHex = cal.color
+  }
+  if (!baseHex) baseHex = TYPE_HEX[entry.type] ?? TYPE_HEX.event
+  return {
+    bg: hexToRgba(baseHex, isDark ? 0.22 : 0.14),
+    accent: baseHex,
+    text: isDark ? '#f5f5f5' : '#1f2937', // neutral-100 / gray-800
+  }
+}
+
+function useIsDark(): boolean {
+  const [dark, setDark] = useState(() =>
+    typeof document !== 'undefined' && document.documentElement.classList.contains('dark')
+  )
+  useEffect(() => {
+    if (typeof document === 'undefined') return
+    const obs = new MutationObserver(() => {
+      setDark(document.documentElement.classList.contains('dark'))
+    })
+    obs.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
+    return () => obs.disconnect()
+  }, [])
+  return dark
+}
+
 /** Title-case a label: capitalize first letter of each word */
 function titleCase(s: string): string {
   return s.replace(/\b\w/g, c => c.toUpperCase())
@@ -176,9 +231,9 @@ export function CalendarPane({
       <div className="flex-1 flex overflow-hidden">
         <div className="flex-1 overflow-hidden px-4">
           {view === 'agenda' && <AgendaView entries={entries} onComplete={handleComplete} onDelete={handleDelete} onSelect={handleSelect} selectedId={selectedEntry?.id} />}
-          {view === 'week' && <WeekView entries={entries} anchor={anchor} activeHours={activeHours} onSelect={handleSelect} selectedId={selectedEntry?.id} />}
-          {view === 'month' && <MonthView entries={entries} anchor={anchor} onSelect={handleSelect} selectedId={selectedEntry?.id} />}
-          {view === 'day' && <DayView entries={entries} anchor={anchor} activeHours={activeHours} onSelect={handleSelect} selectedId={selectedEntry?.id} />}
+          {view === 'week' && <WeekView entries={entries} anchor={anchor} activeHours={activeHours} onSelect={handleSelect} selectedId={selectedEntry?.id} calendars={googleCalendarStatus?.calendars} />}
+          {view === 'month' && <MonthView entries={entries} anchor={anchor} onSelect={handleSelect} selectedId={selectedEntry?.id} calendars={googleCalendarStatus?.calendars} />}
+          {view === 'day' && <DayView entries={entries} anchor={anchor} activeHours={activeHours} onSelect={handleSelect} selectedId={selectedEntry?.id} calendars={googleCalendarStatus?.calendars} />}
         </div>
 
         {selectedEntry && (
@@ -673,13 +728,16 @@ function WeekView({
   activeHours,
   onSelect,
   selectedId,
+  calendars,
 }: {
   entries: CalendarEntry[]
   anchor: Date
   activeHours: { start: number; end: number }
   onSelect: (entry: CalendarEntry) => void
   selectedId?: string
+  calendars?: GoogleCalendarInfo[]
 }) {
+  const isDark = useIsDark()
   const weekStart = startOfWeek(anchor, { weekStartsOn: 0 })
   const days = eachDayOfInterval({ start: weekStart, end: endOfWeek(anchor, { weekStartsOn: 0 }) })
   const hours = Array.from({ length: 24 }, (_, i) => i)
@@ -697,10 +755,10 @@ function WeekView({
   return (
     <ScrollArea className="h-full">
       <div ref={scrollRef} className="grid grid-cols-[50px_repeat(7,1fr)] min-w-0 relative">
-        <div className="sticky top-0 z-10 bg-white dark:bg-neutral-950" />
+        <div className="sticky top-0 z-40 bg-white dark:bg-neutral-950" />
         {days.map(day => (
           <div key={day.toISOString()} className={cn(
-            'sticky top-0 z-10 bg-white dark:bg-neutral-950 text-center py-2 border-b border-l border-neutral-100 dark:border-neutral-800',
+            'sticky top-0 z-40 bg-white dark:bg-neutral-950 text-center py-2 border-b border-l border-neutral-100 dark:border-neutral-800',
             isToday(day) && 'bg-blue-50 dark:bg-blue-950/20'
           )}>
             <p className="text-[10px] text-neutral-400 uppercase">{format(day, 'EEE')}</p>
@@ -741,33 +799,41 @@ function WeekView({
                   )}>
                   {dayEntries.map((entry, idx) => {
                     const durationHours = getEntryDurationHours(entry)
-                    const heightPx = Math.max(durationHours * 48, 20)
+                    const heightPx = Math.max(durationHours * 48 - 2, 18) // -2 for vertical gap
                     const count = dayEntries.length
                     const widthPct = count > 1 ? `${Math.floor(100 / count)}%` : undefined
                     const leftPct = count > 1 ? `${Math.floor((100 / count) * idx)}%` : undefined
+                    const style = getEventStyle(entry, calendars, isDark)
                     return (
                       <div
                         key={entry.id}
                         onClick={() => onSelect(entry)}
-                        style={{ height: `${heightPx}px`, zIndex: 20 + idx, ...(widthPct ? { width: widthPct, left: leftPct } : {}) }}
+                        style={{
+                          height: `${heightPx}px`,
+                          zIndex: 20 + idx,
+                          backgroundColor: style.bg,
+                          borderLeft: `3px solid ${style.accent}`,
+                          color: style.text,
+                          boxShadow: selectedId === entry.id
+                            ? `inset 0 0 0 1.5px ${style.accent}`
+                            : `inset 0 0 0 1px ${isDark ? 'rgba(0,0,0,0.35)' : 'rgba(255,255,255,0.85)'}`,
+                          ...(widthPct ? { width: widthPct, left: leftPct } : {}),
+                        }}
                         className={cn(
-                          'absolute top-0 rounded px-1 py-0.5 text-[10px] cursor-pointer overflow-hidden flex items-start gap-1',
+                          'absolute top-[1px] rounded px-1 py-0.5 text-[10px] cursor-pointer overflow-hidden flex items-start gap-1',
                           count <= 1 && 'inset-x-0.5',
-                          typeColors(entry.type).bg,
-                          typeColors(entry.type).text,
-                          selectedId === entry.id && 'ring-1 ring-current'
                         )}
                       >
                         {entry.source === 'google' && <img src="https://logos.composio.dev/api/googlecalendar" alt="" className="w-3 h-3 flex-shrink-0 mt-px" />}
                         <div className="min-w-0 flex-1">
-                          <span className="truncate block">{titleCase(entry.label)}</span>
+                          <span className="truncate block font-medium">{titleCase(entry.label)}</span>
                           {heightPx >= 36 && entry.start && entry.end && (
-                            <span className="truncate block opacity-70 text-[9px]">
+                            <span className="truncate block opacity-65 text-[9px]">
                               {format(parseISO(entry.start), 'h:mm a')} – {format(parseISO(entry.end), 'h:mm a')}
                             </span>
                           )}
                           {heightPx >= 52 && entry.location && (
-                            <span className="truncate block opacity-60 text-[9px]">{entry.location}</span>
+                            <span className="truncate block opacity-55 text-[9px]">{entry.location}</span>
                           )}
                         </div>
                       </div>
@@ -790,12 +856,15 @@ function MonthView({
   anchor,
   onSelect,
   selectedId,
+  calendars,
 }: {
   entries: CalendarEntry[]
   anchor: Date
   onSelect: (entry: CalendarEntry) => void
   selectedId?: string
+  calendars?: GoogleCalendarInfo[]
 }) {
+  const isDark = useIsDark()
   const monthStart = startOfMonth(anchor)
   const monthEnd = endOfMonth(anchor)
   const calStart = startOfWeek(monthStart, { weekStartsOn: 0 })
@@ -820,21 +889,25 @@ function MonthView({
               isToday(day) && 'bg-blue-50/50 dark:bg-blue-950/20'
             )}>
               <p className={cn('text-[11px] font-medium mb-0.5', isToday(day) ? 'text-blue-600' : 'text-neutral-500')}>{format(day, 'd')}</p>
-              {dayEntries.slice(0, 3).map(entry => (
-                <div
-                  key={entry.id}
-                  onClick={() => onSelect(entry)}
-                  className={cn(
-                    'text-[9px] truncate rounded px-1 mb-0.5 cursor-pointer relative',
-                    typeColors(entry.type).bg,
-                    typeColors(entry.type).text,
-                    selectedId === entry.id && 'ring-1 ring-current'
-                  )}
-                >
-                  {entry.source === 'google' && <img src="https://logos.composio.dev/api/googlecalendar" alt="" className="w-2.5 h-2.5 absolute bottom-0.5 right-1" />}
-                  {titleCase(entry.label)}
-                </div>
-              ))}
+              {dayEntries.slice(0, 3).map(entry => {
+                const style = getEventStyle(entry, calendars, isDark)
+                return (
+                  <div
+                    key={entry.id}
+                    onClick={() => onSelect(entry)}
+                    style={{
+                      backgroundColor: style.bg,
+                      borderLeft: `2px solid ${style.accent}`,
+                      color: style.text,
+                      boxShadow: selectedId === entry.id ? `inset 0 0 0 1px ${style.accent}` : undefined,
+                    }}
+                    className="text-[9px] truncate rounded px-1 mb-0.5 cursor-pointer relative font-medium"
+                  >
+                    {entry.source === 'google' && <img src="https://logos.composio.dev/api/googlecalendar" alt="" className="w-2.5 h-2.5 absolute bottom-0.5 right-1" />}
+                    {titleCase(entry.label)}
+                  </div>
+                )
+              })}
               {dayEntries.length > 3 && (
                 <p className="text-[9px] text-neutral-400">+{dayEntries.length - 3} more</p>
               )}
@@ -854,13 +927,16 @@ function DayView({
   activeHours,
   onSelect,
   selectedId,
+  calendars,
 }: {
   entries: CalendarEntry[]
   anchor: Date
   activeHours: { start: number; end: number }
   onSelect: (entry: CalendarEntry) => void
   selectedId?: string
+  calendars?: GoogleCalendarInfo[]
 }) {
+  const isDark = useIsDark()
   const hours = Array.from({ length: 24 }, (_, i) => i)
   const isOffHour = (h: number) => h < activeHours.start || h >= activeHours.end
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -901,33 +977,41 @@ function DayView({
               <div className="flex-1 relative overflow-visible">
                 {hourEntries.map((entry, idx) => {
                   const durationHours = getEntryDurationHours(entry)
-                  const heightPx = Math.max(durationHours * 48, 24)
+                  const heightPx = Math.max(durationHours * 48 - 2, 22) // -2 for vertical gap
                   const count = hourEntries.length
                   const widthPct = count > 1 ? `${Math.floor(100 / count)}%` : undefined
                   const leftPct = count > 1 ? `${Math.floor((100 / count) * idx)}%` : undefined
+                  const style = getEventStyle(entry, calendars, isDark)
                   return (
                     <div
                       key={entry.id}
                       onClick={() => onSelect(entry)}
-                      style={{ height: `${heightPx}px`, zIndex: 20 + idx, ...(widthPct ? { width: widthPct, left: leftPct } : {}) }}
+                      style={{
+                        height: `${heightPx}px`,
+                        zIndex: 20 + idx,
+                        backgroundColor: style.bg,
+                        borderLeft: `3px solid ${style.accent}`,
+                        color: style.text,
+                        boxShadow: selectedId === entry.id
+                          ? `inset 0 0 0 1.5px ${style.accent}`
+                          : `inset 0 0 0 1px ${isDark ? 'rgba(0,0,0,0.35)' : 'rgba(255,255,255,0.85)'}`,
+                        ...(widthPct ? { width: widthPct, left: leftPct } : {}),
+                      }}
                       className={cn(
-                        'absolute top-0 rounded px-2 py-1 text-[12px] cursor-pointer overflow-hidden flex items-start gap-1.5',
+                        'absolute top-[1px] rounded px-2 py-1 text-[12px] cursor-pointer overflow-hidden flex items-start gap-1.5',
                         count <= 1 && 'inset-x-0',
-                        typeColors(entry.type).bg,
-                        typeColors(entry.type).text,
-                        selectedId === entry.id && 'ring-1 ring-current'
                       )}
                     >
                       {entry.source === 'google' && <img src="https://logos.composio.dev/api/googlecalendar" alt="" className="w-3.5 h-3.5 flex-shrink-0 mt-px" />}
                       <div className="min-w-0 flex-1">
-                        <span className="truncate block">{titleCase(entry.label)}</span>
+                        <span className="truncate block font-medium">{titleCase(entry.label)}</span>
                         {heightPx >= 40 && entry.start && entry.end && (
-                          <span className="truncate block opacity-70 text-[10px]">
+                          <span className="truncate block opacity-65 text-[10px]">
                             {format(parseISO(entry.start), 'h:mm a')} – {format(parseISO(entry.end), 'h:mm a')}
                           </span>
                         )}
                         {heightPx >= 60 && entry.location && (
-                          <span className="truncate block opacity-60 text-[10px]">{entry.location}</span>
+                          <span className="truncate block opacity-55 text-[10px]">{entry.location}</span>
                         )}
                       </div>
                     </div>

@@ -12,3 +12,21 @@ target/
 *.tsbuildinfo
 binaries/
 apps/desktop/src-tauri/vendor/
+apps/desktop/public/pyodide/
+
+# Hygiene: untracked media / scratch
+*.mov
+IMG_*.PNG
+IMG_*.png
+Screenshot*.png
+Screenshot *.png
+packages/agent-core/test-*.mjs
+packages/agent-core/test-*.ts
+packages/agent-core/analyze-usage.js
+packages/mcp-memory/inspect.js
+packages/mcp-memory/test-search.js
+/*.pdf
+/TOKEN_OPTIMIZATION_REPORT.md
+/coagent-logo.png
+/setup.md
+scripts/test-*-live.ts

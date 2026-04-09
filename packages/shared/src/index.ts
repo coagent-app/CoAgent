@@ -168,7 +168,7 @@ export type WSClientMessage =
   | { type: 'get_settings' }
   | { type: 'update_settings'; patch: Partial<AgentSettings> }
   | { type: 'get_files' }
-  | { type: 'ingest_file'; filename: string; mimeType: string; data: string }  // base64-encoded file content
+  | { type: 'ingest_file'; filename: string; mimeType: string; data: string; group?: string }  // base64-encoded file content
   | { type: 'ingest_file_paths'; paths: string[]; group?: string }  // local file paths, server reads directly
   | { type: 'delete_file'; id: string }
   | { type: 'create_folder'; name: string }
@@ -224,6 +224,10 @@ export type WSClientMessage =
   | { type: 'team_invite' }
   | { type: 'canvas_open'; canvasId: string }
   | { type: 'canvas_close' }
+  | { type: 'python_event'; requestId: string; event: PythonEvent }
+  | { type: 'python_done'; requestId: string; stdout: string; stderr: string; resultRepr?: string; durationMs: number; figures?: string[] }
+  | { type: 'python_error'; requestId: string; errorType: string; message: string; traceback: string; stdout: string; stderr: string }
+  | { type: 'python_cancelled'; requestId: string; reason: 'user' | 'timeout' }
 
 export type WSServerMessage =
   | { type: 'queue_update'; items: ApprovalItem[] }
@@ -287,6 +291,15 @@ export type WSServerMessage =
   | { type: 'canvas_updated'; canvas: Canvas }
   | { type: 'canvas_streaming'; canvasId: string; title?: string; partialCode: string }
   | { type: 'canvas_error'; canvasId?: string; message: string }
+  | { type: 'python_run'; requestId: string; conversationId: string; code: string; timeoutMs?: number }
+  | { type: 'code_cell_start'; cellId: string; code: string }
+  | { type: 'code_cell_event'; cellId: string; event: PythonEvent }
+  | { type: 'code_cell_done'; cellId: string; stdout: string; stderr: string; resultRepr?: string; durationMs: number; figures?: string[] }
+  | { type: 'code_cell_error'; cellId: string; errorType: string; message: string; traceback: string; stdout: string; stderr: string }
+
+export type PythonEvent =
+  | { type: 'stdout'; line: string }
+  | { type: 'stderr'; line: string }
 
 export interface AdminUser {
   userId: string

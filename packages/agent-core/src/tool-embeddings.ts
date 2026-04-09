@@ -22,6 +22,19 @@ export function setToolEmbeddingsDir(dir: string): void {
   dataDir = dir
 }
 
+/**
+ * Reset all cached LanceDB handles and tool-hash state. Use in tests/eval
+ * harnesses that run multiple Agents against different temp dirs — without
+ * this, a stale `table` handle from the previous run points at a directory
+ * that's already been deleted, and the next embedTools() call blows up.
+ */
+export function resetToolEmbeddingsState(): void {
+  table = null
+  paramTable = null
+  cachedToolHash = null
+  dataDir = null
+}
+
 export async function embed(texts: string[]): Promise<number[][]> {
   const proxy = getOpenAIProxy()
   if (!proxy) return texts.map(() => [])

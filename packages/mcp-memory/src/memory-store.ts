@@ -1,5 +1,5 @@
-import { readFile, writeFile, mkdir, readdir, stat, unlink, rmdir } from 'fs/promises'
-import { existsSync, watch, readFileSync } from 'fs'
+import { readFile, writeFile, mkdir, readdir, stat, unlink, rmdir, cp } from 'fs/promises'
+import { existsSync, watch, readFileSync, readdirSync } from 'fs'
 import { join, dirname } from 'path'
 import { connect, Table } from '@lancedb/lancedb'
 
@@ -97,6 +97,18 @@ export function chunkContent(content: string): string[] {
 // MemoryStore
 // ---------------------------------------------------------------------------
 
+// LanceDB is append-only and never self-compacts. Every write (write_memory,
+// append_memory, edit_memory, schedule sync, indexFile) creates a new table
+// version + Parquet fragment. Without periodic compaction, vector search has
+// to walk every historical fragment and latency grows linearly with write
+// count. These tunables bound the cruft: after COMPACT_EVERY_WRITES mutations
+// we run optimize() in the background; on init, if the DB is already
+// fragmented above COMPACT_INIT_THRESHOLD, we run it synchronously before
+// serving any queries.
+const COMPACT_EVERY_WRITES = 50
+const COMPACT_INIT_THRESHOLD = 20
+const COMPACT_BACKUP_THRESHOLD = 100
+
 export class MemoryStore {
   private memoryDir: string
   private baseDir: string
@@ -110,6 +122,9 @@ export class MemoryStore {
   private syncInProgress = false
   private syncPending = false
   private scheduleIndexPath: string
+  private writesSinceCompact = 0
+  private compactInProgress = false
+  private compactMarkerPath: string
 
   constructor(baseDir: string) {
     this.baseDir = baseDir
@@ -117,6 +132,7 @@ export class MemoryStore {
     this.dbDir = join(baseDir, 'embeddings')
     this.scheduleIndexPath = join(baseDir, 'schedule-index.json')
     this.indexedAtPath = join(baseDir, 'embeddings', 'indexed-at.json')
+    this.compactMarkerPath = join(baseDir, 'embeddings', '.compacted')
   }
 
   async init(): Promise<void> {
@@ -167,6 +183,19 @@ export class MemoryStore {
     // Watch calendar.json and auto-index schedule items
     await this.syncSchedule()
     this.watchCalendar()
+
+    // Compact the LanceDB table if it's accumulated too many fragments.
+    // Badly fragmented DBs (100+ fragments) block init so the first query
+    // isn't slow; moderately fragmented DBs compact in the background so
+    // startup stays fast.
+    const fragmentCount = this.countFragments()
+    if (fragmentCount >= COMPACT_BACKUP_THRESHOLD) {
+      console.error(`[Memory] DB is heavily fragmented (${fragmentCount} fragments) — compacting before serving queries…`)
+      await this.compactIfNeeded({ force: true })
+    } else if (fragmentCount >= COMPACT_INIT_THRESHOLD) {
+      // Fire and forget — searches remain available while compaction runs
+      void this.compactIfNeeded({ force: true })
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -314,6 +343,7 @@ export class MemoryStore {
     await this.table.add(rows)
     this.indexedAt.set(relativePath, Date.now())
     this.saveIndexedAt()
+    this.scheduleCompactAfterWrite()
   }
 
   async editSection(relativePath: string, oldContent: string, newContent: string): Promise<boolean> {
@@ -363,6 +393,7 @@ export class MemoryStore {
     await writeFile(fullPath, updated, 'utf-8')
     this.indexedAt.set(relativePath, Date.now())
     this.saveIndexedAt()
+    this.scheduleCompactAfterWrite()
     return true
   }
 
@@ -533,6 +564,94 @@ export class MemoryStore {
   }
 
   // -------------------------------------------------------------------------
+  // Compaction
+  // -------------------------------------------------------------------------
+
+  /** Count live Parquet fragments in the LanceDB data directory. */
+  private countFragments(): number {
+    try {
+      const dataDir = join(this.dbDir, 'memories.lance', 'data')
+      if (!existsSync(dataDir)) return 0
+      return readdirSync(dataDir).filter(f => f.endsWith('.lance')).length
+    } catch {
+      return 0
+    }
+  }
+
+  /**
+   * Compact the LanceDB table and drop old manifest/transaction history.
+   * Idempotent and safe to call repeatedly. Skips work if the table is
+   * already lean (below COMPACT_INIT_THRESHOLD) unless `force: true`.
+   *
+   * On the first ever compaction (no `.compacted` marker present) and when
+   * fragmentation exceeds COMPACT_BACKUP_THRESHOLD, we snapshot the
+   * embeddings directory so a hypothetical LanceDB bug is recoverable.
+   */
+  private async compactIfNeeded(opts: { force?: boolean } = {}): Promise<void> {
+    if (!this.table) return
+    if (this.compactInProgress) return
+
+    const fragmentCount = this.countFragments()
+    if (!opts.force && fragmentCount < COMPACT_INIT_THRESHOLD) return
+
+    // One-time safety backup for the first compaction on a badly fragmented DB
+    const needsBackup =
+      !existsSync(this.compactMarkerPath) && fragmentCount >= COMPACT_BACKUP_THRESHOLD
+    if (needsBackup) {
+      const backupDir = `${this.dbDir}.backup-${Date.now()}`
+      try {
+        // MCP servers must not write to stdout — that's the JSON-RPC channel.
+        // All log lines go to stderr via console.error, matching the rest of
+        // this module.
+        console.error(`[Memory] Creating one-time pre-compaction backup at ${backupDir}…`)
+        await cp(this.dbDir, backupDir, { recursive: true })
+        console.error(`[Memory] Backup complete. Delete it once you trust the compacted DB.`)
+      } catch (err: any) {
+        console.error('[Memory] Backup failed — aborting compaction to be safe:', err.message)
+        return
+      }
+    }
+
+    this.compactInProgress = true
+    try {
+      const start = Date.now()
+      console.error(`[Memory] Compacting LanceDB (${fragmentCount} fragments)…`)
+      const stats = await this.table.optimize({ cleanupOlderThan: new Date() })
+      const elapsed = Date.now() - start
+      const afterCount = this.countFragments()
+      console.error(
+        `[Memory] Compaction complete in ${elapsed}ms — ${fragmentCount} → ${afterCount} fragments`,
+        stats,
+      )
+      this.writesSinceCompact = 0
+      // Drop the marker after the first successful compact so subsequent
+      // runs on an already-healthy DB don't re-backup
+      try {
+        await writeFile(this.compactMarkerPath, new Date().toISOString(), 'utf-8')
+      } catch {
+        /* best effort */
+      }
+    } catch (err: any) {
+      console.error('[Memory] Compaction failed:', err.message)
+    } finally {
+      this.compactInProgress = false
+    }
+  }
+
+  /**
+   * Increment the post-write counter and kick off a background compaction
+   * once we've accumulated enough mutations. Called from every mutation
+   * path (indexFile / appendMemory / editSection / schedule sync).
+   */
+  private scheduleCompactAfterWrite(): void {
+    this.writesSinceCompact++
+    if (this.writesSinceCompact >= COMPACT_EVERY_WRITES) {
+      this.writesSinceCompact = 0
+      void this.compactIfNeeded({ force: true })
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Private helpers
   // -------------------------------------------------------------------------
 
@@ -552,6 +671,7 @@ export class MemoryStore {
     const escaped = relativePath.replace(/'/g, "''")
     await this.table.delete(`path = '${escaped}'`)
     await this.table.add(rows)
+    this.scheduleCompactAfterWrite()
   }
 
   /** Recursively list all .md files under memoryDir as relative paths. */
@@ -716,6 +836,13 @@ export class MemoryStore {
 
     console.error(`[Memory] Schedule sync: ${toRemove.length} removed, ${toAdd.length} indexed (${activeItems.size} active)`)
     this.saveScheduleIndex()
+
+    // Schedule syncs are frequent and each one adds/removes fragments,
+    // so count each mutation. A single sync with N changes could push us
+    // past the threshold on its own.
+    for (let i = 0; i < toRemove.length + toAdd.length; i++) {
+      this.scheduleCompactAfterWrite()
+    }
   }
 
   private loadScheduleIndex(): void {

@@ -2,6 +2,42 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { open } from '@tauri-apps/plugin-shell'
 import { invoke } from '@tauri-apps/api/core'
 import type { ApprovalItem, DoneItem, AgentMessage, WSServerMessage, WSClientMessage, Integration, AgentSettings, FileEntry, AuthStatus, AuthMethod, RelayUsage, UsageSummary, CalendarEntry, AdminUser, GoogleCalendarInfo, WSServerMessage as WSSMsg, Canvas } from '@coagent/shared'
+import { executePython, cancelConversation } from '@/python/python-kernel'
+import { readFileAsBase64 } from '@/lib/utils'
+
+// ── Global file-drop target ──────────────────────────────────────────────────
+// When FilesPane is mounted and the user is viewing a folder, drops anywhere in
+// the app ingest into that folder instead of the root. FilesPane sets this via
+// setFileDropTarget on mount/path-change and clears it on unmount.
+let currentFileDropTarget = ''
+export function setFileDropTarget(group: string): void {
+  currentFileDropTarget = group
+}
+
+export interface CodeCell {
+  id: string
+  code: string
+  status: 'running' | 'done' | 'error' | 'cancelled'
+  stdout: string
+  stderr: string
+  resultRepr?: string
+  errorType?: string
+  errorMessage?: string
+  traceback?: string
+  durationMs?: number
+  /** Cell appears in the chat after the message at this index. */
+  anchorIndex: number
+  /**
+   * Content of the message the cell is anchored to, used to re-compute
+   * `anchorIndex` when chat history is reloaded. We cannot use timestamps:
+   * the server regenerates them on every getChatHistory() call (agent.ts),
+   * so a cached timestamp never matches the fresh history. Message content,
+   * by contrast, is stable across reloads because conversationHistory is
+   * persisted on disk. `null` means the cell was created before any message
+   * existed (very rare; renders at the top).
+   */
+  anchorMessageContent?: string | null
+}
 
 type RelayCredentials = Extract<WSSMsg, { type: 'relay_credentials' }>
 
@@ -76,6 +112,27 @@ export function useAgent() {
   const [canvasVisible, setCanvasVisible] = useState(false)
   const [canvasStreamingCode, setCanvasStreamingCode] = useState<string | null>(null)
   const [canvasStreaming, setCanvasStreaming] = useState(false)
+  // Python code cells (Pyodide). Keyed by requestId from server. Hydrated from
+  // localStorage so cells survive server restarts, HMR reloads, and webview
+  // refreshes. Any cell still marked 'running' at load time was interrupted
+  // by the reload, so we reset it to 'cancelled'.
+  const [codeCells, setCodeCells] = useState<Record<string, CodeCell>>(() => {
+    const cached = (_cached.codeCells ?? {}) as Record<string, CodeCell & { anchorMessageTimestamp?: string | null }>
+    const fixed: Record<string, CodeCell> = {}
+    for (const [id, cell] of Object.entries(cached)) {
+      // Migrate cells cached before content-based anchoring landed — they
+      // have `anchorMessageTimestamp` which is useless (server regenerates
+      // timestamps on every history fetch). We'll re-anchor them against
+      // the message at `anchorIndex - 1` once chat_history arrives, but for
+      // the initial render they use the cached index as-is.
+      const { anchorMessageTimestamp, ...rest } = cell
+      const migrated: CodeCell = rest
+      fixed[id] = migrated.status === 'running' ? { ...migrated, status: 'cancelled' } : migrated
+    }
+    return fixed
+  })
+  // Order in which cells were started (so the chat can interleave them with messages)
+  const [codeCellOrder, setCodeCellOrder] = useState<string[]>(_cached.codeCellOrder ?? [])
   const settingsRef = useRef<AgentSettings | null>(_cached.settings ?? null)
   const prevConnectedSlugs = useRef<Set<string> | null>(null)
 
@@ -222,7 +279,36 @@ export function useAgent() {
             import('@/lib/voice').then(v => { v.cancelTts(); v.showVoiceSummary('') })
           }
         }
-        if (msg.type === 'chat_history') { wasStreamingRef.current = false; setStreamingText(null); setMessages(msg.messages.slice(-100)); saveCache({ messages: msg.messages.slice(-50) }) }
+        if (msg.type === 'chat_history') {
+          wasStreamingRef.current = false
+          setStreamingText(null)
+          const newMessages = msg.messages.slice(-100)
+          setMessages(newMessages)
+          saveCache({ messages: newMessages.slice(-50) })
+          // Re-anchor cached code cells against the fresh messages array.
+          // Match by stored message content (not timestamp — the server
+          // regenerates timestamps on every history fetch). Content is
+          // stable across reloads because conversationHistory is persisted.
+          // If two messages share the same content, the first match wins,
+          // which matches the original insertion order.
+          setCodeCells(prev => {
+            if (Object.keys(prev).length === 0) return prev
+            const next: Record<string, CodeCell> = {}
+            for (const [id, cell] of Object.entries(prev)) {
+              if (!cell.anchorMessageContent) {
+                // Legacy cell from before content-anchoring — keep the cached
+                // index, clamped to the current history length so it doesn't
+                // point past the end.
+                next[id] = { ...cell, anchorIndex: Math.min(cell.anchorIndex, newMessages.length) }
+                continue
+              }
+              const target = cell.anchorMessageContent
+              const idx = newMessages.findIndex(m => m.content === target)
+              next[id] = { ...cell, anchorIndex: idx >= 0 ? idx + 1 : newMessages.length }
+            }
+            return next
+          })
+        }
         if (msg.type === 'integrations_update') {
           // Detect newly connected integration with triggers → show prompt
           // Skip first update (initial load) — only detect transitions during this session
@@ -366,6 +452,74 @@ export function useAgent() {
           setError(m.message || 'Canvas error')
           setTimeout(() => setError(null), 5000)
         }
+        if ((msg as any).type === 'python_run') {
+          const m = msg as any
+          const cellId: string = m.requestId
+          const cellCode: string = m.code
+          // Snapshot any in-flight streaming text as a final bubble and
+          // anchor the new cell after that snapshot — done in one updater so
+          // the anchor index reflects the post-snapshot message count.
+          setStreamingText(current => {
+            setMessages(prev => {
+              let next = prev
+              if (current?.trim()) {
+                next = [...prev, { role: 'assistant' as const, content: current, timestamp: new Date().toISOString() }].slice(-100)
+              }
+              const anchorIndex = next.length
+              const anchorMessageContent = next[next.length - 1]?.content ?? null
+              setCodeCells(p => ({
+                ...p,
+                [cellId]: { id: cellId, code: cellCode, status: 'running', stdout: '', stderr: '', anchorIndex, anchorMessageContent },
+              }))
+              setCodeCellOrder(p => p.includes(cellId) ? p : [...p, cellId])
+              return next
+            })
+            return null
+          })
+          // Run in the worker pool, stream events both into local state (for the
+          // chat UI) and back over the WS to the agent (so it can see results).
+          executePython({
+            conversationId: m.conversationId || 'main',
+            code: m.code,
+            timeoutMs: m.timeoutMs,
+            onEvent: (event) => {
+              const ws = wsRef.current
+              if (event.type === 'stdout') {
+                setCodeCells(prev => prev[cellId] ? { ...prev, [cellId]: { ...prev[cellId], stdout: prev[cellId].stdout + event.line + '\n' } } : prev)
+                if (ws?.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({ type: 'python_event', requestId: cellId, event: { type: 'stdout', line: event.line } }))
+                }
+              } else if (event.type === 'stderr') {
+                setCodeCells(prev => prev[cellId] ? { ...prev, [cellId]: { ...prev[cellId], stderr: prev[cellId].stderr + event.line + '\n' } } : prev)
+                if (ws?.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({ type: 'python_event', requestId: cellId, event: { type: 'stderr', line: event.line } }))
+                }
+              } else if (event.type === 'done') {
+                setCodeCells(prev => prev[cellId] ? { ...prev, [cellId]: { ...prev[cellId], status: 'done', resultRepr: event.resultRepr, durationMs: event.durationMs } } : prev)
+                if (ws?.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({ type: 'python_done', requestId: cellId, stdout: '', stderr: '', resultRepr: event.resultRepr, durationMs: event.durationMs }))
+                }
+              } else if (event.type === 'error') {
+                setCodeCells(prev => prev[cellId] ? { ...prev, [cellId]: { ...prev[cellId], status: 'error', errorType: event.errorType, errorMessage: event.message, traceback: event.traceback } } : prev)
+                if (ws?.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({ type: 'python_error', requestId: cellId, errorType: event.errorType, message: event.message, traceback: event.traceback, stdout: '', stderr: '' }))
+                }
+              } else if (event.type === 'cancelled') {
+                setCodeCells(prev => prev[cellId] ? { ...prev, [cellId]: { ...prev[cellId], status: 'cancelled' } } : prev)
+                if (ws?.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({ type: 'python_cancelled', requestId: cellId, reason: event.reason }))
+                }
+              }
+            },
+          }).catch((err) => {
+            console.error('[python] executePython failed:', err)
+            setCodeCells(prev => prev[cellId] ? { ...prev, [cellId]: { ...prev[cellId], status: 'error', errorType: 'KernelError', errorMessage: err?.message || String(err), traceback: '' } } : prev)
+            const ws = wsRef.current
+            if (ws?.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'python_error', requestId: cellId, errorType: 'KernelError', message: err?.message || String(err), traceback: '', stdout: '', stderr: '' }))
+            }
+          })
+        }
         if (msg.type === 'error') { setError(msg.message); setTimeout(() => setError(null), 5000) }
         if (msg.type === 'integration_needs_fields') {
           setPendingFields({ slug: msg.slug, fields: msg.fields })
@@ -401,6 +555,10 @@ export function useAgent() {
 
   // ── Persist messages to localStorage for instant load on restart ─────────────
   useEffect(() => { saveCache({ messages: messages.slice(-50) }) }, [messages])
+  // Persist code cells + their order so Python outputs survive server restarts,
+  // HMR reloads, and webview refreshes. Cells re-anchor themselves against
+  // restored chat history in the chat_history handler above.
+  useEffect(() => { saveCache({ codeCells, codeCellOrder }) }, [codeCells, codeCellOrder])
 
   // ── Voice: allow App.tsx to send WS messages via custom event ───────────────
   useEffect(() => {
@@ -421,19 +579,27 @@ export function useAgent() {
       if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
     }
     function handleDrop(e: DragEvent) {
+      // Component-level drop handlers (e.g. FilesPane folder card) stop native
+      // propagation via stopImmediatePropagation, so this listener won't fire
+      // for drops that already landed somewhere more specific.
       e.preventDefault()
       const files = e.dataTransfer?.files
       if (!files?.length) return
+      const group = currentFileDropTarget
       for (const file of files) {
-        const reader = new FileReader()
-        reader.onload = (ev) => {
-          const result = ev.target?.result as string
-          const base64 = result.split(',')[1] ?? ''
-          if (!base64) return
-          const msg: WSClientMessage = { type: 'ingest_file', filename: file.name, mimeType: file.type || 'application/octet-stream', data: base64 }
+        readFileAsBase64(file).then((base64) => {
+          const msg: WSClientMessage = {
+            type: 'ingest_file',
+            filename: file.name,
+            mimeType: file.type || 'application/octet-stream',
+            data: base64,
+            ...(group ? { group } : {}),
+          }
           wsRef.current?.send(JSON.stringify(msg))
-        }
-        reader.readAsDataURL(file)
+        }).catch((err) => {
+          setError(err?.message || `Could not read "${file.name}"`)
+          setTimeout(() => setError(null), 5000)
+        })
       }
     }
     document.addEventListener('dragover', handleDragOver)
@@ -534,8 +700,8 @@ export function useAgent() {
   const updateAuth = useCallback((method: AuthMethod, credential: string) => send({ type: 'update_auth', method, credential }), [send])
   const verifyAuth = useCallback(() => send({ type: 'verify_auth' }), [send])
 
-  const ingestFile = useCallback((filename: string, mimeType: string, data: string) => {
-    send({ type: 'ingest_file', filename, mimeType, data })
+  const ingestFile = useCallback((filename: string, mimeType: string, data: string, group?: string) => {
+    send({ type: 'ingest_file', filename, mimeType, data, ...(group ? { group } : {}) })
   }, [send])
 
   const deleteFile = useCallback((id: string) => {
@@ -695,5 +861,15 @@ export function useAgent() {
     send({ type: 'trigger_heartbeat' })
   }, [send])
 
-  return { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, pendingFields, setPendingFields, setModel, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, getTeamInfo, getTeamHistory, triggerPrompt, setTriggerPrompt, canvas, canvasVisible, canvasStreaming, canvasStreamingCode, openCanvas, closeCanvas }
+  const cancelCodeCell = useCallback((cellId: string) => {
+    // Cancel by terminating the worker for this conversation
+    cancelConversation('main')
+    setCodeCells(prev => prev[cellId] && prev[cellId].status === 'running' ? { ...prev, [cellId]: { ...prev[cellId], status: 'cancelled' } } : prev)
+    const ws = wsRef.current
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'python_cancelled', requestId: cellId, reason: 'user' }))
+    }
+  }, [])
+
+  return { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, pendingFields, setPendingFields, setModel, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, getTeamInfo, getTeamHistory, triggerPrompt, setTriggerPrompt, canvas, canvasVisible, canvasStreaming, canvasStreamingCode, openCanvas, closeCanvas, codeCells, codeCellOrder, cancelCodeCell }
 }

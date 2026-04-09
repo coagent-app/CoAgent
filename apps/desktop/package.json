@@ -3,10 +3,11 @@
   "version": "0.2.0",
   "private": true,
   "scripts": {
-    "dev": "node ../../scripts/start-dev.js",
-    "build": "tsc && vite build",
+    "dev": "node scripts/copy-pyodide.mjs && node ../../scripts/start-dev.js",
+    "build": "node scripts/copy-pyodide.mjs && tsc && vite build",
     "tauri": "tauri",
-    "build:doc-runtime": "node src/doc-runtime/build.js"
+    "build:doc-runtime": "node src/doc-runtime/build.js",
+    "copy-pyodide": "node scripts/copy-pyodide.mjs"
   },
   "dependencies": {
     "@coagent/shared": "workspace:*",
@@ -27,6 +28,7 @@
     "date-fns": "^4.1.0",
     "lucide-react": "^0.575.0",
     "pdfjs-dist": "^5.4.624",
+    "pyodide": "^0.29.3",
     "qrcode": "^1.5.4",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
@@ -35,7 +37,8 @@
     "recharts": "^3.8.1",
     "remark-gfm": "^4.0.1",
     "tailwind-merge": "^3.5.0",
-    "tailwindcss-animate": "^1.0.7"
+    "tailwindcss-animate": "^1.0.7",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",

@@ -18,11 +18,12 @@ import { useUpdater } from '@/hooks/useUpdater'
 import { useTheme } from '@/hooks/useTheme'
 import { cn } from '@/lib/utils'
 import { registerVoiceHotkey, unregisterVoiceHotkey, cancelVoice, setTtsVolume } from '@/lib/voice'
+import { primeKernelPool, sweepIdleWorkers } from '@/python/python-kernel'
 import { emit } from '@tauri-apps/api/event'
 import type { ApprovalItem } from '@coagent/shared'
 
 export default function App() {
-  const { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, error, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, settings, updateSettings, authStatus, updateAuth, verifyAuth, files, folders, searchResults, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, relayActive, relayModel, setRelayModel, relayUsage, activateRelay, refreshRelayStatus, pendingFields, setPendingFields, setModel, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, triggerPrompt, setTriggerPrompt, canvas, canvasVisible, canvasStreaming, canvasStreamingCode, closeCanvas } = useAgent()
+  const { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, error, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, settings, updateSettings, authStatus, updateAuth, verifyAuth, files, folders, searchResults, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, relayActive, relayModel, setRelayModel, relayUsage, activateRelay, refreshRelayStatus, pendingFields, setPendingFields, setModel, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, triggerPrompt, setTriggerPrompt, canvas, canvasVisible, canvasStreaming, canvasStreamingCode, closeCanvas, codeCells, codeCellOrder, cancelCodeCell } = useAgent()
   const { dark, toggle: toggleTheme } = useTheme()
   const updater = useUpdater()
   const [view, setView] = useState<View>('chat')
@@ -44,6 +45,14 @@ export default function App() {
     window.addEventListener('keydown', handleEsc)
     return () => window.removeEventListener('keydown', handleEsc)
   }, [stopAgent])
+
+  // Python kernel: prime one Pyodide worker on app launch so the first
+  // run_python call has no cold-start latency. Sweep idle workers periodically.
+  useEffect(() => {
+    primeKernelPool()
+    const interval = setInterval(sweepIdleWorkers, 5 * 60 * 1000) // every 5 min
+    return () => clearInterval(interval)
+  }, [])
 
   // Voice: register/unregister based on voice_enabled setting
   const voiceEnabled = settings?.voice_enabled ?? false
@@ -116,7 +125,7 @@ export default function App() {
 
         {view === 'chat' && (
           <div className="relative flex-1 flex overflow-hidden">
-            <ChatPane messages={messages} streamingText={streamingText} thinking={thinking} processing={processing} toolLabel={toolLabel} researchAgents={researchAgents} connected={connected} onChat={chat} onSteer={steer} onStop={stopAgent} onIngestFile={ingestFile} files={files} onNavigateToSettings={() => setView('settings')} lastHeartbeat={lastHeartbeat} heartbeatLog={heartbeatLog} onTriggerHeartbeat={triggerHeartbeat} statusLine={statusLine} skills={skills} capabilityCard={capabilityCard} onConfirmCapabilities={confirmCapabilities} userName={settings?.name} userRole={settings?.role} onboarded={settings?.onboarded} agentName={settings?.agent_name} className="flex-1" />
+            <ChatPane messages={messages} streamingText={streamingText} thinking={thinking} processing={processing} toolLabel={toolLabel} researchAgents={researchAgents} connected={connected} onChat={chat} onSteer={steer} onStop={stopAgent} onIngestFile={ingestFile} files={files} onNavigateToSettings={() => setView('settings')} lastHeartbeat={lastHeartbeat} heartbeatLog={heartbeatLog} onTriggerHeartbeat={triggerHeartbeat} statusLine={statusLine} skills={skills} capabilityCard={capabilityCard} onConfirmCapabilities={confirmCapabilities} userName={settings?.name} userRole={settings?.role} onboarded={settings?.onboarded} agentName={settings?.agent_name} codeCells={codeCells} codeCellOrder={codeCellOrder} onCancelCodeCell={cancelCodeCell} className="flex-1" />
             {canvas && canvasVisible && (
               <CanvasPane
                 canvas={canvas}

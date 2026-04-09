@@ -1,13 +1,15 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Trash2, FileText, Sheet, Image, File, Folder, Pencil, LayoutGrid, List, ArrowUpDown, ArrowUp, ArrowDown, Search, X, ChevronLeft, ExternalLink, Sparkles } from 'lucide-react'
+import { Trash2, FileText, Sheet, Image, File, FileVideo, Folder, Pencil, LayoutGrid, List, ArrowUpDown, ArrowUp, ArrowDown, Search, X, ChevronLeft, ExternalLink } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import type { FileEntry } from '@coagent/shared'
+import { setFileDropTarget } from '@/hooks/useAgent'
+import { readFileAsBase64 } from '@/lib/utils'
 
 interface FilesPaneProps {
   files: FileEntry[]
   folders: string[]
   searchResults: FileEntry[] | null
-  onIngest: (filename: string, mimeType: string, data: string) => void
+  onIngest: (filename: string, mimeType: string, data: string, group?: string) => void
   onIngestPaths: (paths: string[], group?: string) => void
   onDelete: (id: string) => void
   onCreateFolder: (name: string) => void
@@ -46,10 +48,10 @@ const STORAGE_SORT_DIR = 'coagent_files_sort_dir'
 
 function fileIcon(filename: string) {
   const ext = filename.split('.').pop()?.toLowerCase()
-  if (ext === 'cadoc') return Sparkles
   if (ext === 'pdf') return FileText
   if (['csv', 'xlsx', 'xls'].includes(ext ?? '')) return Sheet
   if (['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(ext ?? '')) return Image
+  if (['mp4', 'mov', 'avi', 'mkv', 'webm', 'm4v', 'wmv', 'flv'].includes(ext ?? '')) return FileVideo
   return File
 }
 
@@ -274,6 +276,253 @@ function isTextFile(filename: string): boolean {
   return TEXT_EXTS.has(`.${ext}`)
 }
 
+const XLSX_EXTS = new Set(['.xlsx', '.xls'])
+
+function isXlsx(filename: string): boolean {
+  const ext = filename.split('.').pop()?.toLowerCase() ?? ''
+  return XLSX_EXTS.has(`.${ext}`)
+}
+
+// Module-level cache for xlsx previews: path → rendered rows (strings)
+const xlsxPreviewCache = new Map<string, string[][]>()
+
+const XLSX_PREVIEW_ROWS = 8
+const XLSX_PREVIEW_COLS = 5
+
+function XlsxThumbnail({ path, size }: { path: string; size: 'grid' | 'list' }) {
+  const [rows, setRows] = useState<string[][] | null>(xlsxPreviewCache.get(path) ?? null)
+  const [error, setError] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (xlsxPreviewCache.has(path)) return
+    const el = containerRef.current
+    if (!el) return
+
+    let cancelled = false
+    const observer = new IntersectionObserver(
+      async (entries) => {
+        if (!entries[0]?.isIntersecting) return
+        observer.disconnect()
+        try {
+          const bytes: number[] = await invoke('read_file_bytes', { path })
+          const XLSX = await import('xlsx')
+          // `sheetRows` caps how many rows the parser walks — we only render
+          // the first XLSX_PREVIEW_ROWS, so there's no reason to parse more.
+          // Huge workbooks (100k+ rows) would otherwise stall the main thread.
+          const wb = XLSX.read(new Uint8Array(bytes), { type: 'array', sheetRows: XLSX_PREVIEW_ROWS })
+          const sheetName = wb.SheetNames[0]
+          if (!sheetName) throw new Error('empty workbook')
+          const ws = wb.Sheets[sheetName]
+          const aoa: unknown[][] = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' }) as unknown[][]
+          const trimmed = aoa.slice(0, XLSX_PREVIEW_ROWS).map(r =>
+            (r ?? []).slice(0, XLSX_PREVIEW_COLS).map(c => String(c ?? '').slice(0, 24))
+          )
+          // Pad short rows so the table renders consistently.
+          for (const r of trimmed) {
+            while (r.length < XLSX_PREVIEW_COLS) r.push('')
+          }
+          if (!cancelled) {
+            xlsxPreviewCache.set(path, trimmed)
+            setRows(trimmed)
+          }
+        } catch (err) {
+          console.warn('[xlsx-thumbnail] failed to render preview:', path, err)
+          if (!cancelled) setError(true)
+        }
+      },
+      { threshold: 0.1 }
+    )
+    observer.observe(el)
+    return () => { cancelled = true; observer.disconnect() }
+  }, [path])
+
+  if (error) {
+    return (
+      <div className="w-full h-full flex items-center justify-center rounded-lg bg-emerald-50 dark:bg-emerald-950">
+        <Sheet size={size === 'grid' ? 22 : 14} className="text-emerald-400 dark:text-emerald-500" />
+      </div>
+    )
+  }
+
+  const cellFont = size === 'grid' ? 'text-[4.5px]' : 'text-[5px]'
+  const cellPad = size === 'grid' ? 'px-[2px] py-[0.5px]' : 'px-[1px]'
+
+  return (
+    <div
+      ref={containerRef}
+      className={`w-full h-full overflow-hidden bg-white dark:bg-neutral-900 ${size === 'grid' ? 'rounded-lg' : 'rounded'} border border-emerald-100 dark:border-emerald-900`}
+    >
+      {rows !== null ? (
+        <table className="w-full h-full border-collapse table-fixed">
+          <tbody>
+            {rows.map((row, rIdx) => (
+              <tr key={rIdx} className={rIdx === 0 ? 'bg-emerald-50 dark:bg-emerald-950' : ''}>
+                {row.map((cell, cIdx) => (
+                  <td
+                    key={cIdx}
+                    className={`${cellFont} ${cellPad} border border-emerald-100 dark:border-emerald-900/60 text-neutral-600 dark:text-neutral-400 truncate ${rIdx === 0 ? 'font-semibold text-emerald-700 dark:text-emerald-400' : ''}`}
+                  >
+                    {cell}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <div className="w-full h-full rounded bg-neutral-100 dark:bg-neutral-800 animate-pulse" />
+      )}
+    </div>
+  )
+}
+
+// ── Video thumbnails ────────────────────────────────────────────────────────
+const VIDEO_EXTS = new Set(['.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v', '.wmv', '.flv'])
+// Cap: reading the full file through read_file_bytes is expensive, so skip
+// the thumbnail for videos bigger than this and fall back to the icon.
+const VIDEO_THUMBNAIL_MAX_BYTES = 100 * 1024 * 1024
+// Module-level cache for video thumbnails: path → frame data URL
+const videoThumbnailCache = new Map<string, string>()
+
+function isVideo(filename: string): boolean {
+  const ext = filename.split('.').pop()?.toLowerCase() ?? ''
+  return VIDEO_EXTS.has(`.${ext}`)
+}
+
+const VIDEO_MIME_MAP: Record<string, string> = {
+  mp4: 'video/mp4',
+  m4v: 'video/mp4',
+  mov: 'video/quicktime',
+  webm: 'video/webm',
+  mkv: 'video/x-matroska',
+  avi: 'video/x-msvideo',
+  wmv: 'video/x-ms-wmv',
+  flv: 'video/x-flv',
+}
+
+function VideoThumbnail({ path, filename, sizeBytes, size }: { path: string; filename: string; sizeBytes: number; size: 'grid' | 'list' }) {
+  const [dataUrl, setDataUrl] = useState<string | null>(videoThumbnailCache.get(path) ?? null)
+  const [error, setError] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (videoThumbnailCache.has(path)) return
+    if (sizeBytes > VIDEO_THUMBNAIL_MAX_BYTES) { setError(true); return }
+    const el = containerRef.current
+    if (!el) return
+
+    let cancelled = false
+    let objectUrl: string | null = null
+    const observer = new IntersectionObserver(
+      async (entries) => {
+        if (!entries[0]?.isIntersecting) return
+        observer.disconnect()
+        try {
+          const bytes: number[] = await invoke('read_file_bytes', { path })
+          if (cancelled) return
+          const ext = filename.split('.').pop()?.toLowerCase() ?? 'mp4'
+          const mime = VIDEO_MIME_MAP[ext] ?? 'video/mp4'
+          const blob = new Blob([new Uint8Array(bytes)], { type: mime })
+          objectUrl = URL.createObjectURL(blob)
+
+          // Offscreen video → seek to ~1s → paint a frame onto a canvas →
+          // read back as a data URL. Muted + playsInline so nothing audible
+          // happens while we capture the frame.
+          const video = document.createElement('video')
+          video.muted = true
+          video.playsInline = true
+          video.preload = 'auto'
+          video.src = objectUrl
+
+          const frameUrl: string = await new Promise((resolve, reject) => {
+            const cleanup = () => {
+              video.removeEventListener('loadedmetadata', onMeta)
+              video.removeEventListener('seeked', onSeeked)
+              video.removeEventListener('error', onErr)
+            }
+            const onMeta = () => {
+              // Seek a bit past t=0 so we skip a potential black intro frame,
+              // but stay within the video's duration for short clips.
+              const target = Math.min(1, (isFinite(video.duration) ? video.duration : 1) * 0.1)
+              try { video.currentTime = target } catch (e) { reject(e) }
+            }
+            const onSeeked = () => {
+              try {
+                const w = video.videoWidth
+                const h = video.videoHeight
+                if (!w || !h) { reject(new Error('no video dimensions')); return }
+                // Downscale longest edge to 256px to keep thumbnails lightweight.
+                const maxEdge = 256
+                const scale = Math.min(1, maxEdge / Math.max(w, h))
+                const cw = Math.max(1, Math.round(w * scale))
+                const ch = Math.max(1, Math.round(h * scale))
+                const canvas = document.createElement('canvas')
+                canvas.width = cw
+                canvas.height = ch
+                const ctx = canvas.getContext('2d')
+                if (!ctx) { reject(new Error('no 2d context')); return }
+                ctx.drawImage(video, 0, 0, cw, ch)
+                resolve(canvas.toDataURL('image/jpeg', 0.72))
+              } catch (err) {
+                reject(err)
+              } finally {
+                cleanup()
+              }
+            }
+            const onErr = () => { cleanup(); reject(new Error('video element error')) }
+            video.addEventListener('loadedmetadata', onMeta)
+            video.addEventListener('seeked', onSeeked)
+            video.addEventListener('error', onErr)
+          })
+
+          if (!cancelled) {
+            videoThumbnailCache.set(path, frameUrl)
+            setDataUrl(frameUrl)
+          }
+        } catch (err) {
+          console.warn('[video-thumbnail] failed to render preview:', path, err)
+          if (!cancelled) setError(true)
+        } finally {
+          // The blob URL was only needed to feed the offscreen <video>; the
+          // captured frame is stored as a data URL, so we can release the blob.
+          if (objectUrl) URL.revokeObjectURL(objectUrl)
+        }
+      },
+      { threshold: 0.1 }
+    )
+    observer.observe(el)
+    return () => { cancelled = true; observer.disconnect() }
+  }, [path, filename, sizeBytes])
+
+  if (error) {
+    return (
+      <div className={`w-full h-full flex items-center justify-center ${fileIconBg(filename)}`}>
+        <FileVideo size={size === 'grid' ? 22 : 14} className={fileIconColor(filename)} />
+      </div>
+    )
+  }
+  const cls = size === 'grid'
+    ? 'w-full h-full object-cover rounded-lg'
+    : 'w-full h-full object-cover rounded'
+  return (
+    <div ref={containerRef} className="w-full h-full relative">
+      {dataUrl ? (
+        <>
+          <img src={dataUrl} alt={filename} className={cls} draggable={false} />
+          {size === 'grid' && (
+            <div className="absolute bottom-1 right-1 bg-black/60 rounded-full p-1">
+              <FileVideo size={10} className="text-white" />
+            </div>
+          )}
+        </>
+      ) : (
+        <div className="w-full h-full rounded bg-neutral-100 dark:bg-neutral-800 animate-pulse" />
+      )}
+    </div>
+  )
+}
+
 // Module-level cache for text previews: path → first lines
 const textPreviewCache = new Map<string, string>()
 
@@ -330,6 +579,7 @@ function fileIconBg(filename: string): string {
   if (['xlsx', 'xls', 'csv'].includes(ext)) return 'bg-emerald-50 dark:bg-emerald-950'
   if (['pptx', 'ppt'].includes(ext)) return 'bg-orange-50 dark:bg-orange-950'
   if (['zip', 'rar', '7z'].includes(ext)) return 'bg-purple-50 dark:bg-purple-950'
+  if (['mp4', 'mov', 'avi', 'mkv', 'webm', 'm4v', 'wmv', 'flv'].includes(ext)) return 'bg-violet-50 dark:bg-violet-950'
   return 'bg-neutral-50 dark:bg-neutral-800'
 }
 
@@ -339,6 +589,7 @@ function fileIconColor(filename: string): string {
   if (['xlsx', 'xls', 'csv'].includes(ext)) return 'text-emerald-400 dark:text-emerald-500'
   if (['pptx', 'ppt'].includes(ext)) return 'text-orange-400 dark:text-orange-500'
   if (['zip', 'rar', '7z'].includes(ext)) return 'text-purple-400 dark:text-purple-500'
+  if (['mp4', 'mov', 'avi', 'mkv', 'webm', 'm4v', 'wmv', 'flv'].includes(ext)) return 'text-violet-400 dark:text-violet-500'
   return 'text-neutral-400 dark:text-neutral-500'
 }
 
@@ -421,7 +672,9 @@ export function FilesPane({
   const [dragOverBreadcrumb, setDragOverBreadcrumb] = useState(false)
 
   // Derived ordered arrays for the current view (stable identity within a render).
-  const rawVisibleFiles = files.filter(f => f.group === currentPath)
+  // .cadoc files are canvas documents managed by the Canvas system — hide them
+  // from the Files pane so users only see their own uploads.
+  const rawVisibleFiles = files.filter(f => f.group === currentPath && !f.filename.toLowerCase().endsWith('.cadoc'))
   const visibleFiles = sortFiles(rawVisibleFiles, sortField, sortDir)
   const visibleFolders = directChildFolders(localFolders, currentPath)
   const isEmpty = visibleFolders.length === 0 && visibleFiles.length === 0 && !creatingFolder && !searchQuery
@@ -480,6 +733,14 @@ export function FilesPane({
   useEffect(() => { localStorage.setItem(STORAGE_SORT_FIELD, sortField) }, [sortField])
   useEffect(() => { localStorage.setItem(STORAGE_SORT_DIR, sortDir) }, [sortDir])
 
+  // ── Sync current folder to the global drop-target ─────────────────────────
+  // So that OS file drops anywhere in the app land in the folder the user is
+  // viewing, not always at the root. Cleared on unmount.
+  useEffect(() => {
+    setFileDropTarget(currentPath)
+    return () => setFileDropTarget('')
+  }, [currentPath])
+
   // ── Search debounce ───────────────────────────────────────────────────────
   useEffect(() => {
     if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current)
@@ -501,6 +762,45 @@ export function FilesPane({
   useEffect(() => {
     if (searchResults !== null) setIsSearching(false)
   }, [searchResults])
+
+  // ── Paste-to-upload ───────────────────────────────────────────────────────
+  // Lets the user paste files copied from Finder/Explorer or paste screenshot
+  // images directly into the current folder. Scoped to when focus is inside
+  // the Files pane (not an input/textarea).
+  useEffect(() => {
+    function handlePaste(e: ClipboardEvent) {
+      const target = e.target as HTMLElement | null
+      const tag = target?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || (target?.isContentEditable ?? false)) return
+      const items = e.clipboardData?.items
+      if (!items || items.length === 0) return
+
+      const pasted: globalThis.File[] = []
+      for (const item of items) {
+        if (item.kind === 'file') {
+          const f = item.getAsFile()
+          if (f) {
+            // Clipboard images often have generic names like "image.png" —
+            // prefix with a timestamp so successive pastes don't collide.
+            if (!f.name || f.name === 'image.png') {
+              const ext = (f.type.split('/')[1] ?? 'png').split(';')[0]
+              const ts = new Date().toISOString().replace(/[:.]/g, '-')
+              pasted.push(new globalThis.File([f], `pasted-${ts}.${ext}`, { type: f.type }))
+            } else {
+              pasted.push(f)
+            }
+          }
+        }
+      }
+
+      if (pasted.length > 0) {
+        e.preventDefault()
+        readAndSend(pasted, onIngest, currentPath || undefined)
+      }
+    }
+    document.addEventListener('paste', handlePaste)
+    return () => document.removeEventListener('paste', handlePaste)
+  }, [currentPath, onIngest])
 
   // ── Cmd+A / Ctrl+A — select all visible files; Backspace/Delete — delete selected ─────
   useEffect(() => {
@@ -591,16 +891,16 @@ export function FilesPane({
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 
-  function readAndSend(fileList: FileList, ingest: typeof onIngest) {
+  function readAndSend(fileList: FileList | globalThis.File[], ingest: typeof onIngest, group?: string) {
     for (const file of fileList) {
-      const reader = new FileReader()
-      reader.onload = (e) => {
-        const result = e.target?.result as string
-        const base64 = result.split(',')[1] ?? ''
-        if (!base64) return
-        ingest(file.name, file.type || 'application/octet-stream', base64)
-      }
-      reader.readAsDataURL(file)
+      readFileAsBase64(file)
+        .then((base64) => {
+          ingest(file.name, file.type || 'application/octet-stream', base64, group)
+        })
+        .catch((err: Error) => {
+          setOpenError(err.message)
+          setTimeout(() => setOpenError(null), 5000)
+        })
     }
   }
 
@@ -705,12 +1005,28 @@ export function FilesPane({
     setRenameValue('')
   }
 
-  // ── Folder drop – moves all selected files if the drag source is selected ─
+  // ── Folder drop – moves selected files, or ingests OS file drops into the folder ─
   function handleFolderDrop(folderName: string, e: React.DragEvent) {
     // Only handle file-drag drops; folder reorder drops are handled separately
     if (e.dataTransfer.getData('folder-reorder')) return
-    if (!draggingId) return
+
     const fullPath = currentPath ? `${currentPath}/${folderName}` : folderName
+
+    // OS file drop (no internal drag in flight) — ingest the dropped files
+    // into this specific folder. `stopImmediatePropagation` on the native
+    // event prevents the document-level drop listener in useAgent from
+    // re-ingesting the same files into the current view.
+    if (!draggingId) {
+      const osFiles = e.dataTransfer?.files
+      if (osFiles && osFiles.length > 0) {
+        e.preventDefault()
+        e.nativeEvent.stopImmediatePropagation()
+        readAndSend(osFiles, onIngest, fullPath)
+        setDragOverFolder(null)
+      }
+      return
+    }
+
     const idsToMove =
       selected.has(draggingId) && selected.size > 1
         ? [...selected]
@@ -915,8 +1231,9 @@ export function FilesPane({
     : undefined
 
   // ── Visible files for search/normal view ─────────────────────────────────
+  // Also hide .cadoc from search results (same reason as rawVisibleFiles).
   const displayFiles = searchQuery.trim()
-    ? (isSearching ? null : (searchResults ?? []))
+    ? (isSearching ? null : (searchResults ?? []).filter(f => !f.filename.toLowerCase().endsWith('.cadoc')))
     : visibleFiles
 
   // ── Reusable file item renderer ───────────────────────────────────────────
@@ -953,6 +1270,10 @@ export function FilesPane({
             <ImageThumbnail path={file.path} filename={file.filename} size="grid" />
           ) : isPdf(file.filename) ? (
             <PdfThumbnail fileId={file.id} path={file.path} size="grid" />
+          ) : isXlsx(file.filename) ? (
+            <XlsxThumbnail path={file.path} size="grid" />
+          ) : isVideo(file.filename) ? (
+            <VideoThumbnail path={file.path} filename={file.filename} sizeBytes={file.sizeBytes} size="grid" />
           ) : isTextFile(file.filename) ? (
             <TextPreview path={file.path} size="grid" />
           ) : (
@@ -1019,6 +1340,10 @@ export function FilesPane({
             <ImageThumbnail path={file.path} filename={file.filename} size="list" />
           ) : isPdf(file.filename) ? (
             <PdfThumbnail fileId={file.id} path={file.path} size="list" />
+          ) : isXlsx(file.filename) ? (
+            <XlsxThumbnail path={file.path} size="list" />
+          ) : isVideo(file.filename) ? (
+            <VideoThumbnail path={file.path} filename={file.filename} sizeBytes={file.sizeBytes} size="list" />
           ) : isTextFile(file.filename) ? (
             <TextPreview path={file.path} size="list" />
           ) : (

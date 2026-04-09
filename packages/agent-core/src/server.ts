@@ -926,8 +926,14 @@ DEFAULT_SKILLS['document-design'] = {
   instructions: loadDocDesignSkillInstructions(),
 }
 
-async function writeDefaultSkills(): Promise<void> {
-  const dir = join(DATA_DIR, 'skills')
+/**
+ * Write the full default skill set to `<dataDir>/skills/`. Exported so the
+ * eval harness can mirror the exact filesystem state the production server
+ * sets up at boot — without this, probes start with 0 skills and the `skills`
+ * tool returns an empty list, which biases Kimi away from skill-driven paths.
+ */
+export async function writeDefaultSkills(dataDir: string = DATA_DIR): Promise<void> {
+  const dir = join(dataDir, 'skills')
   await mkdir(dir, { recursive: true })
 
   // Merge vertical-specific skills into defaults
@@ -1025,6 +1031,58 @@ agent.onResearchProgress = (agents) => {
 
 agent.onBroadcast = (event) => {
   broadcast(event)
+}
+
+// ── Python execution round-trip ─────────────────────────────────────────
+// The agent's run_python tool calls into agent.runPython which broadcasts a
+// `python_run` to the desktop, then awaits the matching python_done /
+// python_error / python_cancelled message (correlated by requestId).
+type PendingPython = {
+  resolve: (result: string) => void
+  stdout: string[]
+  stderr: string[]
+}
+const pendingPython = new Map<string, PendingPython>()
+
+function formatPythonResult(p: { stdout: string; stderr: string; resultRepr?: string; durationMs?: number; figures?: string[] }): string {
+  const parts: string[] = []
+  if (p.stdout.trim()) parts.push(`stdout:\n${p.stdout.trimEnd()}`)
+  if (p.stderr.trim()) parts.push(`stderr:\n${p.stderr.trimEnd()}`)
+  if (p.resultRepr != null && p.resultRepr !== '') parts.push(`result: ${p.resultRepr}`)
+  if (p.figures && p.figures.length > 0) parts.push(`figures: ${p.figures.length} produced`)
+  if (parts.length === 0) parts.push('(no output)')
+  if (p.durationMs != null) parts.push(`(${p.durationMs}ms)`)
+  return parts.join('\n')
+}
+
+function formatPythonError(p: { errorType: string; message: string; traceback: string; stdout: string; stderr: string }): string {
+  const parts: string[] = []
+  if (p.stdout.trim()) parts.push(`stdout:\n${p.stdout.trimEnd()}`)
+  if (p.stderr.trim()) parts.push(`stderr:\n${p.stderr.trimEnd()}`)
+  parts.push(`${p.errorType}: ${p.message}`)
+  if (p.traceback.trim()) parts.push(p.traceback.trimEnd())
+  return parts.join('\n')
+}
+
+agent.runPython = ({ code, conversationId }) => {
+  return new Promise<string>((resolve) => {
+    const requestId = `py-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    // Slightly longer than the kernel's 60s wall-clock so the desktop can surface its own timeout first.
+    const timeoutHandle = setTimeout(() => {
+      if (pendingPython.delete(requestId)) {
+        resolve('Error: Python execution timed out (no response from desktop client).')
+      }
+    }, 75_000)
+    pendingPython.set(requestId, {
+      resolve: (result: string) => {
+        clearTimeout(timeoutHandle)
+        resolve(result)
+      },
+      stdout: [],
+      stderr: [],
+    })
+    broadcast({ type: 'python_run', requestId, conversationId, code, timeoutMs: 60_000 })
+  })
 }
 
 agent.onSettingsChanged = async () => {
@@ -1522,25 +1580,37 @@ agent.mcpManager.registerPending('custom', customMcpInit)
   if (saved.imessage || saved.contacts) embedToolsFromMcp().catch(() => {})
 })()
 
-// Kill any stale process on the port before starting
+// Kill any stale process on the port before starting.
+// PIDs are always validated via /^\d+$/ and passed to kill/taskkill via
+// execFileSync (argv), never string-interpolated into a shell.
 try {
-  const { execSync } = require('child_process')
+  const { execSync, execFileSync } = require('child_process')
+  const isValidPid = (p: string): boolean => /^\d+$/.test(p)
+  const myPid = String(process.pid)
   if (process.platform === 'win32') {
     const out = execSync(`netstat -ano | findstr ":${PORT}" | findstr LISTENING`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }).trim()
-    const pids: string[] = out.split('\n').map((l: string) => l.trim().split(/\s+/).pop() || '').filter(Boolean)
-    const myPid = String(process.pid)
-    const stale = pids.filter(p => p !== myPid)
+    const stale = out.split('\n')
+      .map((l: string) => (l.trim().split(/\s+/).pop() || '').trim())
+      .filter(isValidPid)
+      .filter((p: string) => p !== myPid)
     if (stale.length > 0) {
-      for (const pid of stale) { try { execSync(`taskkill /PID ${pid} /F`, { stdio: 'ignore' }) } catch {} }
+      for (const pid of stale) { try { execFileSync('taskkill', ['/PID', pid, '/F'], { stdio: 'ignore' }) } catch {} }
       console.log(`[Server] Killed stale process(es) on port ${PORT}: ${stale.join(', ')}`)
     }
   } else {
-    const pids = execSync(`lsof -ti:${PORT}`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }).trim()
-    if (pids) {
-      const myPid = String(process.pid)
-      const stale = pids.split('\n').filter((p: string) => p !== myPid)
+    let lsofOut = ''
+    try {
+      lsofOut = execFileSync('lsof', ['-t', '-i', `:${PORT}`], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }).toString().trim()
+    } catch {
+      // lsof exits non-zero when no matches — treat as "nothing to kill"
+    }
+    if (lsofOut) {
+      const stale = lsofOut.split('\n')
+        .map((p: string) => p.trim())
+        .filter(isValidPid)
+        .filter((p: string) => p !== myPid)
       if (stale.length > 0) {
-        execSync(`kill -9 ${stale.join(' ')}`, { stdio: 'ignore' })
+        try { execFileSync('kill', ['-9', ...stale], { stdio: 'ignore' }) } catch {}
         console.log(`[Server] Killed stale process(es) on port ${PORT}: ${stale.join(', ')}`)
       }
     }
@@ -2890,7 +2960,7 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
     if (msg.type === 'ingest_file') {
       try {
         const buffer = Buffer.from(msg.data, 'base64')
-        const entry = await ingestFile(DATA_DIR, msg.filename, buffer, msg.mimeType)
+        const entry = await ingestFile(DATA_DIR, msg.filename, buffer, msg.mimeType, msg.group)
         send(ws, { type: 'file_ingested', id: entry.id, filename: entry.filename })
         await sendFilesAndFolders(ws)
       } catch (err: any) {
@@ -3194,6 +3264,56 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
         }
       } catch (err: any) {
         send(ws, { type: 'canvas_error', canvasId: (msg as any).canvasId, message: err?.message || 'Failed to open canvas' })
+      }
+    }
+
+    // ── Python execution responses from the desktop kernel ───────────────
+    if (msg.type === 'python_event') {
+      const m = msg as any
+      const pending = pendingPython.get(m.requestId)
+      if (pending) {
+        if (m.event?.type === 'stdout') pending.stdout.push(m.event.line)
+        else if (m.event?.type === 'stderr') pending.stderr.push(m.event.line)
+      }
+    }
+
+    if (msg.type === 'python_done') {
+      const m = msg as any
+      const pending = pendingPython.get(m.requestId)
+      if (pending) {
+        pendingPython.delete(m.requestId)
+        pending.resolve(formatPythonResult({
+          stdout: pending.stdout.join('\n') + (m.stdout || ''),
+          stderr: pending.stderr.join('\n') + (m.stderr || ''),
+          resultRepr: m.resultRepr,
+          durationMs: m.durationMs,
+          figures: m.figures,
+        }))
+      }
+    }
+
+    if (msg.type === 'python_error') {
+      const m = msg as any
+      const pending = pendingPython.get(m.requestId)
+      if (pending) {
+        pendingPython.delete(m.requestId)
+        pending.resolve(formatPythonError({
+          errorType: m.errorType,
+          message: m.message,
+          traceback: m.traceback,
+          stdout: pending.stdout.join('\n') + (m.stdout || ''),
+          stderr: pending.stderr.join('\n') + (m.stderr || ''),
+        }))
+      }
+    }
+
+    if (msg.type === 'python_cancelled') {
+      const m = msg as any
+      const pending = pendingPython.get(m.requestId)
+      if (pending) {
+        pendingPython.delete(m.requestId)
+        const reason = m.reason === 'timeout' ? 'timed out (60s)' : 'cancelled by user'
+        pending.resolve(`Python execution ${reason}.\nstdout:\n${pending.stdout.join('\n')}\nstderr:\n${pending.stderr.join('\n')}`)
       }
     }
 

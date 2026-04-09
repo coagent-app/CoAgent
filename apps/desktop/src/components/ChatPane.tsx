@@ -10,6 +10,8 @@ import { cn } from '@/lib/utils'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { AgentMessage, FileEntry } from '@coagent/shared'
+import { CodeCell } from '@/components/CodeCell'
+import type { CodeCell as CodeCellType } from '@/hooks/useAgent'
 
 interface ChatPaneProps {
   messages: AgentMessage[]
@@ -37,6 +39,9 @@ interface ChatPaneProps {
   onboarded?: boolean
   agentName?: string
   onOpenDocument?: (fileId: string) => void
+  codeCells?: Record<string, CodeCellType>
+  codeCellOrder?: string[]
+  onCancelCodeCell?: (id: string) => void
   className?: string
 }
 
@@ -593,7 +598,18 @@ function useDictation(onResult: (text: string) => void) {
   return { recording, transcribing, start, stop }
 }
 
-export function ChatPane({ messages, streamingText, thinking, processing, toolLabel, researchAgents = [], connected, onChat, onSteer, onStop, onIngestFile, files, onNavigateToSettings, lastHeartbeat, heartbeatLog = [], onTriggerHeartbeat, statusLine, skills = [], capabilityCard, onConfirmCapabilities, userName, userRole, onboarded, agentName, className }: ChatPaneProps) {
+export function ChatPane({ messages, streamingText, thinking, processing, toolLabel, researchAgents = [], connected, onChat, onSteer, onStop, onIngestFile, files, onNavigateToSettings, lastHeartbeat, heartbeatLog = [], onTriggerHeartbeat, statusLine, skills = [], capabilityCard, onConfirmCapabilities, userName, userRole, onboarded, agentName, codeCells = {}, codeCellOrder = [], onCancelCodeCell, className }: ChatPaneProps) {
+  // Group cells by anchor index for interleaved rendering between messages.
+  // Cells with anchorIndex = N appear after the message at index N-1 (i.e.
+  // between message N-1 and message N).
+  const cellsByAnchor: Record<number, CodeCellType[]> = {}
+  for (const id of codeCellOrder) {
+    const cell = codeCells[id]
+    if (!cell) continue
+    const idx = cell.anchorIndex
+    if (!cellsByAnchor[idx]) cellsByAnchor[idx] = []
+    cellsByAnchor[idx].push(cell)
+  }
   const [input, setInput] = useState('')
   const [skillQuery, setSkillQuery] = useState<string | null>(null)
   const [selectedSkillIdx, setSelectedSkillIdx] = useState(0)
@@ -815,16 +831,31 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
             </div>
           )}
 
-          {messages.map((msg, i) => (
-            <div key={i} className={cn('flex', msg.role === 'user' ? 'justify-end' : 'justify-start')}>
-              {msg.role === 'user' ? (
-                <div className="bg-neutral-900 dark:bg-neutral-700 text-white text-[13.5px] leading-relaxed rounded-2xl rounded-tr-sm px-4 py-2.5 max-w-[560px]">
-                  {msg.content}
-                </div>
-              ) : (
-                <AgentBubble content={msg.content} files={files} docs={msg.docs} />
-              )}
+          {/* Cells anchored at index 0 — before any messages exist yet */}
+          {cellsByAnchor[0]?.map(cell => (
+            <div key={cell.id} className="flex justify-start">
+              <CodeCell cell={cell} onCancel={onCancelCodeCell} />
             </div>
+          ))}
+
+          {messages.map((msg, i) => (
+            <React.Fragment key={i}>
+              <div className={cn('flex', msg.role === 'user' ? 'justify-end' : 'justify-start')}>
+                {msg.role === 'user' ? (
+                  <div className="bg-neutral-900 dark:bg-neutral-700 text-white text-[13.5px] leading-relaxed rounded-2xl rounded-tr-sm px-4 py-2.5 max-w-[560px]">
+                    {msg.content}
+                  </div>
+                ) : (
+                  <AgentBubble content={msg.content} files={files} docs={msg.docs} />
+                )}
+              </div>
+              {/* Cells with anchorIndex === i+1 appear after the message at index i */}
+              {cellsByAnchor[i + 1]?.map(cell => (
+                <div key={cell.id} className="flex justify-start">
+                  <CodeCell cell={cell} onCancel={onCancelCodeCell} />
+                </div>
+              ))}
+            </React.Fragment>
           ))}
 
           {thinking && !streamingText && (

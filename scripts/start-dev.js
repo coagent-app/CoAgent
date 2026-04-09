@@ -1,6 +1,6 @@
 // Starts backend server + vite for Tauri dev mode. Handles port conflicts automatically.
 
-const { spawn, execSync } = require('child_process')
+const { spawn, execSync, execFileSync } = require('child_process')
 const { join } = require('path')
 const net = require('net')
 
@@ -9,24 +9,34 @@ const VITE_PORT = 1420
 const ROOT = join(__dirname, '..')
 const children = []
 
+const isValidPid = (p) => /^\d+$/.test(p)
+
 function killPort(port) {
   try {
     if (process.platform === 'win32') {
       const out = execSync(`netstat -ano | findstr ":${port}" | findstr LISTENING`, { encoding: 'utf-8' }).trim()
       if (out) {
-        const pids = [...new Set(out.split('\n').map(l => l.trim().split(/\s+/).pop()).filter(Boolean))]
+        const pids = [...new Set(
+          out.split('\n').map(l => (l.trim().split(/\s+/).pop() || '').trim()).filter(isValidPid)
+        )]
         for (const pid of pids) {
-          try { execSync(`taskkill /PID ${pid} /F`, { stdio: 'ignore' }) } catch {}
+          try { execFileSync('taskkill', ['/PID', pid, '/F'], { stdio: 'ignore' }) } catch {}
         }
-        return true
+        return pids.length > 0
       }
     } else {
-      const pids = execSync(`lsof -ti :${port} 2>/dev/null`, { encoding: 'utf-8' }).trim()
-      if (pids) {
-        for (const pid of pids.split('\n')) {
-          try { process.kill(parseInt(pid), 'SIGTERM') } catch {}
+      let out = ''
+      try {
+        out = execFileSync('lsof', ['-t', '-i', `:${port}`], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }).toString().trim()
+      } catch {
+        // lsof exits non-zero when no matches
+      }
+      if (out) {
+        const pids = out.split('\n').map(p => p.trim()).filter(isValidPid)
+        for (const pid of pids) {
+          try { process.kill(parseInt(pid, 10), 'SIGTERM') } catch {}
         }
-        return true
+        return pids.length > 0
       }
     }
   } catch {}
@@ -71,6 +81,22 @@ async function main() {
 
   // Start backend server if not running
   if (await isPortFree(SERVER_PORT)) {
+    // Rebuild agent-core AND every workspace package it depends on so the
+    // running server always reflects the latest source. Without this, devs
+    // edit .ts files, restart `pnpm tauri dev`, and silently run stale dist/
+    // code — for both agent-core and any shared/mcp-* package it imports.
+    // The `...@pkg` filter includes the target package plus all upstream deps.
+    console.log('[dev] Building agent-core (+ deps)...')
+    try {
+      execSync('pnpm --filter "@coagent/agent-core..." build', {
+        cwd: ROOT,
+        stdio: 'inherit',
+      })
+    } catch {
+      console.error('[dev] agent-core build failed — aborting dev start')
+      process.exit(1)
+    }
+
     console.log('[dev] Starting backend server...')
     const server = spawn('node', [join(ROOT, 'packages/agent-core/dist/server.js')], {
       stdio: ['ignore', 'pipe', 'pipe'],

@@ -1,0 +1,13 @@
+{
+  "title": "Daily Briefing",
+  "plan": "Stream the body in via update_document with insert ops, one block at a time. Recommended structure:\n\n1. replace the header block: set title to today's human date (e.g. \"Tuesday, April 7\") and subtitle to a short greeting using the user's name.\n2. insert a kpis block with 3 metrics: Meetings (count), Unread Emails (count), Weather (city + temp).\n3. insert a text block starting with \"## Today's Schedule\" listing meetings with times, titles, and one-line context.\n4. insert a callout variant=\"info\" title=\"Top Priorities\" with 2–4 prioritized bullets.\n5. insert a text block starting with \"## Email Highlights\" summarizing 3–5 emails that actually matter today.\n6. insert a text block starting with \"## Follow-ups Due\" listing todos due today or overdue.\n7. insert a footer block.\n\nGather data in parallel before inserting (check calendar, memory for priorities, unread email summaries). Never write literal \"{{PLACEHOLDER}}\" text. Skip any block you don't have real content for.",
+  "blocks": [
+    {
+      "id": "header",
+      "type": "header",
+      "eyebrow": "DAILY BRIEFING",
+      "title": "",
+      "subtitle": ""
+    }
+  ]
+}

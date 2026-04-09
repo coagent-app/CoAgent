@@ -355,7 +355,10 @@ fn open_file(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn read_file_bytes(path: String) -> Result<Vec<u8>, String> {
+async fn read_file_bytes(path: String) -> Result<Vec<u8>, String> {
+    // `async` so Tauri runs this on the async runtime thread-pool rather than
+    // the main thread — lets multiple thumbnails read in parallel without
+    // blocking the UI. The file I/O itself is still sync (tiny payloads).
     let canonical = is_allowed_path(&path)?;
     std::fs::read(&canonical).map_err(|e| format!("Failed to read '{}': {}", path, e))
 }
@@ -637,16 +640,50 @@ fn base64_decode_from(input: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-// Write arbitrary bytes (passed as base64) to an absolute path on disk.
-// Used by the user-initiated PDF export to save directly to a chosen location
-// without going through the Files index.
+// Write bytes (passed as base64) to a path inside ~/.coagent.
+//
+// The app is sandboxed to its own data directory — callers cannot write
+// anywhere else on the filesystem. If a user wants to save a file outside
+// ~/.coagent, they should drag it out in Finder, or a future "Export As..."
+// flow should use Tauri's native save dialog plugin (which returns an
+// OS-verified path rather than a caller-supplied string).
+//
+// We validate the *parent* directory rather than the full path because the
+// target file doesn't exist yet and can't be canonicalized directly.
 #[tauri::command]
 fn write_file_bytes(path: String, base64: String) -> Result<(), String> {
     let bytes = base64_decode_from(&base64).map_err(|e| format!("base64 decode: {}", e))?;
-    if let Some(parent) = std::path::Path::new(&path).parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {}", e))?;
+
+    let p = std::path::Path::new(&path);
+    let parent = p.parent()
+        .ok_or_else(|| format!("path has no parent directory: {}", path))?;
+
+    // Filename must be a simple, non-traversing component.
+    let filename = p.file_name()
+        .ok_or_else(|| format!("path has no filename: {}", path))?;
+    let filename_str = filename.to_string_lossy();
+    if filename_str.is_empty() || filename_str == "." || filename_str == ".." {
+        return Err(format!("write denied: invalid filename '{}'", filename_str));
     }
-    std::fs::write(&path, &bytes).map_err(|e| format!("write: {}", e))?;
+
+    // Create parent dir (idempotent) so we can canonicalize it to resolve symlinks.
+    std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {}", e))?;
+    let canonical_parent = parent.canonicalize()
+        .map_err(|e| format!("resolve parent '{}': {}", parent.display(), e))?;
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    let coagent_root = std::path::Path::new(&home).join(".coagent");
+    let canonical_root = coagent_root.canonicalize().unwrap_or(coagent_root);
+
+    if !canonical_parent.starts_with(&canonical_root) {
+        return Err(format!(
+            "write denied: '{}' is outside ~/.coagent",
+            parent.display()
+        ));
+    }
+
+    let target = canonical_parent.join(filename);
+    std::fs::write(&target, &bytes).map_err(|e| format!("write: {}", e))?;
     Ok(())
 }
 

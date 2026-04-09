@@ -1,0 +1,13 @@
+{
+  "title": "Client Status Report",
+  "plan": "Stream the body in via update_document with insert ops, one block at a time. Recommended structure:\n\n1. replace the header block: set title to \"{Client Name} — Status Report\" and subtitle to the date range (e.g. \"Mar 31 – Apr 6, 2026\").\n2. insert a kpis block with 3–4 metrics (Deliverables, On Track, Hours Used, Utilization).\n3. insert a text block starting with \"## Summary\" and one tight paragraph.\n4. insert a text block starting with \"## This Week\" and 3–5 bullets of wins / work delivered.\n5. insert a table block with headers [\"Task\", \"Owner\", \"Status\"] and the real rows.\n6. insert a text block starting with \"## Next Week\" and the planned work.\n7. If there are blockers: insert a callout block variant=\"warn\" title=\"Blockers\" with the bulleted blockers. If none, skip this block entirely — do not insert an empty callout.\n8. insert a footer block.\n\nNever write literal \"{{PLACEHOLDER}}\" text anywhere. Every field you insert must contain real content gathered from memory, files, or the user's input.",
+  "blocks": [
+    {
+      "id": "header",
+      "type": "header",
+      "eyebrow": "WEEKLY STATUS",
+      "title": "",
+      "subtitle": ""
+    }
+  ]
+}

@@ -216,7 +216,7 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'queue_approval',
-    description: 'Queue a drafted action for user approval (send email, create event, delete, etc.). `detail` must contain the full draft so the user can approve as-is. NOT for asking questions or surfacing "I\'m stuck" — finish with an explanation instead. Always fill all fields.',
+    description: 'Queue a drafted action for the user to review and approve before it runs (send email, create event, delete, etc.). Use this when your autonomy mode tells you to queue instead of execute, or when the user explicitly asked you to draft something without sending it. Do NOT use this when the user asked you to do something directly and your autonomy mode allows it — just call the tool and execute. The `detail` field must contain the full draft so the user can approve as-is without rewriting. Do not use this to ask questions or surface "I\'m stuck" — say that in your reply instead. Fill every field.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -267,7 +267,7 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
         onboarded: { type: 'boolean', description: 'True after onboarding done' },
         active_hours: { type: 'object', properties: { start: { type: 'number' }, end: { type: 'number' } } },
         active_days: { type: 'array', items: { type: 'string', enum: ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] } },
-        autonomy: { type: 'string', enum: ['ask_first', 'balanced', 'agent', 'autonomous'], description: 'How much autonomy the agent has: ask_first (approve everything), balanced (ask for big stuff), autonomous (just handle it)' },
+        autonomy: { type: 'string', enum: ['ask_first', 'balanced', 'agent', 'autonomous'], description: 'Autonomy level: ask_first (confirm every write), balanced (act on routine, queue sends/edits), agent (act freely on user requests, never self-initiate writes), autonomous (act freely on everything, user-asked or self-initiated)' },
         autonomy_notes: { type: 'string', description: 'Specific autonomy rules — what to handle freely, what to always ask about, hard no\'s. Written during onboarding, injected into system prompt.' },
         heartbeat_interval: { type: 'number', description: 'Minutes between heartbeats (0=off)' },
       }
@@ -460,6 +460,17 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
       required: ['tasks']
     }
   },
+  {
+    name: 'run_python',
+    description: 'Execute Python code in a sandboxed in-app interpreter (Pyodide/WASM). Stateful within a conversation: imports and variables persist across calls. Use for data analysis (pandas), charts (matplotlib), calculations, and one-off scripting.\n\nCRITICAL — PACKAGE INSTALLATION IS FORBIDDEN: Never call `micropip`, `pip`, `!pip`, `subprocess`, `os.system`, or any install command. There is no network. Install attempts will fail. The packages below are ALREADY pre-loaded — just `import` them directly on first use and they will be auto-fetched from the local bundle.\n\nPre-installed packages (import directly, do NOT install): numpy, pandas, matplotlib, beautifulsoup4, lxml, requests, python-calamine (use `pd.read_excel(path, engine="calamine")` for .xlsx/.xls/.ods), python-dateutil (dateutil), pillow (PIL). If you need a package not in this list, tell the user — do not try to install it.\n\nTop-level `await` works natively (same as a Jupyter cell) — no asyncio.run() needed. Narrate in plain language what you are doing before/after each cell. Multiple cells per turn are fine for scrape→parse→chart workflows. 60-second timeout per cell. No filesystem or network access — work with data the user pastes or that you compute inline.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        code: { type: 'string', description: 'Full Python source for one cell. Last expression is captured Jupyter-style and shown as the result.' }
+      },
+      required: ['code']
+    }
+  },
 ]
 
 // Canvas tools — always registered (non-heartbeat contexts only).
@@ -542,6 +553,7 @@ const TOOL_LABELS: Record<string, string> = {
   skills: 'Managing Skills',
   memory: 'Checking Memory',
   spawn_agents: 'Running Agents',
+  run_python: 'Running Python',
   call_external_tool: 'Calling Tool',
   exa: 'Searching the Web',
   research: 'Researching',
@@ -585,6 +597,23 @@ const SERVICE_CASING: Record<string, string> = {
 // Common verbs that need consonant doubling for gerund
 const DOUBLE_CONSONANT = new Set(['get', 'set', 'put', 'run', 'hit', 'cut', 'let', 'sit', 'rip', 'pin', 'map', 'log', 'tag', 'ban', 'pop', 'tip', 'drop', 'stop', 'plan', 'skip', 'snap', 'step', 'strip', 'swap', 'trap', 'trip', 'wrap'])
 
+// Known action verbs — used to identify the verb inside a tool name regardless
+// of its position (Composio names use SERVICE_RESOURCE_ACTION, so the verb is
+// often not the first word after the service prefix).
+const ACTION_VERBS = new Set([
+  'get', 'set', 'list', 'create', 'read', 'write', 'delete', 'update', 'send',
+  'fetch', 'search', 'find', 'check', 'add', 'remove', 'edit', 'save', 'load',
+  'run', 'start', 'stop', 'trigger', 'call', 'push', 'pull', 'sync', 'export',
+  'import', 'upload', 'download', 'move', 'copy', 'rename', 'mark', 'toggle',
+  'enable', 'disable', 'verify', 'validate', 'test', 'query', 'browse', 'open',
+  'close', 'cancel', 'approve', 'reject', 'invite', 'share', 'archive',
+  'restore', 'schedule', 'unsubscribe', 'subscribe', 'reply', 'forward',
+  'draft', 'publish', 'accept', 'decline', 'insert', 'modify', 'post', 'patch',
+  'clear', 'count', 'duplicate', 'resolve', 'assign', 'star', 'unstar', 'pin',
+  'unpin', 'lock', 'unlock', 'watch', 'unwatch', 'follow', 'unfollow', 'merge',
+  'revert', 'replace', 'transfer', 'convert', 'generate',
+])
+
 function toGerund(verb: string): string {
   if (verb.endsWith('ing')) return verb  // already gerund
   if (DOUBLE_CONSONANT.has(verb)) return verb + verb[verb.length - 1] + 'ing'
@@ -619,9 +648,7 @@ function humanizeToolName(name: string): string {
     // Heuristic: take the first segment as service if there are 2+ segments and it's all caps
     if (parts.length >= 2 && parts[0] === parts[0].toUpperCase() && parts[0].length > 1) {
       const firstWord = parts[0].toLowerCase()
-      // Common action verbs that should NOT be treated as service names
-      const actionVerbs = new Set(['get', 'set', 'list', 'create', 'read', 'write', 'delete', 'update', 'send', 'fetch', 'search', 'find', 'check', 'add', 'remove', 'edit', 'save', 'load', 'run', 'start', 'stop', 'trigger', 'call', 'push', 'pull', 'sync', 'export', 'import', 'upload', 'download', 'move', 'copy', 'rename', 'mark', 'toggle', 'enable', 'disable', 'verify', 'validate', 'test', 'query', 'browse', 'open', 'close', 'cancel', 'approve', 'reject', 'invite', 'share', 'archive', 'restore', 'schedule', 'unsubscribe', 'subscribe'])
-      if (!actionVerbs.has(firstWord)) {
+      if (!ACTION_VERBS.has(firstWord)) {
         service = titleCase(firstWord)
         rest = parts.slice(1).join('_')
       }
@@ -629,11 +656,25 @@ function humanizeToolName(name: string): string {
   }
 
   // "FETCH_EMAILS" → "Fetching Emails"
+  // "EVENTS_LIST" → "Listing Events" (Composio SERVICE_RESOURCE_ACTION pattern)
+  // "EVENTS_LIST_ALL_CALENDARS" → "Listing Events All Calendars"
+  // Find the first known action verb anywhere in the words — gerundify it and
+  // put it first, with the remaining non-verb words following in original order.
   const words = rest.toLowerCase().replace(/_/g, ' ').trim().split(' ').filter(Boolean)
-  if (words.length > 0) {
-    words[0] = toGerund(words[0])
+  let humanized: string
+  if (words.length === 0) {
+    humanized = ''
+  } else {
+    const verbIdx = words.findIndex(w => ACTION_VERBS.has(w))
+    if (verbIdx === -1) {
+      // No verb — present words as-is (e.g. "SLACK_CHANNELS" → "Slack: Channels")
+      humanized = words.map(titleCase).join(' ')
+    } else {
+      const verbGerund = toGerund(words[verbIdx])
+      const others = [...words.slice(0, verbIdx), ...words.slice(verbIdx + 1)]
+      humanized = [verbGerund, ...others].map(titleCase).join(' ')
+    }
   }
-  const humanized = words.map(titleCase).join(' ')
   return service ? `${service}: ${humanized}` : humanized
 }
 
@@ -667,10 +708,10 @@ export function getInternalTools(context: ToolContext, activeSkillTools?: Set<st
 }
 
 const AUTONOMY_DESCRIPTIONS: Record<string, string> = {
-  ask_first: 'Queue everything except read-only lookups.',
-  balanced: 'Act on routine/read-only. Queue sends, edits, outreach.',
-  agent: 'User-initiated: act freely, execute writes directly. Self-initiated (heartbeat, trigger, routine): act on reads, queue every write for approval.',
-  autonomous: 'Act freely. Only queue destructive actions (bulk deletes).'
+  ask_first: 'Before you write, send, or change anything, ask the user first. Reading and looking things up is fine without asking.',
+  balanced: 'Act directly on reads and routine tasks. For anything the user would want to review first — sends, edits, outreach — queue it with queue_approval instead of doing it yourself.',
+  agent: 'When the user asks you to do something, do it directly — call the tool yourself without asking for permission first. Do not take actions on your own initiative; wait until the user asks.',
+  autonomous: 'Just go for it. Act freely on anything — user requests or your own initiative. The only thing you should queue is destructive bulk actions like mass deletes.'
 }
 
 // Hard guardrail: these tool name patterns ALWAYS require queue_approval, regardless of autonomy level.
@@ -697,19 +738,16 @@ function listMemoryFiles(dataDir: string): string[] {
   } catch { return [] }
 }
 
-function buildSystemPrompt(connectedServices: string[], agentProfilePath: string, settings: AgentSettings, dataDir: string, teamRoster?: any[], teamName?: string, googleCalendarConnected = false, composioSlugs: string[] = []): string {
+export function buildSystemPrompt(connectedServices: string[], agentProfilePath: string, settings: AgentSettings, dataDir: string, teamRoster?: any[], teamName?: string, googleCalendarConnected = false, composioSlugs: string[] = []): string {
   const memoryFiles = listMemoryFiles(dataDir)
 
-  const composioSection = composioSlugs.length > 0
-    ? `\nThe user has these apps connected: ${composioSlugs.map(s => s.toUpperCase()).join(', ')}. You CAN access their email, calendar, etc. through these. Do NOT tell the user an integration is missing if it's listed here.`
-    : '\nNo integrations connected yet. The user can connect apps in the Integrations panel.'
-
   const serviceSection = connectedServices.length > 0
-    ? `External integrations: ${connectedServices.join(', ')}. For these ONLY, use search_tools → call_external_tool:
-- search_tools(query, context, schema) to find tools. Call memory search in parallel when you need context.
-- call_external_tool(tool_name, parameters) to execute.
-All other tools (memory, files, schedule, skills, send_team_message, etc.) are built-in — call them directly.${composioSection}`
-    : 'No external integrations connected. Settings → connect. Built-in tools (memory, files, schedule, skills) are always available.'
+    ? `You have these external integrations connected: ${composioSlugs.join(', ')}. You CAN access the user's email, calendar, docs, and so on through these — do not tell the user an integration is missing if it's listed here.
+
+For any of these external tools, first call search_tools(query, context, schema) to find the exact tool name, then call_external_tool(tool_name, parameters) to run it. When you need context for the search, call memory search in parallel.
+
+All other tools (memory, files, schedule, skills, send_team_message, etc.) are built-in — call them directly without going through search_tools.`
+    : `You don't have any external integrations connected yet. The user can connect apps in the Integrations panel. Your built-in tools (memory, files, schedule, skills) are always available.`
 
   const onboardingSection = !settings.onboarded
     ? '\n\nONBOARDING (MANDATORY): This is a brand new user who has not been set up. You MUST call memory(action: "read", file: "onboarding.md") as your FIRST action — do NOT greet or respond until you have read it. Then follow the onboarding script exactly. One question per message. Save their info via update_settings as you learn it. When done, set onboarded: true and delete onboarding.md from memory.'
@@ -719,15 +757,19 @@ All other tools (memory, files, schedule, skills, send_team_message, etc.) are b
 
   const customInstructions = settings.custom_instructions?.trim()
 
-  return `You are ${settings.agent_name || 'CoAgent'} — a private AI agent running on the user's machine. You're self-sufficient: quietly maintain your own workspace (memory, schedule, files, followups, integration notes) in the background without being asked. Help with anything asked.
+  return `You are ${settings.agent_name || 'CoAgent'} — a private AI agent running on the user's machine. You work quietly in the background to maintain your own workspace (memory, schedule, files, followups, integration notes) without needing to be asked, and you help with anything the user asks for.
 ${customInstructions ? `\n${customInstructions}\n` : ''}
-Gather context BEFORE asking the user. If a name, email, topic, or "that thing" isn't obvious, look it up — don't ask. Triggers:
-- Unknown person/company/email → memory search + search_tools(gmail/contacts) in parallel
-- "Follow up on X" / "that thing we discussed" → memory search + recent tool logs + integration notes
-- Scheduling → get_current_time + schedule(list) in parallel (never guess the date)
-- Capability question ("can you…") → search_tools first, then answer
-Only ask the user when no tool can answer. Batch independent calls in one response — parallel is faster and cheaper than sequential. Deliberate ≠ shy: prefer a tool call over a guess or an uninformed question.
-Think like a context engineer — piece information together across sources into one coherent answer. Flag gaps or conflicts.
+Before you ask the user a question, try to answer it with your tools first. If a name, email, topic, or "that thing" isn't immediately obvious, look it up instead of asking.
+
+Here's how to gather context in common situations:
+- If the user mentions a person, company, or email you don't recognize: search memory and call search_tools for gmail/contacts in parallel.
+- If the user says "follow up on X" or "that thing we discussed": search memory, check recent tool logs, and read integration notes.
+- If the user asks you to schedule anything: call get_current_time and schedule(action: "list") in parallel. Never guess today's date.
+- If the user asks whether you can do something ("can you..."): call search_tools first to check, then answer.
+
+Only ask the user directly when no tool can give you the answer. When you have multiple independent lookups, run them all in parallel in a single response — that's faster and cheaper than doing them one at a time. Be deliberate, not shy: prefer a tool call over a guess or an uninformed question.
+
+Think like a context engineer — piece information together across your sources into one coherent answer, and flag any gaps or conflicts you find.
 
 ${serviceSection}
 User: ${settings.name || '?'} | ${settings.email || '?'} | ${settings.role || '?'} | ${settings.timezone || '?'}${settings.what_you_do ? `\nWhat they do: ${settings.what_you_do}` : ''}
@@ -735,27 +777,48 @@ Active: ${formatHour(settings.active_hours.start)}–${formatHour(settings.activ
 Autonomy: ${settings.autonomy} — ${AUTONOMY_DESCRIPTIONS[settings.autonomy]}${settings.autonomy_notes ? `\nAutonomy rules:\n${settings.autonomy_notes}` : ''}
 ${settings.heartbeat_interval > 0 ? `Heartbeat: every ${settings.heartbeat_interval}min — process triggers, check memory, escalate. After each heartbeat, call set_status_line with a brief status (3-8 words) summarizing what you found — e.g. "3 things in your queue", "All caught up", "2 new emails".` : ''}
 
-Memory: search first (parallel, semantic) before writing. Edit existing files over creating new ones. Save people/topics the user actively engages with, recurring contacts, rules and preferences you'd otherwise repeat, and facts the user will still care about a week from now. Skip one-time CC's, strangers looped into threads, form senders, and names mentioned in passing. Importance beats recency — a single email from a prospect the user cares about: save. A CC on a thread they're not part of: skip. When the user dismisses, corrects, or asks you to remove something ("don't need X", "that's old", "clean that up"), edit memory in the SAME turn — never just acknowledge. heartbeat.md defines what to check each heartbeat.${memoryFiles.length > 0 ? `\nRecent memories: ${memoryFiles.join(', ')} — search to find others.` : ''}
-Files: grep to search contents (PDF/DOCX/XLSX/text). create_folder/move to organize. get_pdf_fields + fill_pdf for fillable forms. [filename](coagent-file:ID) to open. coagent_file_ids to attach files to emails.
-Canvas: use write_canvas to create any document (proposals, reports, flyers, letters, invoices, dashboards, one-pagers). Call skills(action: 'execute', name: 'canvas-design') before writing to load the scope reference and design patterns. Use patch_canvas for iterations on an existing canvas.
-  Canvases are TSX — default-export a React component. Allowed imports: '@brand' (brand, Logo, Signature), 'recharts', 'lucide-react', 'react'. Nothing else.
-  Use Tailwind classes for layout; use brand.primary / brand.fontBody for styling. Real content only — no {{placeholders}}, "TBD", or "[fill in]".
-Schedule: create/update/delete/complete/list — routines (cron), tasks (one-time), followups. Call get_current_time in parallel when scheduling — never guess the date.${googleCalendarConnected ? ' Google Calendar synced — schedule(action: "list") includes Google events. To modify/delete Google events, use call_external_tool with GOOGLECALENDAR_UPDATE_EVENT or GOOGLECALENDAR_DELETE_EVENT (not the schedule tool).' : ''}
-Skills: skills(action: 'list') to see available, skills(action: 'execute', name: 'skill-name') to run. Run proactively when they match the request.
-Integrations: create_custom_integration + @integration-builder for new API integrations.
-Approvals: what to queue vs execute directly is defined by the Autonomy mode above — follow it. Heartbeats and triggers always queue writes regardless of mode (except in autonomous). When you queue a send (email, message, post, reply), draft the full text in the queue item — the user should be able to approve and send without rewriting. Never queue a placeholder like "draft a response" — write the actual draft. add_done_item after routine tasks.
-Followups: after sending emails/messages/proposals, ask "Want me to follow up?" — never auto-create.
-Integration notes: per-tool facts that help you use THAT tool correctly next time — IDs to reuse (default calendar, channel), user rules ("always CC legal"), quirks. Capture any such fact. Memory is for general info (people, topics); integration notes are scoped to one tool. Auto-surface as "[integration notes]:" in search_tools — follow without asking.
+Memory: always search before writing — search in parallel since it's semantic. When you do write, edit an existing file instead of creating a new one whenever possible.
 
-Keep responses short and direct — lead with the answer, skip filler and preamble. No emojis. Markdown only when it adds clarity.
-No markdown in call_external_tool content (emails, messages, notes) — plain text only, it renders literally in Gmail.
-${connectedServices.includes('coagent:imessage') ? `iMessage connected. Queue sends for approval unless autonomous.` : ''}
-${connectedServices.includes('coagent:contacts') ? `Contacts connected via search_tools.` : ''}
-VOICE MODE: When the user's message ends with [voice], the input is spoken and your reply gets read aloud. Reply in 1–2 spoken sentences, ≤30 words — the limit is hard. Natural spoken English: no markdown, no lists, no bullets, no code, no symbols that read as characters (&, #, *), no "[voice]" token in your reply. If the full answer won't fit, give the shortest useful version and add "I'll put the details on screen."
-Notifications: title 2-4 words, body one sentence.
+What to save: people and topics the user actively engages with, recurring contacts, rules and preferences you'd otherwise have to repeat, and facts the user will still care about a week from now.
 
-Web search: use composio_search (search_tools → call_external_tool) for any web lookups. The exa tool is disabled.
-spawn_agents: run parallel sub-agents for independent tasks (parallel analysis, drafting multiple versions, research + prep). Sub-agents get search, memory, and document tools but cannot send emails or perform external actions.${onboardingSection}${teamRoster && teamRoster.length > 0 ? `\n\n## Team: ${teamName || 'Your Team'}\n\nYou are part of a team. Each member has their own AI agent — when you message someone, you're talking to their agent (another AI like you), not the person directly.\nMembers:\n${teamRoster.map((m: any) => `- ${m.name} (${m.role})`).join('\n')}\n\nUse send_team_message with to="name" to message their agent. You'll wait for and receive their agent's response. Omit "to" to broadcast.\nInclude agent_context with relevant background for the receiving agent.` : ''}`
+What to skip: one-time CC's, strangers looped into a thread, form senders, and names mentioned only in passing.
+
+Importance beats recency — a single email from a prospect the user cares about is worth saving, but a CC on a thread they're not part of isn't.
+
+When the user dismisses, corrects, or asks you to remove something ("don't need X", "that's old", "clean that up"), edit memory in the same turn — don't just acknowledge it and move on.
+
+heartbeat.md defines what to check on each heartbeat.${memoryFiles.length > 0 ? `\nRecent memories: ${memoryFiles.join(', ')} — search to find others.` : ''}
+Files: use grep to search inside file contents (it works across PDF, DOCX, XLSX, and text). Use create_folder and move to organize files. For fillable PDFs, call get_pdf_fields first and then fill_pdf. Link files inline with [filename](coagent-file:ID) so the user can open them, and attach files to emails via coagent_file_ids.
+
+Canvas: use write_canvas to create any document the user asks for — proposals, reports, flyers, letters, invoices, dashboards, one-pagers. Before you write, always call skills(action: 'execute', name: 'canvas-design') to load the design patterns and scope reference. Use patch_canvas when the user asks you to iterate on an existing canvas.
+
+Canvases are TSX files that default-export a React component. The only imports you can use are '@brand' (brand, Logo, Signature), 'recharts', 'lucide-react', and 'react' — nothing else. Use Tailwind classes for layout, and style with brand.primary and brand.fontBody. Always use real content — never use {{placeholders}}, "TBD", or "[fill in]".
+
+Schedule: use the schedule tool for routines (cron-based), one-time tasks, and followups — the actions are create, update, delete, complete, and list. Always call get_current_time in parallel when you're scheduling something — never guess the date.${googleCalendarConnected ? ' Google Calendar is synced, so schedule(action: "list") includes your Google events too. To modify or delete a Google event, use call_external_tool with GOOGLECALENDAR_UPDATE_EVENT or GOOGLECALENDAR_DELETE_EVENT — not the schedule tool.' : ''}
+
+Skills: call skills(action: 'list') to see what's available, and skills(action: 'execute', name: 'skill-name') to run one. Run skills proactively when they match what the user is asking for.
+
+Integrations: for new API integrations, use create_custom_integration with @integration-builder.
+Approvals: whether to queue an action or execute it directly is determined by the autonomy mode described above — follow that mode. Heartbeats and scheduled triggers always queue writes for approval regardless of mode (the only exception is autonomous mode). When you queue something to send — email, message, post, reply — write the full text into the queue item. The user should be able to approve and send without rewriting anything. Never queue a placeholder like "draft a response"; write the actual draft. Call add_done_item after finishing routine tasks.
+
+Followups: after you send an email, message, or proposal, ask the user "Want me to follow up?" — don't create followups automatically.
+
+Integration notes: save per-tool facts that will help you use that tool correctly next time — IDs to reuse (default calendar, default channel), user rules ("always CC legal"), and quirks. Capture anything like that. Memory is for general information about people and topics; integration notes are scoped to one specific tool. They surface automatically as "[integration notes]:" inside search_tools results — follow them without asking.
+
+Keep responses short and direct. Lead with the answer and skip filler or preamble. Don't use emojis. Use markdown only when it adds clarity.
+
+When writing content inside call_external_tool — emails, messages, notes — use plain text only. Markdown renders literally in Gmail and similar apps, so don't use it there.
+${connectedServices.includes('coagent:imessage') ? `iMessage is connected. Queue iMessage sends for approval unless you're in autonomous mode.` : ''}
+${connectedServices.includes('coagent:contacts') ? `Contacts is connected via search_tools.` : ''}
+VOICE MODE: when the user's message ends with [voice], their input was spoken and your reply will be read aloud. Reply in 1-2 spoken sentences, 30 words or fewer — this limit is hard. Use natural spoken English: no markdown, no lists, no bullets, no code, and no symbols that read as characters (&, #, *). Don't include "[voice]" in your reply. If the full answer won't fit, give the shortest useful version and add "I'll put the details on screen."
+
+Notifications: title is 2-4 words, body is one sentence.
+
+Web search: for any web lookups, use composio_search through search_tools followed by call_external_tool. (The exa tool is disabled.)
+
+spawn_agents: run parallel sub-agents for independent tasks — parallel analysis, drafting multiple versions, research combined with prep. Sub-agents have access to search, memory, and document tools, but they cannot send emails or perform external actions.
+
+run_python: run small Python cells (via Pyodide, in-app) for analysis, charts, or parsing. State persists across cells. Narrate what each cell does in plain language. Skip it for trivial math.${onboardingSection}${teamRoster && teamRoster.length > 0 ? `\n\n## Team: ${teamName || 'Your Team'}\n\nYou are part of a team. Each member has their own AI agent — when you message someone, you're talking to their agent (another AI like you), not the person directly.\nMembers:\n${teamRoster.map((m: any) => `- ${m.name} (${m.role})`).join('\n')}\n\nUse send_team_message with to="name" to message their agent. You'll wait for and receive their agent's response. Omit "to" to broadcast.\nInclude agent_context with relevant background for the receiving agent.` : ''}`
 }
 
 export class Agent {
@@ -799,6 +862,12 @@ export class Agent {
   public onResearchProgress?: (agents: { query: string; status: string; detail?: string }[]) => void
   public onCustomIntegration?: (action: string, data: any) => Promise<string>
   public onBroadcast?: (event: any) => void
+  /**
+   * Execute Python in the desktop's Pyodide sandbox. Server installs this
+   * callback to round-trip a `python_run` WS message to the desktop client.
+   * Resolves with the formatted result string for the model.
+   */
+  public runPython?: (opts: { code: string; conversationId: string }) => Promise<string>
   public activeSkillTools = new Set<string>()
 
   async getSkills(): Promise<{ name: string; description: string; instructions: string; placeholder?: string; builtin: boolean }[]> {
@@ -906,7 +975,10 @@ export class Agent {
       }
       console.log(`[Agent] Loaded ${this.conversationHistory.length} messages from history`)
     } catch {
-      this.conversationHistory = []
+      // No-op. The field is already initialized to [] at declaration. Resetting
+      // here would clobber any entries pushed by callers between construction
+      // and this async catch firing (e.g. the eval harness seeding prior turns
+      // before the first chat() call).
     }
   }
 
@@ -2141,6 +2213,21 @@ Rules:
             const input = block.input as { title: string; body: string }
             this.onNotifyUser?.(input.title, input.body)
             result = 'Notification sent.'
+
+          } else if (block.name === 'run_python') {
+            const input = block.input as { code: string }
+            if (!this.runPython) {
+              result = 'Error: Python execution is not available (desktop client not connected).'
+            } else if (!input.code || typeof input.code !== 'string') {
+              result = 'Error: run_python requires `code` (string).'
+            } else {
+              try {
+                result = await this.runPython({ code: input.code, conversationId: 'main' })
+              } catch (err: any) {
+                result = `Error executing Python: ${err?.message || String(err)}`
+                console.error('[Agent] run_python error:', err)
+              }
+            }
 
           } else if (block.name === 'write_canvas') {
             const input = block.input as {

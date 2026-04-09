@@ -5,7 +5,9 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/server.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "eval": "tsx evals/run-all.ts",
+    "eval:test": "vitest run evals/harness/__tests__"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.30.0",
