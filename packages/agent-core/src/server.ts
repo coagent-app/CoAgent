@@ -11,7 +11,7 @@ import { startScheduler } from './scheduler.js'
 import { readSettings, writeSettings } from './settings.js'
 
 import { listFiles, listFolders, ingestFile, deleteFileEntry, createFolder, moveFile, moveFolder, renameFile, renameFolder, deleteFolder, saveFolderOrder, searchFiles, autoOrganizeFiles } from './file-store.js'
-import { readCanvas } from './canvas-store.js'
+import { readCanvas, listCanvases } from './canvas-store.js'
 import { randomUUID } from 'crypto'
 import { IMESSAGE_TOOLS, handleImessageTool } from './local-tools-imessage.js'
 import { CONTACTS_TOOLS, handleContactsTool } from './local-tools-contacts.js'
@@ -2986,7 +2986,10 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
     if (msg.type === 'ingest_file') {
       try {
         const buffer = Buffer.from(msg.data, 'base64')
-        const entry = await ingestFile(DATA_DIR, msg.filename, buffer, msg.mimeType, msg.group)
+        const entry = await ingestFile(DATA_DIR, msg.filename, buffer, msg.mimeType, msg.group, (status, fileId) => {
+          broadcast({ type: 'transcription_status', fileId, status } as any)
+          if (status === 'done') broadcastFilesDebounced()
+        })
         send(ws, { type: 'file_ingested', id: entry.id, filename: entry.filename })
         await sendFilesAndFolders(ws)
       } catch (err: any) {
@@ -3010,7 +3013,10 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
           const buffer = await readFile(filePath)
           const ext = extname(filePath).toLowerCase()
           const mimeType = MIME_MAP[ext] ?? 'application/octet-stream'
-          await ingestFile(DATA_DIR, basename(filePath), buffer, mimeType, msg.group)
+          await ingestFile(DATA_DIR, basename(filePath), buffer, mimeType, msg.group, (status, fileId) => {
+            broadcast({ type: 'transcription_status', fileId, status } as any)
+            if (status === 'done') broadcastFilesDebounced()
+          })
         }
         await sendFilesAndFolders(ws)
       } catch (err: any) {
@@ -3290,6 +3296,15 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
         }
       } catch (err: any) {
         send(ws, { type: 'canvas_error', canvasId: msg.canvasId, message: err?.message || 'Failed to open canvas' })
+      }
+    }
+
+    if (msg.type === 'get_canvases') {
+      try {
+        const items = await listCanvases(DATA_DIR)
+        send(ws, { type: 'canvases_list', items })
+      } catch (err: any) {
+        send(ws, { type: 'error', message: `Failed to list canvases: ${err.message}` })
       }
     }
 

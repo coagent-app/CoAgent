@@ -225,6 +225,7 @@ export type WSClientMessage =
   | { type: 'team_invite' }
   | { type: 'canvas_open'; canvasId: string }
   | { type: 'canvas_close' }
+  | { type: 'get_canvases' }
   | { type: 'python_event'; requestId: string; event: PythonEvent }
   | { type: 'python_done'; requestId: string; stdout: string; stderr: string; resultRepr?: string; durationMs: number; figures?: string[] }
   | { type: 'python_error'; requestId: string; errorType: string; message: string; traceback: string; stdout: string; stderr: string }
@@ -290,6 +291,7 @@ export type WSServerMessage =
   | { type: 'subscription_expired' }
   | { type: 'canvas_opened'; canvas: Canvas }
   | { type: 'canvas_updated'; canvas: Canvas }
+  | { type: 'canvases_list'; items: Array<{ id: string; title: string; kind?: string; createdAt: string; updatedAt: string }> }
   | { type: 'canvas_streaming'; canvasId: string; title?: string; partialCode: string }
   | { type: 'canvas_error'; canvasId?: string; message: string }
   | { type: 'canvas_save_to_files'; canvasId: string; title: string; code: string }

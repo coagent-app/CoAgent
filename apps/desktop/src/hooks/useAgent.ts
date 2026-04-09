@@ -83,6 +83,7 @@ export function useAgent() {
   const [files, setFiles] = useState<FileEntry[]>([])
   const [folders, setFolders] = useState<string[]>([])
   const [searchResults, setSearchResults] = useState<FileEntry[] | null>(null)
+  const [transcribingFiles, setTranscribingFiles] = useState<Set<string>>(new Set())
   const [error, setError] = useState<string | null>(null)
   const [toolLabel, setToolLabel] = useState<string | null>(null)
   const [researchAgents, setResearchAgents] = useState<{ query: string; status: string; detail?: string }[]>([])
@@ -114,6 +115,7 @@ export function useAgent() {
   const [canvasVisible, setCanvasVisible] = useState(false)
   const [canvasStreamingCode, setCanvasStreamingCode] = useState<string | null>(null)
   const [canvasStreaming, setCanvasStreaming] = useState(false)
+  const [canvasesList, setCanvasesList] = useState<Array<{ id: string; title: string; kind?: string; createdAt: string; updatedAt: string }>>([])
   // Python code cells (Pyodide). Keyed by requestId from server. Hydrated from
   // localStorage so cells survive server restarts, HMR reloads, and webview
   // refreshes. Any cell still marked 'running' at load time was interrupted
@@ -334,6 +336,15 @@ export function useAgent() {
         if (msg.type === 'settings_update') { setSettings(msg.settings); settingsRef.current = msg.settings; saveCache({ settings: msg.settings }) }
         if (msg.type === 'auth_status') setAuthStatus(msg.status)
         if (msg.type === 'files_update') setFiles(msg.files)
+        if ((msg as any).type === 'transcription_status') {
+          const m = msg as any
+          setTranscribingFiles(prev => {
+            const next = new Set(prev)
+            if (m.status === 'started') next.add(m.fileId)
+            else next.delete(m.fileId)
+            return next
+          })
+        }
         if (msg.type === 'folders_update') setFolders(msg.folders)
         if (msg.type === 'files_search_result') setSearchResults(msg.files)
         if (msg.type === 'relay_status') {
@@ -465,6 +476,9 @@ export function useAgent() {
         if (msg.type === 'canvas_error') {
           setError(msg.message || 'Canvas error')
           setTimeout(() => setError(null), 5000)
+        }
+        if ((msg as any).type === 'canvases_list') {
+          setCanvasesList((msg as any).items)
         }
         if ((msg as any).type === 'python_run') {
           const m = msg as any
@@ -877,6 +891,10 @@ export function useAgent() {
     send({ type: 'canvas_open', canvasId } as any)
   }, [send])
 
+  const getCanvases = useCallback(() => {
+    send({ type: 'get_canvases' } as any)
+  }, [send])
+
   const closeCanvas = useCallback(() => {
     setCanvasVisible(false)
     setCanvasStreaming(false)
@@ -897,5 +915,5 @@ export function useAgent() {
     }
   }, [])
 
-  return { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, pendingFields, setPendingFields, setModel, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, getTeamInfo, getTeamHistory, triggerPrompt, setTriggerPrompt, canvas, canvasVisible, canvasStreaming, canvasStreamingCode, openCanvas, closeCanvas, codeCells, codeCellOrder, cancelCodeCell }
+  return { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, transcribingFiles, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, pendingFields, setPendingFields, setModel, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, getTeamInfo, getTeamHistory, triggerPrompt, setTriggerPrompt, canvas, canvasVisible, canvasStreaming, canvasStreamingCode, openCanvas, closeCanvas, canvasesList, getCanvases, codeCells, codeCellOrder, cancelCodeCell }
 }

@@ -9,7 +9,7 @@
 // iframe's #content div via contentDocument to avoid iframe reloads.
 
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
-import { X, Download, Save, Loader2 } from 'lucide-react'
+import { X, Download, Save, Loader2, History } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -24,16 +24,44 @@ interface Props {
   settings: AgentSettings | null | undefined
   onClose: () => void
   onSaveToFiles?: (filename: string, mimeType: string, data: string) => void
+  canvasesList?: Array<{ id: string; title: string; kind?: string; updatedAt: string }>
+  onOpenCanvas?: (canvasId: string) => void
+  onLoadCanvases?: () => void
 }
 
 // Debounce interval for streaming updates (ms)
 const STREAM_DEBOUNCE_MS = 120
 
-export function CanvasPane({ canvas, streaming = false, streamingCode, settings, onClose, onSaveToFiles }: Props) {
+function relativeDate(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime()
+  const mins = Math.floor(diff / 60000)
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `${hrs}h ago`
+  const days = Math.floor(hrs / 24)
+  return `${days}d ago`
+}
+
+export function CanvasPane({ canvas, streaming = false, streamingCode, settings, onClose, onSaveToFiles, canvasesList = [], onOpenCanvas, onLoadCanvases }: Props) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const iframeReadyRef = useRef(false)
   const [debouncedCode, setDebouncedCode] = useState<string>(canvas.code || '')
   const [saving, setSaving] = useState(false)
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const historyRef = useRef<HTMLDivElement>(null)
+
+  // Close history dropdown on outside click
+  useEffect(() => {
+    if (!historyOpen) return
+    function handleClickOutside(e: MouseEvent) {
+      if (historyRef.current && !historyRef.current.contains(e.target as Node)) {
+        setHistoryOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [historyOpen])
 
   const brand = useMemo(() => brandFromSettings(settings), [
     settings?.brand_company,
@@ -219,6 +247,46 @@ export function CanvasPane({ canvas, streaming = false, streamingCode, settings,
           )}
         </div>
         <div className="flex items-center gap-1 flex-shrink-0">
+          {onLoadCanvases && (
+            <div ref={historyRef} className="relative">
+              <button
+                onClick={() => {
+                  if (!historyOpen) onLoadCanvases()
+                  setHistoryOpen(o => !o)
+                }}
+                className="flex items-center gap-1 px-2 py-1 rounded-md text-[11.5px] font-medium text-neutral-500 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
+                title="Canvas history"
+              >
+                <History size={12} />
+              </button>
+              {historyOpen && (
+                <div className="absolute right-0 top-full mt-1 z-50 w-64 max-h-72 overflow-y-auto rounded-md border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-900 shadow-md">
+                  {canvasesList.length === 0 ? (
+                    <div className="px-3 py-2 text-[11.5px] text-neutral-400 dark:text-neutral-500">No canvases yet</div>
+                  ) : (
+                    canvasesList.map(item => (
+                      <button
+                        key={item.id}
+                        onClick={() => {
+                          onOpenCanvas?.(item.id)
+                          setHistoryOpen(false)
+                        }}
+                        className="w-full text-left flex items-center justify-between px-3 py-2 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors gap-2"
+                      >
+                        <div className="min-w-0">
+                          <div className="text-[11.5px] font-medium text-neutral-800 dark:text-neutral-100 truncate">{item.title || 'Untitled'}</div>
+                          {item.kind && (
+                            <div className="text-[10px] text-neutral-400 dark:text-neutral-500 capitalize">{item.kind}</div>
+                          )}
+                        </div>
+                        <div className="text-[10px] text-neutral-400 dark:text-neutral-500 flex-shrink-0">{relativeDate(item.updatedAt)}</div>
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+          )}
           <button
             onClick={handleExportPdf}
             className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11.5px] font-medium text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
