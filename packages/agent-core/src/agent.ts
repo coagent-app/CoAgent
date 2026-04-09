@@ -391,7 +391,7 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'call_external_tool',
-    description: 'Execute an external tool discovered via search_tools. Pass exact tool name and parameters from the schema.',
+    description: 'Execute an external tool discovered via search_tools. Pass exact tool name and parameters from the schema. Before any action that sends, replies, modifies, or deletes — verify you have the correct target and information by fetching the full item first. Never assume IDs, recipients, or content from partial or truncated results.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -2514,9 +2514,9 @@ Rules:
                   this.mcpManager.callTool(serverName, extToolName, toolInput),
                   new Promise<string>((_, reject) => { toolTimeout = setTimeout(() => reject(new Error('Tool call timed out after 45s')), 45000) })
                 ]).finally(() => clearTimeout(toolTimeout!))
-                const MAX_TOOL_RESULT = 16000
+                const MAX_TOOL_RESULT = 32000
                 const trimmed = raw.length > MAX_TOOL_RESULT
-                  ? raw.slice(0, MAX_TOOL_RESULT) + `\n\n[Truncated: ${raw.length - MAX_TOOL_RESULT} chars omitted]`
+                  ? raw.slice(0, MAX_TOOL_RESULT) + `\n\n[Truncated: ${raw.length - MAX_TOOL_RESULT} chars omitted. Call the tool again with narrower parameters or fetch individual items to get complete data.]`
                   : raw
                 result = trimmed + schemaNote
                 logToolCall(this.dataDir, serverName, extToolName, toolInput, trimmed)

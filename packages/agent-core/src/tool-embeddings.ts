@@ -321,7 +321,7 @@ export async function searchToolsAndSchema(
   query: string,
   schema: string,
   tools: Anthropic.Tool[],
-  toolLimit = 5,
+  toolLimit = 6,
   schemaLimit = 3
 ): Promise<{
   matches: Anthropic.Tool[];
