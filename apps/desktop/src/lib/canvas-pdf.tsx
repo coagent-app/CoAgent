@@ -231,16 +231,18 @@ function makeStyles(brand: BrandValues) {
       paddingRight: 48,
       fontFamily: 'Helvetica',
     },
+    logoWrapper: {
+      alignItems: 'flex-start',
+      marginBottom: 24,
+    },
     logoImage: {
       maxHeight: 48,
-      marginBottom: 24,
-      objectFit: 'contain',
+      maxWidth: 180,
     },
     logoText: {
       fontSize: 18,
       fontWeight: 'bold',
       color: brand.primary,
-      marginBottom: 24,
     },
     h1: {
       fontSize: 24,
@@ -412,12 +414,16 @@ function CanvasDocument({
   return (
     <Document title={title}>
       <Page size="A4" style={styles.page}>
-        {/* Logo / brand header */}
-        {brand.logoUrl ? (
-          <Image src={brand.logoUrl} style={styles.logoImage} />
-        ) : brand.name ? (
-          <Text style={styles.logoText}>{brand.name}</Text>
-        ) : null}
+        {/* Logo / brand header — top-left aligned */}
+        {(brand.logoUrl || brand.name) && (
+          <View style={styles.logoWrapper}>
+            {brand.logoUrl ? (
+              <Image src={brand.logoUrl} style={styles.logoImage} />
+            ) : (
+              <Text style={styles.logoText}>{brand.name}</Text>
+            )}
+          </View>
+        )}
 
         {blocks.map((block, idx) => {
           switch (block.type) {

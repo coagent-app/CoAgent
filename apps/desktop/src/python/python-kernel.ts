@@ -17,6 +17,7 @@ const IDLE_EVICT_MS = 30 * 60 * 1000 // 30 min
 export type ExecutionEvent =
   | { type: 'stdout'; line: string }
   | { type: 'stderr'; line: string }
+  | { type: 'image'; dataUrl: string }
   | { type: 'done'; resultRepr?: string; durationMs: number }
   | { type: 'error'; errorType: string; message: string; traceback: string }
   | { type: 'cancelled'; reason: 'user' | 'timeout' }
@@ -98,6 +99,8 @@ function handleWorkerMessage(slot: WorkerSlot, msg: unknown) {
     onEvent({ type: 'stdout', line: m.line })
   } else if (m.type === 'stderr') {
     onEvent({ type: 'stderr', line: m.line })
+  } else if (m.type === 'image') {
+    onEvent({ type: 'image', dataUrl: m.dataUrl })
   } else if (m.type === 'done') {
     finishRequest(slot)
     onEvent({ type: 'done', resultRepr: m.resultRepr, durationMs: m.durationMs })

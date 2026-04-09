@@ -113,6 +113,7 @@ Supported diagram types: pie, flowchart, sequence, gantt, timeline, mindmap.
    one turn.
 7. **Tables for structured data.** Use GFM tables for anything with
    columns — line items, comparisons, schedules, contact info.
+8. **No emojis.** Documents are professional. No emoji characters anywhere.
 
 ---
 

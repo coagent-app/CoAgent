@@ -275,7 +275,7 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'files',
-    description: 'File management. grep searches contents (PDF/DOCX/XLSX/text) by regex, scoped by id or folder. get_pdf_fields/fill_pdf for fillable PDF forms only. Link files inline as [name](coagent-file:ID) so the user can open them. Attach files to emails via coagent_file_ids.',
+    description: 'File management. grep searches contents (PDF/DOCX/XLSX/text/audio/video transcripts) by regex, scoped by id or folder. Audio and video files are automatically transcribed — you can grep or search their spoken content like any text file. get_pdf_fields/fill_pdf for fillable PDF forms only. Link files inline as [name](coagent-file:ID) so the user can open them. Attach files to emails via coagent_file_ids.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -489,7 +489,8 @@ Rules:
 - Do not reference colors or fonts — branding is applied automatically.
 - Use tables for structured data.
 - Use Mermaid fenced blocks for diagrams.
-- No HTML tags.`,
+- No HTML tags.
+- No emojis.`,
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -743,7 +744,7 @@ Built-in tools (memory, files, schedule, skills, send_team_message, etc.) are al
 
   const customInstructions = settings.custom_instructions?.trim()
 
-  return `You are ${settings.agent_name || 'CoAgent'} — a private AI agent on the user's machine. When you receive a request, gather context with your tools first — then act. You can chain tools together for multi-step work. Only ask the user when actually needed.
+  return `You are ${settings.agent_name || 'CoAgent'} — a private AI agent on the user's machine. When you receive a request, gather context with your tools first — then act. You can chain tools together for multi-step work. If a tool returns incomplete results, try again with different parameters or a different tool — do not give up and ask the user. Only ask the user when you have genuinely exhausted your options.
 
 <tools>
 - memory — long-term knowledge store (search, read, write, edit)
@@ -1463,36 +1464,47 @@ Rules:
             // so piping partial TSX straight in is safe — the pane shows the
             // previous valid render until the next full parse.
             let lastCanvasBroadcast = 0
-            let streamingCanvasId: string | null = null
+            let streamingToolId: string | null = null
+            let streamingToolName: string | null = null
             stream.on('streamEvent', (event, snapshot) => {
               try {
                 if (event.type === 'content_block_start' && (event as any).content_block?.type === 'tool_use') {
                   const name = (event as any).content_block.name
-                  if (CANVAS_TOOL_NAMES.has(name)) {
-                    streamingCanvasId = (event as any).content_block.id
+                  if (CANVAS_TOOL_NAMES.has(name) || name === 'run_python') {
+                    streamingToolId = (event as any).content_block.id
+                    streamingToolName = name
                   }
-                } else if (event.type === 'content_block_delta' && streamingCanvasId) {
+                } else if (event.type === 'content_block_delta' && streamingToolId) {
                   const block = (snapshot.content as any[])?.[event.index]
-                  if (block?.type === 'tool_use' && CANVAS_TOOL_NAMES.has(block.name)) {
+                  if (block?.type === 'tool_use') {
                     const input = block.input as { title?: string; code?: string; canvas_id?: string }
                     if (input?.code) {
                       const now = Date.now()
                       if (now - lastCanvasBroadcast > 100) {
                         lastCanvasBroadcast = now
-                        this.onBroadcast?.({
-                          type: 'canvas_streaming',
-                          canvasId: input.canvas_id || streamingCanvasId,
-                          title: input.title,
-                          partialCode: input.code,
-                        })
+                        if (CANVAS_TOOL_NAMES.has(streamingToolName!)) {
+                          this.onBroadcast?.({
+                            type: 'canvas_streaming',
+                            canvasId: input.canvas_id || streamingToolId,
+                            title: input.title,
+                            partialCode: input.code,
+                          })
+                        } else if (streamingToolName === 'run_python') {
+                          this.onBroadcast?.({
+                            type: 'python_streaming',
+                            requestId: streamingToolId,
+                            partialCode: input.code,
+                          })
+                        }
                       }
                     }
                   }
-                } else if (event.type === 'content_block_stop' && streamingCanvasId) {
-                  streamingCanvasId = null
+                } else if (event.type === 'content_block_stop' && streamingToolId) {
+                  streamingToolId = null
+                  streamingToolName = null
                 }
               } catch (err) {
-                console.error('[Agent] canvas stream hook error:', err)
+                console.error('[Agent] stream hook error:', err)
               }
             })
 
@@ -1588,18 +1600,29 @@ Rules:
               tools: stableTools,
               maxTokens,
             }, onChunk, abortController.signal, ({ toolName, toolCallId, argsSoFar }) => {
-              if (!CANVAS_TOOL_NAMES.has(toolName)) return
               const now = Date.now()
-              if (now - lastCanvasBroadcast < 100) return
-              const parsed = extractPartialCode(argsSoFar)
-              if (!parsed.code) return
-              lastCanvasBroadcast = now
-              this.onBroadcast?.({
-                type: 'canvas_streaming',
-                canvasId: parsed.canvas_id || toolCallId,
-                title: parsed.title,
-                partialCode: parsed.code,
-              })
+              if (CANVAS_TOOL_NAMES.has(toolName)) {
+                if (now - lastCanvasBroadcast < 100) return
+                const parsed = extractPartialCode(argsSoFar)
+                if (!parsed.code) return
+                lastCanvasBroadcast = now
+                this.onBroadcast?.({
+                  type: 'canvas_streaming',
+                  canvasId: parsed.canvas_id || toolCallId,
+                  title: parsed.title,
+                  partialCode: parsed.code,
+                })
+              } else if (toolName === 'run_python') {
+                if (now - lastCanvasBroadcast < 100) return
+                const parsed = extractPartialCode(argsSoFar)
+                if (!parsed.code) return
+                lastCanvasBroadcast = now
+                this.onBroadcast?.({
+                  type: 'python_streaming',
+                  requestId: toolCallId,
+                  partialCode: parsed.code,
+                })
+              }
             })
 
             this.activeStream = null
@@ -1942,7 +1965,7 @@ Rules:
               console.log(`[Agent] files(list, folder=${input.folder ?? 'all'}) → ${filtered.length}/${files.length} files`)
               result = filtered.length === 0
                 ? (input.folder ? `No files in folder "${input.folder}". Available folders: ${[...new Set(files.map(f => f.group).filter(Boolean))].join(', ')}` : 'No files stored yet.')
-                : filtered.map(f => `[id:${f.id}] ${f.group ? f.group + '/' : ''}${f.filename} — ${f.summary}`).join('\n')
+                : filtered.map(f => `[id:${f.id}] ${f.group ? f.group + '/' : ''}${f.filename} — ${f.summary}${f.transcript ? ' [has transcript]' : ''}`).join('\n')
             } else if (input.action === 'search') {
               const files = await searchFiles(this.dataDir, input.query!, input.limit ?? 5)
               result = files.length === 0 ? 'No files found matching that query.' : files.map(f =>

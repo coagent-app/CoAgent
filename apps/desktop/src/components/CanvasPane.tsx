@@ -16,6 +16,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import type { Canvas, AgentSettings } from '@coagent/shared'
 import { buildBrandCSS, brandFromSettings } from '@/lib/canvas-brand'
 import { renderCanvasPdf } from '@/lib/canvas-pdf'
+import { save } from '@tauri-apps/plugin-dialog'
 
 interface Props {
   canvas: Canvas
@@ -27,6 +28,7 @@ interface Props {
   canvasesList?: Array<{ id: string; title: string; kind?: string; updatedAt: string }>
   onOpenCanvas?: (canvasId: string) => void
   onLoadCanvases?: () => void
+  onExportPdf?: (path: string, base64Data: string) => void
 }
 
 // Debounce interval for streaming updates (ms)
@@ -43,7 +45,7 @@ function relativeDate(iso: string): string {
   return `${days}d ago`
 }
 
-export function CanvasPane({ canvas, streaming = false, streamingCode, settings, onClose, onSaveToFiles, canvasesList = [], onOpenCanvas, onLoadCanvases }: Props) {
+export function CanvasPane({ canvas, streaming = false, streamingCode, settings, onClose, onSaveToFiles, canvasesList = [], onOpenCanvas, onLoadCanvases, onExportPdf }: Props) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const iframeReadyRef = useRef(false)
   const [debouncedCode, setDebouncedCode] = useState<string>(canvas.code || '')
@@ -198,16 +200,25 @@ export function CanvasPane({ canvas, streaming = false, streamingCode, settings,
     iframeReadyRef.current = false
   }, [srcdoc])
 
-  const handleExportPdf = useCallback(() => {
-    const iframe = iframeRef.current
-    if (!iframe?.contentWindow) return
+  const handleExportPdf = useCallback(async () => {
+    if (!onExportPdf) return
     try {
-      iframe.contentWindow.focus()
-      iframe.contentWindow.print()
+      const filePath = await save({
+        defaultPath: `${canvas.title || 'document'}.pdf`,
+        filters: [{ name: 'PDF', extensions: ['pdf'] }],
+      })
+      if (!filePath) return  // user cancelled
+      const blob = await renderCanvasPdf(canvas.code, brand, canvas.title)
+      const reader = new FileReader()
+      reader.onload = () => {
+        const base64 = (reader.result as string).split(',')[1] ?? ''
+        onExportPdf(filePath, base64)
+      }
+      reader.readAsDataURL(blob)
     } catch (err) {
-      console.error('[CanvasPane] print failed:', err)
+      console.error('[CanvasPane] export PDF failed:', err)
     }
-  }, [])
+  }, [onExportPdf, canvas.code, canvas.title, brand])
 
   const handleSaveToFiles = useCallback(async () => {
     if (!onSaveToFiles || saving) return

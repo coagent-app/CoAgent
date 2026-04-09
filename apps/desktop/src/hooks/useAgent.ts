@@ -480,29 +480,69 @@ export function useAgent() {
         if ((msg as any).type === 'canvases_list') {
           setCanvasesList((msg as any).items)
         }
+        if ((msg as any).type === 'python_streaming') {
+          const m = msg as any
+          const cellId: string = m.requestId
+          const partialCode: string = m.partialCode
+          setCodeCells(prev => {
+            if (prev[cellId]) {
+              // Update existing streaming cell
+              return { ...prev, [cellId]: { ...prev[cellId], code: partialCode } }
+            }
+            // Create new streaming cell — snapshot streaming text as anchor
+            setStreamingText(current => {
+              setMessages(prevMsgs => {
+                let next = prevMsgs
+                if (current?.trim()) {
+                  next = [...prevMsgs, { role: 'assistant' as const, content: current, timestamp: new Date().toISOString() }].slice(-100)
+                }
+                const anchorIndex = next.length
+                const anchorMessageContent = next[next.length - 1]?.content ?? null
+                setCodeCells(p => ({
+                  ...p,
+                  [cellId]: { id: cellId, code: partialCode, status: 'running', stdout: '', stderr: '', anchorIndex, anchorMessageContent },
+                }))
+                setCodeCellOrder(p => p.includes(cellId) ? p : [...p, cellId])
+                return next
+              })
+              return null
+            })
+            return prev
+          })
+        }
         if ((msg as any).type === 'python_run') {
           const m = msg as any
           const cellId: string = m.requestId
           const cellCode: string = m.code
-          // Snapshot any in-flight streaming text as a final bubble and
-          // anchor the new cell after that snapshot — done in one updater so
-          // the anchor index reflects the post-snapshot message count.
-          setStreamingText(current => {
-            setMessages(prev => {
-              let next = prev
-              if (current?.trim()) {
-                next = [...prev, { role: 'assistant' as const, content: current, timestamp: new Date().toISOString() }].slice(-100)
-              }
-              const anchorIndex = next.length
-              const anchorMessageContent = next[next.length - 1]?.content ?? null
-              setCodeCells(p => ({
-                ...p,
-                [cellId]: { id: cellId, code: cellCode, status: 'running', stdout: '', stderr: '', anchorIndex, anchorMessageContent },
-              }))
-              setCodeCellOrder(p => p.includes(cellId) ? p : [...p, cellId])
-              return next
+          // If the cell was already created by python_streaming, just update code.
+          // Otherwise snapshot streaming text and create a new cell.
+          setCodeCells(prev => {
+            if (prev[cellId]) {
+              return { ...prev, [cellId]: { ...prev[cellId], code: cellCode } }
+            }
+            return prev
+          })
+          setCodeCells(prev => {
+            if (prev[cellId]) return prev // already exists from streaming
+            // No streaming cell — create one now
+            setStreamingText(current => {
+              setMessages(prevMsgs => {
+                let next = prevMsgs
+                if (current?.trim()) {
+                  next = [...prevMsgs, { role: 'assistant' as const, content: current, timestamp: new Date().toISOString() }].slice(-100)
+                }
+                const anchorIndex = next.length
+                const anchorMessageContent = next[next.length - 1]?.content ?? null
+                setCodeCells(p => ({
+                  ...p,
+                  [cellId]: { id: cellId, code: cellCode, status: 'running', stdout: '', stderr: '', anchorIndex, anchorMessageContent },
+                }))
+                setCodeCellOrder(p => p.includes(cellId) ? p : [...p, cellId])
+                return next
+              })
+              return null
             })
-            return null
+            return prev
           })
           // Run in the worker pool, stream events both into local state (for the
           // chat UI) and back over the WS to the agent (so it can see results).
@@ -901,6 +941,10 @@ export function useAgent() {
     setCanvasStreamingCode(null)
   }, [])
 
+  const exportPdf = useCallback((path: string, data: string) => {
+    send({ type: 'export_pdf', path, data })
+  }, [send])
+
   const triggerHeartbeat = useCallback(() => {
     send({ type: 'trigger_heartbeat' })
   }, [send])
@@ -915,5 +959,5 @@ export function useAgent() {
     }
   }, [])
 
-  return { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, transcribingFiles, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, pendingFields, setPendingFields, setModel, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, getTeamInfo, getTeamHistory, triggerPrompt, setTriggerPrompt, canvas, canvasVisible, canvasStreaming, canvasStreamingCode, openCanvas, closeCanvas, canvasesList, getCanvases, codeCells, codeCellOrder, cancelCodeCell }
+  return { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, transcribingFiles, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, pendingFields, setPendingFields, setModel, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, getTeamInfo, getTeamHistory, triggerPrompt, setTriggerPrompt, canvas, canvasVisible, canvasStreaming, canvasStreamingCode, openCanvas, closeCanvas, canvasesList, getCanvases, codeCells, codeCellOrder, cancelCodeCell, exportPdf }
 }

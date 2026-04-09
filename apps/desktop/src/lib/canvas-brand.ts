@@ -41,13 +41,15 @@ export function buildBrandCSS(brand: BrandValues): string {
       padding: 48px;
     }
 
-    /* Logo header */
+    /* Logo header — top-left aligned */
     .canvas-logo {
       margin-bottom: 32px;
+      text-align: left;
     }
     .canvas-logo img {
       max-height: 48px;
-      object-fit: contain;
+      max-width: 180px;
+      display: block;
     }
     .canvas-logo-text {
       font-family: ${brand.fontHeading};

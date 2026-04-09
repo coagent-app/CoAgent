@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Trash2, FileText, Sheet, Image, File, FileVideo, Folder, Pencil, LayoutGrid, List, ArrowUpDown, ArrowUp, ArrowDown, Search, X, ChevronLeft, ExternalLink } from 'lucide-react'
+import { Trash2, FileText, Sheet, Image, File, FileVideo, Folder, Pencil, LayoutGrid, List, ArrowUpDown, ArrowUp, ArrowDown, Search, X, ChevronLeft, ExternalLink, MessageSquareText } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import type { FileEntry } from '@coagent/shared'
 import { setFileDropTarget } from '@/hooks/useAgent'
@@ -9,6 +9,7 @@ interface FilesPaneProps {
   files: FileEntry[]
   folders: string[]
   searchResults: FileEntry[] | null
+  transcribingFiles: Set<string>
   onIngest: (filename: string, mimeType: string, data: string, group?: string) => void
   onIngestPaths: (paths: string[], group?: string) => void
   onDelete: (id: string) => void
@@ -597,6 +598,7 @@ export function FilesPane({
   files,
   folders,
   searchResults,
+  transcribingFiles,
   onIngest,
   onIngestPaths,
   onDelete,
@@ -620,6 +622,7 @@ export function FilesPane({
   const newFolderInputRef = useRef<HTMLInputElement>(null)
 
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null)
+  const [viewingTranscript, setViewingTranscript] = useState<{ filename: string; transcript: string } | null>(null)
   const [renamingFile, setRenamingFile] = useState<string | null>(null)
   const [renamingFolder, setRenamingFolder] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
@@ -1265,7 +1268,7 @@ export function FilesPane({
               : 'hover:bg-neutral-50 dark:hover:bg-neutral-800 hover:scale-[1.02] hover:shadow-sm'
         }`}
       >
-        <div className="w-14 h-14 rounded-xl bg-neutral-50 dark:bg-neutral-800 overflow-hidden flex items-center justify-center">
+        <div className="relative w-14 h-14 rounded-xl bg-neutral-50 dark:bg-neutral-800 overflow-hidden flex items-center justify-center">
           {isImage(file.filename) ? (
             <ImageThumbnail path={file.path} filename={file.filename} size="grid" />
           ) : isPdf(file.filename) ? (
@@ -1279,6 +1282,11 @@ export function FilesPane({
           ) : (
             <div className={`w-full h-full flex items-center justify-center rounded-xl ${fileIconBg(file.filename)}`}>
               <Icon size={22} className={fileIconColor(file.filename)} />
+            </div>
+          )}
+          {transcribingFiles.has(file.id) && (
+            <div className="absolute bottom-0.5 right-0.5 w-4 h-4 rounded-full bg-blue-500 flex items-center justify-center animate-pulse" title="Transcribing...">
+              <MessageSquareText size={9} className="text-white" />
             </div>
           )}
         </div>
@@ -1335,7 +1343,7 @@ export function FilesPane({
         }`}
       >
         {/* Icon column */}
-        <div className="flex-shrink-0 w-5 h-5 flex items-center justify-center overflow-hidden rounded">
+        <div className="relative flex-shrink-0 w-5 h-5 flex items-center justify-center overflow-visible rounded">
           {isImage(file.filename) ? (
             <ImageThumbnail path={file.path} filename={file.filename} size="list" />
           ) : isPdf(file.filename) ? (
@@ -1348,6 +1356,11 @@ export function FilesPane({
             <TextPreview path={file.path} size="list" />
           ) : (
             <Icon size={16} className={fileIconColor(file.filename)} />
+          )}
+          {transcribingFiles.has(file.id) && (
+            <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-blue-500 flex items-center justify-center animate-pulse" title="Transcribing...">
+              <MessageSquareText size={7} className="text-white" />
+            </div>
           )}
         </div>
         {/* Name + summary column */}
@@ -1827,6 +1840,21 @@ export function FilesPane({
               {navigator.platform.includes('Mac') ? 'Show in Finder' : 'Show in Explorer'}
             </button>
           )}
+          {contextMenu.kind === 'file' && (() => {
+            const f = files.find(f => f.id === contextMenu.id)
+            return f?.transcript ? (
+              <button
+                className="w-full flex items-center gap-2.5 px-3 py-2 text-[13px] text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800 transition-colors"
+                onClick={() => {
+                  setViewingTranscript({ filename: f.filename, transcript: f.transcript! })
+                  setContextMenu(null)
+                }}
+              >
+                <MessageSquareText size={13} className="text-neutral-400 dark:text-neutral-500" />
+                View Transcript
+              </button>
+            ) : null
+          })()}
           <button
             className="w-full flex items-center gap-2.5 px-3 py-2 text-[13px] text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800 transition-colors"
             onClick={() => {
@@ -1860,6 +1888,29 @@ export function FilesPane({
               Delete Folder
             </button>
           )}
+        </div>
+      )}
+
+      {/* Transcript viewer modal */}
+      {viewingTranscript && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 dark:bg-black/60" onClick={() => setViewingTranscript(null)}>
+          <div
+            className="bg-white dark:bg-neutral-900 rounded-2xl shadow-xl dark:shadow-black/50 w-[520px] max-h-[70vh] flex flex-col overflow-hidden border border-neutral-200 dark:border-neutral-700"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-3.5 border-b border-neutral-100 dark:border-neutral-800">
+              <div className="flex items-center gap-2">
+                <MessageSquareText size={14} className="text-neutral-400" />
+                <p className="text-[13px] font-semibold text-neutral-700 dark:text-neutral-200 truncate">{viewingTranscript.filename}</p>
+              </div>
+              <button onClick={() => setViewingTranscript(null)} className="p-1 rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors">
+                <X size={14} className="text-neutral-400" />
+              </button>
+            </div>
+            <div className="px-5 py-4 overflow-y-auto">
+              <p className="text-[13px] text-neutral-600 dark:text-neutral-300 leading-relaxed whitespace-pre-wrap">{viewingTranscript.transcript}</p>
+            </div>
+          </div>
         </div>
       )}
     </div>

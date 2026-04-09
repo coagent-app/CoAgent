@@ -844,8 +844,8 @@ async function handleMoonshotProxy(request: Request, env: Env, ctx: ExecutionCon
 
   let body = await request.text()
 
-  // Reject oversized requests (1MB max)
-  if (body.length > 1_048_576) {
+  // Reject oversized requests (5MB max)
+  if (body.length > 5_242_880) {
     return jsonResponse({ error: 'Request body too large' }, 413)
   }
 

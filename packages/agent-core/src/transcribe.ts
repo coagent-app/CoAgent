@@ -54,12 +54,17 @@ function findWhisperBinary(): string | null {
     return sidecarPath
   }
 
-  // 2 & 3. PATH — we test by running `--version` synchronously; if it exits
-  // cleanly the binary exists. We use a try/catch on the sync variant here only
-  // for binary *detection* (not transcription), which is a brief one-shot check.
-  for (const name of ['whisper', 'whisper-cpp']) {
+  // 2. Dev mode — check the Tauri binaries directory relative to the monorepo
+  const devBinDir = join(__dirname, '..', '..', '..', 'apps', 'desktop', 'src-tauri', 'binaries')
+  for (const suffix of [`-${process.arch === 'arm64' ? 'aarch64' : 'x86_64'}-apple-darwin`, '']) {
+    const devPath = join(devBinDir, `whisper${suffix}`)
+    if (existsSync(devPath)) return devPath
+  }
+
+  // 3. PATH — check common binary names
+  for (const name of ['whisper-cli', 'whisper', 'whisper-cpp']) {
     try {
-      execFileSync(name, ['--version'], { stdio: 'ignore', timeout: 3000 })
+      execFileSync(name, ['--help'], { stdio: 'ignore', timeout: 3000 })
       return name
     } catch {
       // not found or errored — try next
@@ -298,15 +303,6 @@ export async function transcribeFile(
     }
 
     if (!transcript) return null
-
-    // 5. Save transcript alongside the media file
-    const transcriptPath = filePath + '.transcript.txt'
-    try {
-      await writeFile(transcriptPath, transcript, 'utf-8')
-    } catch (err) {
-      process.stderr.write(`[Transcribe] Failed to save transcript: ${(err as Error).message}\n`)
-      // Still return the transcript even if we couldn't save it
-    }
 
     const elapsed = Date.now() - t0
     const words = transcript.split(/\s+/).filter(Boolean).length

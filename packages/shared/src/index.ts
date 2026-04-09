@@ -170,6 +170,7 @@ export type WSClientMessage =
   | { type: 'update_settings'; patch: Partial<AgentSettings> }
   | { type: 'get_files' }
   | { type: 'ingest_file'; filename: string; mimeType: string; data: string; group?: string }  // base64-encoded file content
+  | { type: 'export_pdf'; path: string; data: string }  // base64-encoded PDF, path from Tauri save dialog
   | { type: 'ingest_file_paths'; paths: string[]; group?: string }  // local file paths, server reads directly
   | { type: 'delete_file'; id: string }
   | { type: 'create_folder'; name: string }

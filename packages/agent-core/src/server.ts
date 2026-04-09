@@ -3024,6 +3024,16 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
       }
     }
 
+    if (msg.type === 'export_pdf') {
+      try {
+        const buffer = Buffer.from(msg.data, 'base64')
+        await writeFile(msg.path, buffer)
+        // no response needed — file saved silently
+      } catch (err: any) {
+        send(ws, { type: 'error', message: `Failed to export PDF: ${err.message}` })
+      }
+    }
+
     if (msg.type === 'delete_file') {
       try {
         await deleteFileEntry(DATA_DIR, msg.id)

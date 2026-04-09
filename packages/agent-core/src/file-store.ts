@@ -587,7 +587,8 @@ export async function ingestFile(
   filename: string,
   buffer: Buffer,
   mimeType: string,
-  group?: string
+  group?: string,
+  onTranscription?: (status: 'started' | 'done', fileId: string) => void
 ): Promise<FileEntry> {
   const sample = await sampleContent(filename, buffer, mimeType)
   // Skip Haiku summary for media files — use the sampleContent description directly
@@ -618,16 +619,7 @@ export async function ingestFile(
   const filePath = join(targetDir, safeFilename)
   await writeFile(filePath, buffer)
 
-  // Fire-and-forget transcription for media files — don't block file ingest
-  if (isMedia) {
-    transcribeFile(filePath, dataDir).then(transcript => {
-      if (transcript) {
-        console.log(`[FileStore] Transcription complete for ${safeFilename} (${transcript.length} chars)`)
-      }
-    }).catch(err => {
-      console.warn(`[FileStore] Transcription failed for ${safeFilename}:`, err.message)
-    })
-  }
+  // Transcription is kicked off after the entry is saved (see below)
 
   // Embed the summary (fall back gracefully if no relay)
   let embedding: number[] = []
@@ -658,6 +650,26 @@ export async function ingestFile(
     await writeIndex(dataDir, index)
     console.log(`[FileStore] Ingested: ${safeFilename} (${buffer.length} bytes)`)
     const { embedding: _, ...fileEntry } = entry
+
+    // Fire-and-forget transcription for media files
+    if (isMedia) {
+      onTranscription?.('started', entry.id)
+      transcribeFile(filePath, dataDir).then(async transcript => {
+        if (!transcript) return
+        console.log(`[FileStore] Transcription complete for ${safeFilename} (${transcript.length} chars)`)
+        const idx = await readIndex(dataDir)
+        const match = idx.find(e => e.id === entry.id)
+        if (match) {
+          match.transcript = transcript
+          await writeIndex(dataDir, idx)
+        }
+        onTranscription?.('done', entry.id)
+      }).catch(err => {
+        console.warn(`[FileStore] Transcription failed for ${safeFilename}:`, err.message)
+        onTranscription?.('done', entry.id)
+      })
+    }
+
     return fileEntry
   })
 }
@@ -795,6 +807,7 @@ export async function readFileBase64(dataDir: string, id: string): Promise<{ bas
 export async function readFileContent(dataDir: string, id: string): Promise<string> {
   let filePath: string
   let filename: string
+  let transcript: string | undefined
 
   await withIndexLock(async () => {
     const index = await readIndex(dataDir)
@@ -802,6 +815,7 @@ export async function readFileContent(dataDir: string, id: string): Promise<stri
     if (!entry) throw new Error(`File ${id} not found`)
     filePath = entry.path
     filename = entry.filename
+    transcript = entry.transcript
 
     const updated = index.map(e => e.id === id ? { ...e, lastAccessed: new Date().toISOString() } : e)
     await writeIndex(dataDir, updated)
@@ -842,6 +856,13 @@ export async function readFileContent(dataDir: string, id: string): Promise<stri
     } catch { /* fall through */ }
   }
 
+  // Audio/video — return transcript if available
+  const mediaExts = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v', '.wmv', '.flv', '.mp3', '.m4a', '.wav', '.aac', '.ogg']
+  if (mediaExts.includes(ext)) {
+    if (transcript) return `[Transcript of ${filename!}]\n\n${transcript}`
+    return `This is a media file (${ext}). No transcript available yet — transcription may still be in progress.`
+  }
+
   return buffer.toString('utf-8')
 }
 
@@ -873,15 +894,10 @@ async function extractText(entry: FileIndexEntry): Promise<string | null> {
         return wb.SheetNames.map(s => XLSX.utils.sheet_to_csv(wb.Sheets[s])).join('\n')
       } catch { return null }
     }
-    // Images/video/audio — check for transcript file, otherwise not searchable
+    // Images/video/audio — use transcript from index entry if available
     const binaryExts = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v', '.wmv', '.flv', '.mp3', '.m4a', '.wav', '.aac', '.ogg']
     if (binaryExts.includes(ext)) {
-      // Check for transcript file created by the transcription pipeline
-      const transcriptPath = entry.path + '.transcript.txt'
-      try {
-        const transcript = await readFile(transcriptPath, 'utf-8')
-        if (transcript.trim()) return transcript
-      } catch { /* no transcript yet */ }
+      if (entry.transcript) return entry.transcript
       return null
     }
     const text = buffer.toString('utf-8')

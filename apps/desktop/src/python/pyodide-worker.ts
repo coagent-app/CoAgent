@@ -74,42 +74,13 @@ async function init() {
     const loadPyodide = mod.loadPyodide as (opts: { indexURL: string }) => Promise<PyodideAPI>
     pyodide = await loadPyodide({ indexURL })
 
-    // Force matplotlib to use the non-interactive 'agg' backend before any
-    // user code runs. The default 'webagg' backend tries to import `document`
-    // from the `js` module, which doesn't exist inside a Web Worker.
-    // Also monkey-patch plt.show() to capture figures as base64 PNG and send
-    // them to the main thread as image messages.
+    // Set MPLBACKEND env var BEFORE matplotlib is ever imported. This avoids
+    // the 'webagg' backend trying to `from js import document` (which doesn't
+    // exist in a Web Worker). No need to import matplotlib here — it reads
+    // this env var on first import.
     await pyodide.runPythonAsync(`
-import matplotlib
-matplotlib.use('agg')
-
-def _setup_chart_capture():
-    import matplotlib.pyplot as _plt
-    import io as _io
-    import base64 as _b64
-    from js import postMessage
-    from pyodide.ffi import to_js
-
-    _original_show = _plt.show
-
-    def _capturing_show(*args, **kwargs):
-        for fig_num in _plt.get_fignums():
-            fig = _plt.figure(fig_num)
-            buf = _io.BytesIO()
-            fig.savefig(buf, format='png', dpi=150, bbox_inches='tight',
-                        facecolor='white', edgecolor='none')
-            buf.seek(0)
-            b64 = _b64.b64encode(buf.read()).decode('ascii')
-            data_url = f'data:image/png;base64,{b64}'
-            buf.close()
-            req_id = globals().get('_current_request_id', '')
-            postMessage(to_js({"type": "image", "requestId": req_id, "dataUrl": data_url}))
-        _plt.close('all')
-
-    _plt.show = _capturing_show
-
-_setup_chart_capture()
-del _setup_chart_capture
+import os
+os.environ['MPLBACKEND'] = 'agg'
 `)
 
     post({ type: 'ready' })
@@ -172,6 +143,41 @@ async function execute(requestId: string, code: string) {
         const msg = loadErr instanceof Error ? loadErr.message : String(loadErr)
         post({ type: 'stderr', requestId, line: `[package load warning] ${msg}\n` })
       }
+    }
+
+    // If the user code imports matplotlib, patch plt.show() to capture
+    // figures as base64 PNG and send them as image messages. This runs
+    // after loadPackagesFromImports has loaded matplotlib's wheel.
+    if (code.includes('matplotlib') || code.includes('plt')) {
+      try {
+        await pyodide.runPythonAsync(`
+import sys as _sys
+if 'matplotlib' in _sys.modules or 'matplotlib.pyplot' in _sys.modules:
+    import matplotlib.pyplot as _plt
+    if not hasattr(_plt.show, '_is_capturing'):
+        import io as _io
+        import base64 as _b64
+        from js import postMessage
+        from pyodide.ffi import to_js
+
+        def _capturing_show(*args, **kwargs):
+            for fig_num in _plt.get_fignums():
+                fig = _plt.figure(fig_num)
+                buf = _io.BytesIO()
+                fig.savefig(buf, format='png', dpi=150, bbox_inches='tight',
+                            facecolor='white', edgecolor='none')
+                buf.seek(0)
+                b64 = _b64.b64encode(buf.read()).decode('ascii')
+                data_url = f'data:image/png;base64,{b64}'
+                buf.close()
+                req_id = globals().get('_current_request_id', '')
+                postMessage(to_js({"type": "image", "requestId": req_id, "dataUrl": data_url}))
+            _plt.close('all')
+
+        _capturing_show._is_capturing = True
+        _plt.show = _capturing_show
+`)
+      } catch { /* matplotlib not actually loaded yet — no-op */ }
     }
 
     // Delegate to Pyodide's eval_code_async — same function runPythonAsync uses
