@@ -3,6 +3,10 @@
 // The agent writes markdown via write_canvas / patch_canvas. We render it
 // with react-markdown + remark-gfm, inject branded CSS, and display inside
 // a same-origin iframe for style isolation and PDF export (window.print).
+//
+// Scroll-preservation strategy: srcdoc is set ONCE on mount (CSS + empty
+// structure only). Subsequent content updates are written directly into the
+// iframe's #content div via contentDocument to avoid iframe reloads.
 
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { X, Download, Save, Loader2 } from 'lucide-react'
@@ -27,6 +31,7 @@ const STREAM_DEBOUNCE_MS = 120
 
 export function CanvasPane({ canvas, streaming = false, streamingCode, settings, onClose, onSaveToFiles }: Props) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
+  const iframeReadyRef = useRef(false)
   const [debouncedCode, setDebouncedCode] = useState<string>(canvas.code || '')
   const [saving, setSaving] = useState(false)
 
@@ -40,6 +45,34 @@ export function CanvasPane({ canvas, streaming = false, streamingCode, settings,
   ])
 
   const brandCSS = useMemo(() => buildBrandCSS(brand), [brand])
+
+  // Build logo header HTML
+  const logoHtml = useMemo(() => {
+    if (!brand.name && !brand.logoUrl) return ''
+    if (brand.logoUrl) {
+      return `<div class="canvas-logo"><img src="${brand.logoUrl}" alt="${brand.name || 'Logo'}" /></div>`
+    }
+    return `<div class="canvas-logo"><div class="canvas-logo-text">${brand.name}</div></div>`
+  }, [brand.name, brand.logoUrl])
+
+  // Stable base srcdoc — CSS + structure only, no content. Rebuilt only when
+  // brand CSS changes (which causes a full reload anyway).
+  const srcdoc = useMemo(() => {
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>${brandCSS}</style>
+</head>
+<body>
+<div class="canvas-root">
+<div id="logo"></div>
+<div id="content"></div>
+</div>
+</body>
+</html>`
+  }, [brandCSS])
 
   // Debounce streaming code
   useEffect(() => {
@@ -66,53 +99,76 @@ export function CanvasPane({ canvas, streaming = false, streamingCode, settings,
     }
   }, [debouncedCode])
 
-  // Build logo header HTML
-  const logoHtml = useMemo(() => {
-    if (!brand.name && !brand.logoUrl) return ''
-    if (brand.logoUrl) {
-      return `<div class="canvas-logo"><img src="${brand.logoUrl}" alt="${brand.name || 'Logo'}" /></div>`
-    }
-    return `<div class="canvas-logo"><div class="canvas-logo-text">${brand.name}</div></div>`
-  }, [brand.name, brand.logoUrl])
+  // Write content into the iframe DOM without reloading it
+  const updateIframeContent = useCallback((html: string) => {
+    const doc = iframeRef.current?.contentDocument
+    if (!doc) return
 
-  // Build full iframe srcdoc
-  const srcdoc = useMemo(() => {
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<style>${brandCSS}</style>
-</head>
-<body>
-<div class="canvas-root">
-${logoHtml}
-${markdownHtml}
-</div>
-<script>
-// Initialize Mermaid diagrams if any exist
-(function() {
-  var els = document.querySelectorAll('code.language-mermaid');
-  if (!els.length) return;
-  var s = document.createElement('script');
-  s.src = 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js';
-  s.onload = function() {
-    els.forEach(function(el) {
-      var pre = el.parentElement;
-      var div = document.createElement('div');
-      div.className = 'mermaid';
-      div.textContent = el.textContent;
-      pre.replaceWith(div);
-    });
-    mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
-    mermaid.run();
-  };
-  document.head.appendChild(s);
-})();
-</script>
-</body>
-</html>`
-  }, [brandCSS, logoHtml, markdownHtml])
+    const contentEl = doc.getElementById('content')
+    if (contentEl) contentEl.innerHTML = html
+
+    // Handle Mermaid diagrams
+    const mermaidEls = doc.querySelectorAll('code.language-mermaid')
+    if (mermaidEls.length) {
+      mermaidEls.forEach(el => {
+        const pre = el.parentElement
+        if (!pre) return
+        const div = doc.createElement('div')
+        div.className = 'mermaid'
+        div.textContent = el.textContent
+        pre.replaceWith(div)
+      })
+
+      const win = doc.defaultView as any
+      if (!win?.mermaid) {
+        const s = doc.createElement('script')
+        s.src = 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js'
+        s.onload = () => {
+          const m = (doc.defaultView as any)?.mermaid
+          if (m) {
+            m.initialize({ startOnLoad: false, theme: 'neutral' })
+            m.run()
+          }
+        }
+        doc.head.appendChild(s)
+      } else {
+        win.mermaid.run()
+      }
+    }
+  }, [])
+
+  // Populate logo once iframe is ready; update when brand changes
+  const updateIframeLogo = useCallback((html: string) => {
+    const doc = iframeRef.current?.contentDocument
+    if (!doc) return
+    const logoEl = doc.getElementById('logo')
+    if (logoEl) logoEl.innerHTML = html
+  }, [])
+
+  // After iframe loads, seed both logo and content
+  const handleLoad = useCallback(() => {
+    iframeReadyRef.current = true
+    updateIframeLogo(logoHtml)
+    updateIframeContent(markdownHtml)
+  }, [logoHtml, markdownHtml, updateIframeLogo, updateIframeContent])
+
+  // Push content updates into the live iframe DOM
+  useEffect(() => {
+    if (!iframeReadyRef.current) return
+    updateIframeContent(markdownHtml)
+  }, [markdownHtml, updateIframeContent])
+
+  // Push logo updates into the live iframe DOM
+  useEffect(() => {
+    if (!iframeReadyRef.current) return
+    updateIframeLogo(logoHtml)
+  }, [logoHtml, updateIframeLogo])
+
+  // When srcdoc changes (brand CSS rebuild), reset ready flag so handleLoad
+  // re-seeds content after the reload
+  useEffect(() => {
+    iframeReadyRef.current = false
+  }, [srcdoc])
 
   const handleExportPdf = useCallback(() => {
     const iframe = iframeRef.current
@@ -197,6 +253,7 @@ ${markdownHtml}
         <iframe
           ref={iframeRef}
           srcDoc={srcdoc}
+          onLoad={handleLoad}
           sandbox="allow-same-origin allow-modals allow-scripts allow-popups"
           title={canvas.title || 'Canvas'}
           className="border-0 block bg-white shadow-sm rounded-md w-full min-h-full"
