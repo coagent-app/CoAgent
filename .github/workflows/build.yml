@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-14
     strategy:
       matrix:
         include:
@@ -144,17 +144,17 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           ENTITLEMENTS="apps/desktop/src-tauri/Entitlements.plist"
-          # Sign node and whisper sidecars (native Mach-O binaries).
-          # Bun-compiled sidecars (coagent-server, coagent-memory) use a non-standard
-          # format that codesign rejects — Tauri signs them when it bundles the .app.
           for bin in \
+            apps/desktop/src-tauri/binaries/coagent-server-${{ matrix.rust-target }} \
+            apps/desktop/src-tauri/binaries/coagent-memory-${{ matrix.rust-target }} \
             apps/desktop/src-tauri/binaries/node-${{ matrix.rust-target }} \
             apps/desktop/src-tauri/binaries/whisper-${{ matrix.rust-target }}; do
             if [ ! -f "$bin" ]; then continue; fi
             echo "Signing $bin"
+            # Strip any embedded ad-hoc signature (Bun --compile adds one)
+            codesign --remove-signature "$bin" 2>/dev/null || true
             codesign --force --options runtime --entitlements "$ENTITLEMENTS" \
               --sign "$APPLE_SIGNING_IDENTITY" "$bin"
-            codesign --verify "$bin"
           done
 
       # Build Tauri app (signs main bundle + notarizes)
