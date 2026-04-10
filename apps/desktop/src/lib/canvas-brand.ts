@@ -24,7 +24,19 @@ export function brandFromSettings(settings: AgentSettings | null | undefined): B
   }
 }
 
+/** Allow only safe CSS color values: hex, rgb(), hsl(), named colors, or CSS variables */
+function safeCssValue(value: string, fallback: string): string {
+  const v = value.trim()
+  if (/^(#[0-9a-fA-F]{3,8}|rgb\([^)]+\)|hsl\([^)]+\)|[a-zA-Z]+|var\(--[a-zA-Z0-9-]+\))$/.test(v)) {
+    return v
+  }
+  return fallback
+}
+
 export function buildBrandCSS(brand: BrandValues): string {
+  const primary = safeCssValue(brand.primary, '#1a2744')
+  const secondary = safeCssValue(brand.secondary, '#6b7280')
+  const tertiary = safeCssValue(brand.tertiary, '#e11d48')
   return `
     html, body { margin: 0; padding: 0; background: white; }
     body {
@@ -55,13 +67,13 @@ export function buildBrandCSS(brand: BrandValues): string {
       font-family: ${brand.fontHeading};
       font-weight: 700;
       font-size: 20px;
-      color: ${brand.primary};
+      color: ${primary};
     }
 
     /* Typography */
     h1, h2, h3, h4, h5, h6 {
       font-family: ${brand.fontHeading};
-      color: ${brand.primary};
+      color: ${primary};
       font-weight: 600;
       margin-top: 1.5em;
       margin-bottom: 0.5em;
@@ -76,10 +88,10 @@ export function buildBrandCSS(brand: BrandValues): string {
 
     strong { color: #111; }
 
-    a { color: ${brand.primary}; text-decoration: underline; }
+    a { color: ${primary}; text-decoration: underline; }
 
     blockquote {
-      border-left: 3px solid ${brand.primary};
+      border-left: 3px solid ${primary};
       margin: 1em 0;
       padding: 0.5em 1em;
       color: #555;
@@ -88,7 +100,7 @@ export function buildBrandCSS(brand: BrandValues): string {
 
     hr {
       border: none;
-      border-top: 2px solid ${brand.primary};
+      border-top: 2px solid ${primary};
       margin: 2em 0;
     }
 
@@ -100,7 +112,7 @@ export function buildBrandCSS(brand: BrandValues): string {
       font-size: 14px;
     }
     thead th {
-      background: ${brand.primary};
+      background: ${primary};
       color: white;
       text-align: left;
       padding: 8px 12px;

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { open } from '@tauri-apps/plugin-shell'
 import { invoke } from '@tauri-apps/api/core'
 import type { ApprovalItem, DoneItem, AgentMessage, WSServerMessage, WSClientMessage, Integration, AgentSettings, FileEntry, AuthStatus, AuthMethod, RelayUsage, UsageSummary, CalendarEntry, AdminUser, GoogleCalendarInfo, WSServerMessage as WSSMsg, Canvas } from '@coagent/shared'
@@ -12,6 +12,17 @@ import { readFileAsBase64 } from '@/lib/utils'
 let currentFileDropTarget = ''
 export function setFileDropTarget(group: string): void {
   currentFileDropTarget = group
+}
+
+// ── Voice active flag (replaces window.__voiceActive) ───────────────────────
+let voiceActive = false
+export function setVoiceActive(v: boolean) { voiceActive = v }
+export function isVoiceActive() { return voiceActive }
+
+// ── Stable message IDs ─────────────────────────────────────────────────────
+let _msgSeq = 0
+function makeMsg(role: 'user' | 'assistant', content: string): AgentMessage {
+  return { id: `local-${Date.now()}-${++_msgSeq}`, role, content, timestamp: new Date().toISOString() }
 }
 
 export interface CodeCell {
@@ -28,6 +39,8 @@ export interface CodeCell {
   durationMs?: number
   /** Cell appears in the chat after the message at this index. */
   anchorIndex: number
+  /** Stable ID of the message this cell is anchored to. */
+  anchorMessageId?: string | null
   /**
    * Content of the message the cell is anchored to, used to re-compute
    * `anchorIndex` when chat history is reloaded. We cannot use timestamps:
@@ -38,7 +51,8 @@ export interface CodeCell {
    * existed (very rare; renders at the top).
    */
   anchorMessageContent?: string | null
-}
+  /** Conversation ID used for cancellation via cancelConversation. */
+  conversationId: string}
 
 type RelayCredentials = Extract<WSSMsg, { type: 'relay_credentials' }>
 
@@ -54,11 +68,22 @@ function loadCache(): Record<string, any> {
     return raw ? JSON.parse(raw) : {}
   } catch { return {} }
 }
+// Accumulate patches and flush after 500ms of inactivity so rapid streaming
+// chunks don't hammer localStorage on every chunk.
+let _saveCacheTimer: ReturnType<typeof setTimeout> | null = null
+let _pendingCachePatch: Record<string, any> = {}
 function saveCache(patch: Record<string, any>) {
-  try {
-    const current = loadCache()
-    localStorage.setItem(CACHE_KEY, JSON.stringify({ ...current, ...patch }))
-  } catch {}
+  Object.assign(_pendingCachePatch, patch)
+  if (_saveCacheTimer) clearTimeout(_saveCacheTimer)
+  _saveCacheTimer = setTimeout(() => {
+    _saveCacheTimer = null
+    const toFlush = _pendingCachePatch
+    _pendingCachePatch = {}
+    try {
+      const current = loadCache()
+      localStorage.setItem(CACHE_KEY, JSON.stringify({ ...current, ...toFlush }))
+    } catch {}
+  }, 500)
 }
 const _cached = loadCache()
 
@@ -67,9 +92,16 @@ export function useAgent() {
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const reconnectDelay = useRef(RECONNECT_BASE)
   const processingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const processingRef = useRef(false)  // mirrors processing state, readable inside callbacks
   const pollIntervals = useRef<ReturnType<typeof setInterval>[]>([])
+  const pollIntervalsBySlug = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map())
+  const timeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([])
   const recentIngestedFiles = useRef<{ id: string; filename: string }[]>([])
   const wasStreamingRef = useRef(false)
+  // Mirrors for reading current state inside WS message handlers without stale closures
+  const messagesRef = useRef<AgentMessage[]>(_cached.messages ?? [])
+  const streamingTextRef = useRef<string | null>(null)
+  const codeCellsRef = useRef<Record<string, CodeCell>>({})
   const [queue, setQueue] = useState<ApprovalItem[]>([])
   const [done, setDone] = useState<DoneItem[]>([])
   const [messages, setMessages] = useState<AgentMessage[]>(_cached.messages ?? [])
@@ -120,26 +152,18 @@ export function useAgent() {
   // localStorage so cells survive server restarts, HMR reloads, and webview
   // refreshes. Any cell still marked 'running' at load time was interrupted
   // by the reload, so we reset it to 'cancelled'.
-  const [codeCells, setCodeCells] = useState<Record<string, CodeCell>>(() => {
-    const cached = (_cached.codeCells ?? {}) as Record<string, CodeCell & { anchorMessageTimestamp?: string | null }>
-    const fixed: Record<string, CodeCell> = {}
-    for (const [id, cell] of Object.entries(cached)) {
-      // Migrate cells cached before content-based anchoring landed — they
-      // have `anchorMessageTimestamp` which is useless (server regenerates
-      // timestamps on every history fetch). We'll re-anchor them against
-      // the message at `anchorIndex - 1` once chat_history arrives, but for
-      // the initial render they use the cached index as-is.
-      const { anchorMessageTimestamp, ...rest } = cell
-      const migrated: CodeCell = rest
-      fixed[id] = migrated.status === 'running' ? { ...migrated, status: 'cancelled' } : migrated
-    }
-    return fixed
-  })
-  // Order in which cells were started (so the chat can interleave them with messages)
-  const [codeCellOrder, setCodeCellOrder] = useState<string[]>(_cached.codeCellOrder ?? [])
+  // Code cells are session-only — don't restore from cache to avoid stale anchoring issues
+  const [codeCells, setCodeCells] = useState<Record<string, CodeCell>>({})
+  const [codeCellOrder, setCodeCellOrder] = useState<string[]>([])
   const settingsRef = useRef<AgentSettings | null>(_cached.settings ?? null)
   const prevConnectedSlugs = useRef<Set<string> | null>(null)
 
+  // Keep refs in sync so python_streaming/python_run handlers can read current
+  // messages and streamingText without stale closures.
+  useEffect(() => { messagesRef.current = messages }, [messages])
+  useEffect(() => { streamingTextRef.current = streamingText }, [streamingText])
+  useEffect(() => { processingRef.current = processing }, [processing])
+  useEffect(() => { codeCellsRef.current = codeCells }, [codeCells])
   useEffect(() => {
     let unmounted = false
 
@@ -171,10 +195,24 @@ export function useAgent() {
       socket.onclose = () => {
         setConnected(false)
         if (wsRef.current === socket) wsRef.current = null
+        // Reset all transient UI state so the user doesn't see stale indicators
+        // (processing spinner, streaming text, tool labels, etc.) after disconnect.
+        setProcessing(false)
+        setThinking(false)
+        setStreamingText(null)
+        setToolLabel(null)
+        setResearchAgents([])
+        setCanvasStreaming(false)
+        if (processingTimeoutRef.current) { clearTimeout(processingTimeoutRef.current); processingTimeoutRef.current = null }
         // Clear any stale OAuth poll intervals from previous connection
         pollIntervals.current.forEach(clearInterval)
         pollIntervals.current = []
+        pollIntervalsBySlug.current.forEach(clearInterval)
+        pollIntervalsBySlug.current.clear()
         if (!unmounted) {
+          // Cancel any pending reconnect before scheduling a new one to avoid
+          // duplicate concurrent sockets on rapid disconnect/reconnect cycles.
+          if (reconnectTimer.current) { clearTimeout(reconnectTimer.current); reconnectTimer.current = null }
           reconnectTimer.current = setTimeout(() => {
             reconnectDelay.current = Math.min(reconnectDelay.current * 1.5, RECONNECT_MAX)
             connect()
@@ -210,31 +248,34 @@ export function useAgent() {
         if (msg.type === 'chat_segment_end') {
           setStreamingText(current => {
             if (current?.trim()) {
-              setMessages(prev => [...prev, { role: 'assistant' as const, content: current, timestamp: new Date().toISOString() }].slice(-100))
+              setMessages(prev => [...prev, makeMsg('assistant', current)].slice(-100))
             }
             return null
           })
         }
         if (msg.type === 'tool_start') {
-          if (!(window as any).__voiceActive) {
+          if (!isVoiceActive()) {
             setStreamingText(current => {
               if (current?.trim()) {
-                setMessages(prev => [...prev, { role: 'assistant' as const, content: current, timestamp: new Date().toISOString() }].slice(-100))
+                setMessages(prev => [...prev, makeMsg('assistant', current)].slice(-100))
               }
               return null
             })
           }
           setToolLabel(msg.label)
           setThinking(true)
-          if ((window as any).__voiceActive) {
+          if (isVoiceActive()) {
             import('@/lib/voice').then(v => v.showVoiceToolLabel(msg.label))
           }
+        }
+        if (msg.type === 'subagent_complete') {
+          console.log(`[UI] Sub-agent "${msg.label}" completed (${msg.resultLength} chars)`)
         }
         if (msg.type === 'research_progress') {
           setResearchAgents(msg.agents)
           // Clear when all done/error
           if (msg.agents.length > 0 && msg.agents.every((a: any) => a.status === 'done' || a.status === 'error')) {
-            setTimeout(() => setResearchAgents([]), 2000)
+            timeoutsRef.current.push(setTimeout(() => setResearchAgents([]), 2000))
           }
         }
         if (msg.type === 'chat_chunk') {
@@ -244,7 +285,7 @@ export function useAgent() {
           setResearchAgents([])
           setStreamingText(prev => (prev ?? '') + msg.text)
           // Forward just the first sentence to voice pill
-          if ((window as any).__voiceActive) {
+          if (isVoiceActive()) {
             import('@/lib/voice').then(v => v.showVoiceResponse(msg.text))
           }
         }
@@ -254,22 +295,23 @@ export function useAgent() {
           // Snapshot any remaining streaming text as a final bubble
           setStreamingText(current => {
             if (current?.trim()) {
-              setMessages(prev => [...prev, { role: 'assistant' as const, content: current, timestamp: new Date().toISOString() }].slice(-100))
+              setMessages(prev => [...prev, makeMsg('assistant', current)].slice(-100))
             }
             return null
           })
           // Only add message directly if it wasn't streamed (e.g. heartbeat summary, todo trigger)
           // Streamed responses are already captured via chat_chunk → streaming text snapshot above
           if (!wasStreamed) {
-            setMessages(prev => [...prev, msg.message].slice(-100))
+            const incoming = msg.message.id ? msg.message : { ...msg.message, id: `srv-${Date.now()}-${++_msgSeq}` }
+            setMessages(prev => [...prev, incoming].slice(-100))
           }
           setThinking(false)
           setToolLabel(null)
           if (processingTimeoutRef.current) { clearTimeout(processingTimeoutRef.current); processingTimeoutRef.current = null }
           setProcessing(false)
           // Dismiss voice pill if it was active (covers both normal completion and stop)
-          if ((window as any).__voiceActive) {
-            ;(window as any).__voiceActive = false
+          if (isVoiceActive()) {
+            setVoiceActive(false)
             import('@/lib/voice').then(v => v.showVoiceSummary(''))
           }
         }
@@ -280,8 +322,8 @@ export function useAgent() {
           setToolLabel(null)
           if (processingTimeoutRef.current) { clearTimeout(processingTimeoutRef.current); processingTimeoutRef.current = null }
           setProcessing(false)
-          if ((window as any).__voiceActive) {
-            ;(window as any).__voiceActive = false
+          if (isVoiceActive()) {
+            setVoiceActive(false)
             import('@/lib/voice').then(v => { v.cancelTts(); v.showVoiceSummary('') })
           }
         }
@@ -289,6 +331,7 @@ export function useAgent() {
           wasStreamingRef.current = false
           setStreamingText(null)
           const newMessages = msg.messages.slice(-100)
+          const oldMessageCount = messagesRef.current.length || newMessages.length
           setMessages(newMessages)
           saveCache({ messages: newMessages.slice(-50) })
           // Re-anchor cached code cells against the fresh messages array.
@@ -301,16 +344,30 @@ export function useAgent() {
             if (Object.keys(prev).length === 0) return prev
             const next: Record<string, CodeCell> = {}
             for (const [id, cell] of Object.entries(prev)) {
-              if (!cell.anchorMessageContent) {
-                // Legacy cell from before content-anchoring — keep the cached
-                // index, clamped to the current history length so it doesn't
-                // point past the end.
-                next[id] = { ...cell, anchorIndex: Math.min(cell.anchorIndex, newMessages.length) }
-                continue
+              // 1. Try matching by stable message ID (most reliable)
+              if (cell.anchorMessageId) {
+                const idx = newMessages.findIndex(m => m.id === cell.anchorMessageId)
+                if (idx >= 0) {
+                  next[id] = { ...cell, anchorIndex: idx + 1 }
+                  continue
+                }
               }
-              const target = cell.anchorMessageContent
-              const idx = newMessages.findIndex(m => m.content === target)
-              next[id] = { ...cell, anchorIndex: idx >= 0 ? idx + 1 : newMessages.length }
+              // 2. Fall back to content matching (exact → prefix → reverse prefix)
+              if (cell.anchorMessageContent) {
+                const target = cell.anchorMessageContent
+                let idx = newMessages.findIndex(m => m.content === target)
+                if (idx < 0) {
+                  const prefix = target.slice(0, 200)
+                  idx = newMessages.findIndex(m => m.content.startsWith(prefix) || target.startsWith(m.content.slice(0, 200)))
+                }
+                if (idx >= 0) {
+                  // Backfill the ID for future re-anchors
+                  next[id] = { ...cell, anchorIndex: idx + 1, anchorMessageId: newMessages[idx].id }
+                  continue
+                }
+              }
+              // 3. No match — anchor message was trimmed from history, drop the cell
+              continue
             }
             return next
           })
@@ -329,6 +386,13 @@ export function useAgent() {
             }
           }
           prevConnectedSlugs.current = connectedNow
+          // Clear OAuth poll for any integration that just became connected
+          for (const i of msg.integrations) {
+            if (i.connected && pollIntervalsBySlug.current.has(i.slug)) {
+              clearInterval(pollIntervalsBySlug.current.get(i.slug)!)
+              pollIntervalsBySlug.current.delete(i.slug)
+            }
+          }
           setIntegrations(msg.integrations); saveCache({ integrations: msg.integrations })
           const wa = msg.integrations.find((i: any) => i.slug === 'coagent:whatsapp')
           if (wa?.connected) setWhatsappQr(null)
@@ -336,12 +400,11 @@ export function useAgent() {
         if (msg.type === 'settings_update') { setSettings(msg.settings); settingsRef.current = msg.settings; saveCache({ settings: msg.settings }) }
         if (msg.type === 'auth_status') setAuthStatus(msg.status)
         if (msg.type === 'files_update') setFiles(msg.files)
-        if ((msg as any).type === 'transcription_status') {
-          const m = msg as any
+        if (msg.type === 'transcription_status') {
           setTranscribingFiles(prev => {
             const next = new Set(prev)
-            if (m.status === 'started') next.add(m.fileId)
-            else next.delete(m.fileId)
+            if (msg.status === 'started') next.add(msg.fileId)
+            else next.delete(msg.fileId)
             return next
           })
         }
@@ -370,7 +433,7 @@ export function useAgent() {
           setMessages(prev => {
             const last = prev[prev.length - 1]
             if (last?.role === 'user' && last.content === msg.text) return prev
-            return [...prev, { role: 'user' as const, content: msg.text, timestamp: new Date().toISOString() }].slice(-100)
+            return [...prev, makeMsg('user', msg.text)].slice(-100)
           })
           import('@/lib/voice').then(v => v.resetVoiceResponse())
         }
@@ -401,10 +464,10 @@ export function useAgent() {
         if (msg.type === 'capability_card') {
           setCapabilityCard({ name: msg.name, capabilities: msg.capabilities, authFields: (msg as any).authFields })
         }
-        if ((msg as any).type === 'whatsapp_qr') {
-          setWhatsappQr((msg as any).dataUrl)
+        if (msg.type === 'whatsapp_qr') {
+          setWhatsappQr(msg.dataUrl)
         }
-        if ((msg as any).type === 'relay_credentials_ready') {
+        if (msg.type === 'relay_credentials_ready') {
           // Fetch credentials via Tauri IPC instead of receiving over WS
           invoke<string>('get_relay_credentials').then(json => {
             const creds = JSON.parse(json)
@@ -420,18 +483,17 @@ export function useAgent() {
         if (msg.type === 'admin_token_toggled') {
           setAdminUsers(prev => prev.map(u => u.token === msg.token ? { ...u, active: msg.active } : u))
         }
-        if ((msg as any).type === 'team_info') setTeamInfo((msg as any).team)
-        if ((msg as any).type === 'team_message') {
-          const incoming = (msg as any).message
+        if (msg.type === 'team_info') setTeamInfo(msg.team)
+        if (msg.type === 'team_message') {
+          const incoming = msg.message
           setTeamMessages(prev => prev.some(m => m.id === incoming.id) ? prev : [...prev, incoming])
         }
-        if ((msg as any).type === 'team_history') setTeamMessages((msg as any).messages)
-        if ((msg as any).type === 'team_status') {
-          const s = msg as any
-          setTeamStatus(s.status === 'idle' ? null : { status: s.status, from: s.from })
+        if (msg.type === 'team_history') setTeamMessages(msg.messages)
+        if (msg.type === 'team_status') {
+          setTeamStatus(msg.status === 'idle' ? null : { status: msg.status, from: msg.from })
         }
-        if ((msg as any).type === 'canvas_save_to_files') {
-          const m = msg as any
+        if (msg.type === 'canvas_save_to_files') {
+          const m = msg
           import('@/lib/canvas-pdf').then(({ renderCanvasPdf }) => {
             import('@/lib/canvas-brand').then(({ brandFromSettings }) => {
               const brand = brandFromSettings(settingsRef.current)
@@ -439,17 +501,19 @@ export function useAgent() {
                 const reader = new FileReader()
                 reader.onload = () => {
                   const base64 = (reader.result as string).split(',')[1] ?? ''
-                  wsRef.current?.send(JSON.stringify({
-                    type: 'ingest_file',
-                    filename: `${m.title || 'document'}.pdf`,
-                    mimeType: 'application/pdf',
-                    data: base64,
-                  }))
+                  if (wsRef.current?.readyState === WebSocket.OPEN) {
+                    wsRef.current.send(JSON.stringify({
+                      type: 'ingest_file',
+                      filename: `${m.title || 'document'}.pdf`,
+                      mimeType: 'application/pdf',
+                      data: base64,
+                    }))
+                  }
                 }
                 reader.readAsDataURL(blob)
               }).catch((err: unknown) => console.error('[useAgent] canvas_save_to_files error:', err))
-            })
-          })
+            }).catch((err: unknown) => console.error('[useAgent] canvas_save_to_files error:', err))
+          }).catch((err: unknown) => console.error('[useAgent] canvas_save_to_files error:', err))
         }
         if (msg.type === 'canvas_opened' || msg.type === 'canvas_updated') {
           setCanvas(msg.canvas)
@@ -475,75 +539,64 @@ export function useAgent() {
         }
         if (msg.type === 'canvas_error') {
           setError(msg.message || 'Canvas error')
-          setTimeout(() => setError(null), 5000)
+          timeoutsRef.current.push(setTimeout(() => setError(null), 5000))
         }
-        if ((msg as any).type === 'canvases_list') {
-          setCanvasesList((msg as any).items)
+        if (msg.type === 'canvases_list') {
+          setCanvasesList(msg.items)
         }
-        if ((msg as any).type === 'python_streaming') {
-          const m = msg as any
+        if (msg.type === 'python_streaming') {
+          const m = msg
           const cellId: string = m.requestId
           const partialCode: string = m.partialCode
-          setCodeCells(prev => {
-            if (prev[cellId]) {
-              // Update existing streaming cell
-              return { ...prev, [cellId]: { ...prev[cellId], code: partialCode } }
-            }
-            // Create new streaming cell — snapshot streaming text as anchor
-            setStreamingText(current => {
-              setMessages(prevMsgs => {
-                let next = prevMsgs
-                if (current?.trim()) {
-                  next = [...prevMsgs, { role: 'assistant' as const, content: current, timestamp: new Date().toISOString() }].slice(-100)
-                }
-                const anchorIndex = next.length
-                const anchorMessageContent = next[next.length - 1]?.content ?? null
-                setCodeCells(p => ({
-                  ...p,
-                  [cellId]: { id: cellId, code: partialCode, status: 'running', stdout: '', stderr: '', anchorIndex, anchorMessageContent },
-                }))
-                setCodeCellOrder(p => p.includes(cellId) ? p : [...p, cellId])
-                return next
-              })
-              return null
-            })
-            return prev
-          })
+          // Fast path: cell already exists, just update the code
+          if (codeCellsRef.current[cellId]) {
+            setCodeCells(prev => ({ ...prev, [cellId]: { ...prev[cellId], code: partialCode } }))
+            return
+          }
+          // New cell: snapshot streaming text, compute anchor, then call setters flat
+          const currentStreaming = streamingTextRef.current
+          let nextMsgs = messagesRef.current
+          if (currentStreaming?.trim()) {
+            nextMsgs = [...messagesRef.current, makeMsg('assistant', currentStreaming)].slice(-100)
+            setMessages(nextMsgs)
+            setStreamingText(null)
+          }
+          const anchorIndex = nextMsgs.length
+          const anchorMsg = nextMsgs[nextMsgs.length - 1]
+          const anchorMessageContent = anchorMsg?.content ?? null
+          const anchorMessageId = anchorMsg?.id ?? null
+          setCodeCells(prev => ({
+            ...prev,
+            [cellId]: { id: cellId, code: partialCode, status: 'running', stdout: '', stderr: '', anchorIndex, anchorMessageId, anchorMessageContent, conversationId: m.conversationId || 'main' },
+          }))
+          setCodeCellOrder(prev => prev.includes(cellId) ? prev : [...prev, cellId])
         }
-        if ((msg as any).type === 'python_run') {
-          const m = msg as any
+        if (msg.type === 'python_run') {
+          const m = msg
           const cellId: string = m.requestId
           const cellCode: string = m.code
-          // If the cell was already created by python_streaming, just update code.
-          // Otherwise snapshot streaming text and create a new cell.
-          setCodeCells(prev => {
-            if (prev[cellId]) {
-              return { ...prev, [cellId]: { ...prev[cellId], code: cellCode } }
+          // Cell already exists from python_streaming — just update the final code
+          if (codeCellsRef.current[cellId]) {
+            setCodeCells(prev => ({ ...prev, [cellId]: { ...prev[cellId], code: cellCode } }))
+          } else {
+            // No streaming cell — snapshot streaming text, compute anchor, then call setters flat
+            const currentStreaming = streamingTextRef.current
+            let nextMsgs = messagesRef.current
+            if (currentStreaming?.trim()) {
+              nextMsgs = [...messagesRef.current, makeMsg('assistant', currentStreaming)].slice(-100)
+              setMessages(nextMsgs)
+              setStreamingText(null)
             }
-            return prev
-          })
-          setCodeCells(prev => {
-            if (prev[cellId]) return prev // already exists from streaming
-            // No streaming cell — create one now
-            setStreamingText(current => {
-              setMessages(prevMsgs => {
-                let next = prevMsgs
-                if (current?.trim()) {
-                  next = [...prevMsgs, { role: 'assistant' as const, content: current, timestamp: new Date().toISOString() }].slice(-100)
-                }
-                const anchorIndex = next.length
-                const anchorMessageContent = next[next.length - 1]?.content ?? null
-                setCodeCells(p => ({
-                  ...p,
-                  [cellId]: { id: cellId, code: cellCode, status: 'running', stdout: '', stderr: '', anchorIndex, anchorMessageContent },
-                }))
-                setCodeCellOrder(p => p.includes(cellId) ? p : [...p, cellId])
-                return next
-              })
-              return null
-            })
-            return prev
-          })
+            const anchorIndex = nextMsgs.length
+            const anchorMsg2 = nextMsgs[nextMsgs.length - 1]
+            const anchorMessageContent = anchorMsg2?.content ?? null
+            const anchorMessageId = anchorMsg2?.id ?? null
+            setCodeCells(prev => ({
+              ...prev,
+              [cellId]: { id: cellId, code: cellCode, status: 'running', stdout: '', stderr: '', anchorIndex, anchorMessageId, anchorMessageContent, conversationId: m.conversationId || 'main' },
+            }))
+            setCodeCellOrder(prev => prev.includes(cellId) ? prev : [...prev, cellId])
+          }
           // Run in the worker pool, stream events both into local state (for the
           // chat UI) and back over the WS to the agent (so it can see results).
           executePython({
@@ -590,7 +643,7 @@ export function useAgent() {
             }
           })
         }
-        if (msg.type === 'error') { setError(msg.message); setTimeout(() => setError(null), 5000) }
+        if (msg.type === 'error') { setError(msg.message); timeoutsRef.current.push(setTimeout(() => setError(null), 5000)) }
         if (msg.type === 'integration_needs_fields') {
           setPendingFields({ slug: msg.slug, fields: msg.fields })
         }
@@ -604,9 +657,10 @@ export function useAgent() {
           const poll = setInterval(() => {
             attempts++
             wsRef.current?.send(JSON.stringify({ type: 'get_integrations' } as WSClientMessage))
-            if (attempts >= 18) clearInterval(poll)
+            if (attempts >= 18) { clearInterval(poll); pollIntervalsBySlug.current.delete(msg.slug) }
           }, 5000)
           pollIntervals.current.push(poll)
+          pollIntervalsBySlug.current.set(msg.slug, poll)
         }
       }
 
@@ -620,6 +674,11 @@ export function useAgent() {
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current)
       if (processingTimeoutRef.current) { clearTimeout(processingTimeoutRef.current); processingTimeoutRef.current = null }
       pollIntervals.current.forEach(clearInterval)
+      pollIntervals.current = []
+      pollIntervalsBySlug.current.forEach(clearInterval)
+      pollIntervalsBySlug.current.clear()
+      timeoutsRef.current.forEach(clearTimeout)
+      timeoutsRef.current = []
       wsRef.current?.close()
     }
   }, [])
@@ -669,7 +728,7 @@ export function useAgent() {
           wsRef.current?.send(JSON.stringify(msg))
         }).catch((err) => {
           setError(err?.message || `Could not read "${file.name}"`)
-          setTimeout(() => setError(null), 5000)
+          timeoutsRef.current.push(setTimeout(() => setError(null), 5000))
         })
       }
     }
@@ -685,13 +744,18 @@ export function useAgent() {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       setError('Connection lost — reconnecting…')
       setProcessing(false)
-      setTimeout(() => setError(null), 3000)
+      timeoutsRef.current.push(setTimeout(() => setError(null), 3000))
       return
     }
     wsRef.current.send(JSON.stringify(msg))
   }, [])
 
   const chat = useCallback((message: string) => {
+    // Guard: ignore empty/whitespace-only messages
+    if (!message.trim()) return
+    // Guard: prevent double-send while already processing
+    if (processingRef.current) return
+    processingRef.current = true
     setProcessing(true)
     // Safety net: if the WebSocket dies mid-flight the server never responds,
     // so processing would stay true forever. Auto-reset after 120 s.
@@ -701,7 +765,7 @@ export function useAgent() {
       processingTimeoutRef.current = null
       setProcessing(false)
     }, 120_000)
-    setMessages(prev => [...prev, { role: 'user' as const, content: message, timestamp: new Date().toISOString() }].slice(-100))
+    setMessages(prev => [...prev, makeMsg('user', message)].slice(-100))
     const fileIds = recentIngestedFiles.current.map(f => f.id)
     recentIngestedFiles.current = []
     send({ type: 'chat', message, ...(fileIds.length ? { fileIds } : {}) })
@@ -713,13 +777,13 @@ export function useAgent() {
       if (current) {
         setMessages(prev => [
           ...prev,
-          { role: 'assistant' as const, content: current, timestamp: new Date().toISOString() },
-          { role: 'user' as const, content: message, timestamp: new Date().toISOString() }
+          makeMsg('assistant', current),
+          makeMsg('user', message),
         ].slice(-100))
       } else {
         setMessages(prev => [
           ...prev,
-          { role: 'user' as const, content: message, timestamp: new Date().toISOString() }
+          makeMsg('user', message),
         ].slice(-100))
       }
       return null
@@ -735,8 +799,8 @@ export function useAgent() {
     if (processingTimeoutRef.current) { clearTimeout(processingTimeoutRef.current); processingTimeoutRef.current = null }
     setProcessing(false)
     // Always reset voice pill state
-    if ((window as any).__voiceActive) {
-      ;(window as any).__voiceActive = false
+    if (isVoiceActive()) {
+      setVoiceActive(false)
       import('@/lib/voice').then(v => { v.cancelTts(); v.showVoiceSummary('') })
     }
   }, [send])
@@ -865,7 +929,7 @@ export function useAgent() {
 
   const confirmCapabilities = useCallback((selected: string[], authValues?: Record<string, string>) => {
     send({ type: 'capability_confirm', capabilities: selected, authValues } as any)
-    setTimeout(() => setCapabilityCard(null), 1500)
+    timeoutsRef.current.push(setTimeout(() => setCapabilityCard(null), 1500))
   }, [send])
 
   const deleteCustomIntegration = useCallback((slug: string) => send({ type: 'custom_integration_delete', slug }), [send])
@@ -950,8 +1014,9 @@ export function useAgent() {
   }, [send])
 
   const cancelCodeCell = useCallback((cellId: string) => {
-    // Cancel by terminating the worker for this conversation
-    cancelConversation('main')
+    const cell = codeCellsRef.current[cellId]
+    const conversationId = cell?.conversationId || 'main'
+    cancelConversation(conversationId)
     setCodeCells(prev => prev[cellId] && prev[cellId].status === 'running' ? { ...prev, [cellId]: { ...prev[cellId], status: 'cancelled' } } : prev)
     const ws = wsRef.current
     if (ws?.readyState === WebSocket.OPEN) {
@@ -959,5 +1024,48 @@ export function useAgent() {
     }
   }, [])
 
-  return { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, settings, authStatus, files, folders, searchResults, transcribingFiles, error, relayActive, relayModel, setRelayModel: handleSetRelayModel, relayUsage, pendingFields, setPendingFields, setModel, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth, verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, voiceSummary, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, getTeamInfo, getTeamHistory, triggerPrompt, setTriggerPrompt, canvas, canvasVisible, canvasStreaming, canvasStreamingCode, openCanvas, closeCanvas, canvasesList, getCanvases, codeCells, codeCellOrder, cancelCodeCell, exportPdf }
+  // Stable actions object — all callbacks are already memoized with useCallback,
+  // so this only changes when a callback identity changes (rare). Keeping it
+  // separate prevents consumers that only use actions from re-rendering on every
+  // streaming chunk.
+  const actions = useMemo(() => ({
+    triggerHeartbeat, updateSkill, deleteSkill, steer, stopAgent,
+    setRelayModel: handleSetRelayModel, setPendingFields, setModel, chat, approve, reject,
+    editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth,
+    verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths,
+    createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder,
+    searchFilesUI, refreshUsage, autoOrganize, completeCalendarEntry, deleteCalendarEntry,
+    googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor,
+    googleCalendarSync, confirmCapabilities, deleteCustomIntegration, toggleTrigger,
+    getRelayCredentials, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken,
+    sendTeamMessage, getTeamInfo, getTeamHistory, setTriggerPrompt, openCanvas, closeCanvas,
+    getCanvases, cancelCodeCell, exportPdf,
+  }), [
+    triggerHeartbeat, updateSkill, deleteSkill, steer, stopAgent,
+    handleSetRelayModel, setPendingFields, setModel, chat, approve, reject,
+    editQueueItem, connectIntegration, disconnectIntegration, updateSettings, updateAuth,
+    verifyAuth, activateRelay, refreshRelayStatus, ingestFile, deleteFile, ingestFilePaths,
+    createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder,
+    searchFilesUI, refreshUsage, autoOrganize, completeCalendarEntry, deleteCalendarEntry,
+    googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor,
+    googleCalendarSync, confirmCapabilities, deleteCustomIntegration, toggleTrigger,
+    getRelayCredentials, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken,
+    sendTeamMessage, getTeamInfo, getTeamHistory, setTriggerPrompt, openCanvas, closeCanvas,
+    getCanvases, cancelCodeCell, exportPdf,
+  ])
+
+  return {
+    // Volatile state (changes on every streaming chunk)
+    streamingText, thinking, processing, toolLabel, researchAgents,
+    // Less-frequent state
+    queue, done, messages, connected, lastHeartbeat, heartbeatLog, statusLine, skills,
+    integrations, settings, authStatus, files, folders, searchResults, transcribingFiles,
+    error, relayActive, relayModel, relayUsage, pendingFields, voiceSummary, usage,
+    organizing, calendarEntries, googleCalendarStatus, capabilityCard, whatsappQr,
+    relayCredentials, isAdmin, adminUsers, adminNewToken, teamInfo, teamMessages, teamStatus,
+    triggerPrompt, canvas, canvasVisible, canvasStreaming, canvasStreamingCode,
+    canvasesList, codeCells, codeCellOrder,
+    // Stable actions (memoized above)
+    ...actions,
+  }
 }

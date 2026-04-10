@@ -2,6 +2,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import Anthropic from '@anthropic-ai/sdk'
+import { homedir } from 'os'
 
 const VALID_PROP_KEY = /^[a-zA-Z0-9_.\-]{1,64}$/
 
@@ -155,7 +156,7 @@ export class MCPManager {
       env: (config.name.startsWith('custom:')
         ? {
             PATH: process.env.PATH ?? '',
-            HOME: process.env.HOME ?? '',
+            HOME: homedir(),
             NODE_ENV: process.env.NODE_ENV ?? 'production',
             LANG: process.env.LANG ?? '',
             COAGENT_DATA_DIR: process.env.COAGENT_DATA_DIR ?? '',

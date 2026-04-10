@@ -174,7 +174,7 @@ New message type: `code_cell`. Renders inline inside the assistant's bubble (not
 
 When the agent runs code that produces a chart, the SVG can flow into an HTML document via:
 1. Agent calls `run_python` and gets SVG back
-2. Agent calls `patch_document` with `insert_after` and content = `<section class="sec-gallery" id="chart-1"><figure>{svg}</figure><figcaption class="ed-caption" id="cap-1">Caption</figcaption></section>`
+2. Agent calls `patch_canvas` with `insert_after` and content = `<section class="sec-gallery" id="chart-1"><figure>{svg}</figure><figcaption class="ed-caption" id="cap-1">Caption</figcaption></section>`
 3. Whitelist already allows `<svg>` implicitly via figure/img — **confirm and extend if needed**
 
 ## Phases
@@ -248,9 +248,9 @@ Phase order: **1 → 2 → 4 → 3 → 5 → 7 → 6**
 ### Phase 6 — Document embedding (depends on canvas)
 
 1. Add "Insert into document" button on figures in `done` code cells
-2. Wire to `patch_document` (or canvas equivalent — check the final API after canvas lands) with a gallery section containing the SVG
+2. Wire to `patch_canvas` (or canvas equivalent — check the final API after canvas lands) with a gallery section containing the SVG
 3. Confirm HTML/canvas whitelist allows inline SVG inside figures; extend if not
-4. Agent system prompt update: "to put a chart in a document, call patch_document after run_python"
+4. Agent system prompt update: "to put a chart in a document, call patch_canvas after run_python"
 
 **Verify:** full flow — run code → chart → click "insert" → shows up in canvas/HtmlDocumentPane.
 

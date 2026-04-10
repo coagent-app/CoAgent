@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react'
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { Send, Square, FileText, Sheet, File, X, ChevronLeft, ChevronRight, Paperclip, Mic } from 'lucide-react'
 import { CapabilityCard } from '@/components/CapabilityCard'
 import { convertFileSrc } from '@tauri-apps/api/core'
@@ -269,10 +269,9 @@ const pdfPreviewCache = new Map<string, string>()
 function PdfInlinePreview({ fileId, path }: { fileId: string; path: string }) {
   const [dataUrl, setDataUrl] = useState<string | null>(pdfPreviewCache.get(fileId) ?? null)
   const [loading, setLoading] = useState(!pdfPreviewCache.has(fileId))
-  const mounted = useRef(true)
 
   useEffect(() => {
-    mounted.current = true
+    let cancelled = false
     if (pdfPreviewCache.has(fileId)) return
     ;(async () => {
       try {
@@ -295,17 +294,17 @@ function PdfInlinePreview({ fileId, path }: { fileId: string; path: string }) {
         const ctx = canvas.getContext('2d')!
         await page.render({ canvasContext: ctx, viewport: scaled } as any).promise
         const url = canvas.toDataURL('image/png')
-        if (mounted.current) {
+        if (!cancelled) {
           pdfPreviewCache.set(fileId, url)
           setDataUrl(url)
         }
       } catch (err) {
         console.warn('[PdfInlinePreview] render failed:', err)
       } finally {
-        if (mounted.current) setLoading(false)
+        if (!cancelled) setLoading(false)
       }
     })()
-    return () => { mounted.current = false }
+    return () => { cancelled = true }
   }, [fileId, path])
 
   if (loading) {
@@ -514,7 +513,7 @@ const AgentBubble = React.memo(function AgentBubble({ content, files, docs }: { 
   }, [content, filesMap])
 
   return (
-    <div className="bg-neutral-100 dark:bg-neutral-800 text-neutral-800 dark:text-neutral-200 rounded-2xl rounded-tl-sm px-4 py-3 max-w-[620px] text-[13.5px] leading-relaxed">
+    <div className="bg-neutral-100 dark:bg-neutral-800 text-neutral-800 dark:text-neutral-200 rounded-2xl rounded-tl-sm px-4 py-3 max-w-[620px] text-[13.5px] leading-relaxed break-words overflow-hidden">
       {cleanContent && (
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
@@ -537,8 +536,15 @@ const AgentBubble = React.memo(function AgentBubble({ content, files, docs }: { 
             h1: ({ children }) => <h1 className="text-[15px] font-bold text-neutral-900 dark:text-neutral-100 mb-1 mt-2">{children}</h1>,
             h2: ({ children }) => <h2 className="text-[14px] font-semibold text-neutral-900 dark:text-neutral-100 mb-1 mt-2">{children}</h2>,
             h3: ({ children }) => <h3 className="text-[13.5px] font-semibold text-neutral-900 dark:text-neutral-100 mb-0.5 mt-2">{children}</h3>,
-            code: ({ children }) => <code className="bg-neutral-200 dark:bg-neutral-700 rounded px-1 py-0.5 text-[12px] font-mono">{children}</code>,
-            a: ({ href, children }) => <a href={href} className="text-blue-600 dark:text-blue-400 underline" target="_blank" rel="noopener noreferrer">{children}</a>,
+            pre: ({ children }) => <pre className="bg-neutral-200 dark:bg-neutral-700 rounded-lg px-3 py-2.5 my-2 text-[12px] font-mono overflow-x-auto whitespace-pre">{children}</pre>,
+            code: ({ children, className }) => {
+              const isBlock = !!className
+              if (isBlock) {
+                return <code className={cn('font-mono text-[12px]', className)}>{children}</code>
+              }
+              return <code className="bg-neutral-200 dark:bg-neutral-700 rounded px-1 py-0.5 text-[12px] font-mono break-all">{children}</code>
+            },
+            a: ({ children }) => <span className="text-blue-600 dark:text-blue-400 underline break-all">{children}</span>,
           }}
         >
           {cleanContent}
@@ -548,6 +554,63 @@ const AgentBubble = React.memo(function AgentBubble({ content, files, docs }: { 
         <FileDeck files={referencedFiles} />
       )}
     </div>
+  )
+})
+
+// ── User message bubble (memoized so sibling changes don't re-render it) ────
+const UserBubble = React.memo(function UserBubble({ content }: { content: string }) {
+  return (
+    <div className="bg-neutral-900 dark:bg-neutral-700 text-white text-[13.5px] leading-relaxed rounded-2xl rounded-tr-sm px-4 py-2.5 max-w-[560px] break-words overflow-hidden">
+      {content}
+    </div>
+  )
+})
+
+// ── Historical message list (memoized — only re-renders when messages array changes) ──
+const HistoricalMessageList = React.memo(function HistoricalMessageList({
+  messages,
+  files,
+  cellsByAnchor,
+  onCancelCodeCell,
+  welcomeContent,
+}: {
+  messages: AgentMessage[]
+  files: FileEntry[]
+  cellsByAnchor: Record<number, CodeCellType[]>
+  onCancelCodeCell?: (id: string) => void
+  welcomeContent: string | null
+}) {
+  return (
+    <>
+      {welcomeContent !== null && (
+        <div className="flex justify-start">
+          <AgentBubble content={welcomeContent} files={files} />
+        </div>
+      )}
+
+      {cellsByAnchor[0]?.map(cell => (
+        <div key={cell.id} className="flex justify-start">
+          <CodeCell cell={cell} onCancel={onCancelCodeCell} />
+        </div>
+      ))}
+
+      {messages.map((msg, i) => (
+        <React.Fragment key={msg.id ?? i}>
+          <div className={cn('flex', msg.role === 'user' ? 'justify-end' : 'justify-start')}>
+            {msg.role === 'user' ? (
+              <UserBubble content={msg.content} />
+            ) : (
+              <AgentBubble content={msg.content} files={files} docs={msg.docs} />
+            )}
+          </div>
+          {cellsByAnchor[i + 1]?.map(cell => (
+            <div key={cell.id} className="flex justify-start">
+              <CodeCell cell={cell} onCancel={onCancelCodeCell} />
+            </div>
+          ))}
+        </React.Fragment>
+      ))}
+    </>
   )
 })
 
@@ -602,14 +665,17 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
   // Group cells by anchor index for interleaved rendering between messages.
   // Cells with anchorIndex = N appear after the message at index N-1 (i.e.
   // between message N-1 and message N).
-  const cellsByAnchor: Record<number, CodeCellType[]> = {}
-  for (const id of codeCellOrder) {
-    const cell = codeCells[id]
-    if (!cell) continue
-    const idx = cell.anchorIndex
-    if (!cellsByAnchor[idx]) cellsByAnchor[idx] = []
-    cellsByAnchor[idx].push(cell)
-  }
+  const cellsByAnchor = useMemo(() => {
+    const map: Record<number, CodeCellType[]> = {}
+    for (const id of codeCellOrder) {
+      const cell = codeCells[id]
+      if (!cell) continue
+      const idx = cell.anchorIndex
+      if (!map[idx]) map[idx] = []
+      map[idx].push(cell)
+    }
+    return map
+  }, [codeCells, codeCellOrder])
   const [input, setInput] = useState('')
   const [skillQuery, setSkillQuery] = useState<string | null>(null)
   const [selectedSkillIdx, setSelectedSkillIdx] = useState(0)
@@ -678,24 +744,78 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
     }
   }, [])
 
-  // Scroll to bottom on new messages / streaming.
-  // Uses 'instant' + block:'end' + double-RAF so layout has settled before we pin
-  // to the bottom. Smooth scroll is glitchy during streaming — each keystroke
-  // interrupts the previous animation, leaving the view drifting upward.
+  // Track whether user is near the bottom of the scroll area
+  const isNearBottomRef = useRef(true)
+  const initialLoadRef = useRef(true)
+
   useEffect(() => {
+    const viewport = messagesEndRef.current?.closest('[data-radix-scroll-area-viewport]') as HTMLElement | null
+    if (!viewport) return
+    const onScroll = () => {
+      const { scrollTop, scrollHeight, clientHeight } = viewport
+      isNearBottomRef.current = scrollHeight - scrollTop - clientHeight < 150
+    }
+    viewport.addEventListener('scroll', onScroll, { passive: true })
+    return () => viewport.removeEventListener('scroll', onScroll)
+  }, [])
+
+  // Scroll to bottom on new messages / streaming — only if user is near bottom
+  // or agent is actively working.
+  //
+  // Initial load (cached history): code blocks rendered by ReactMarkdown inflate
+  // their height asynchronously in the same paint as the initial commit but after
+  // the first rAF fires. A single rAF therefore scrolls before <pre> elements
+  // have their final height, landing short of the true bottom. Fix: observe the
+  // scroll viewport with a ResizeObserver and keep scrolling until the height
+  // has been stable for two consecutive animation frames, then disconnect.
+  useEffect(() => {
+    if (initialLoadRef.current) {
+      initialLoadRef.current = false
+      const viewport = messagesEndRef.current?.closest('[data-radix-scroll-area-viewport]') as HTMLElement | null
+      if (!viewport) {
+        requestAnimationFrame(() => {
+          messagesEndRef.current?.scrollIntoView({ behavior: 'instant' as ScrollBehavior, block: 'end' })
+        })
+        return
+      }
+      let lastHeight = viewport.scrollHeight
+      let stableFrames = 0
+      let rafId = 0
+      const scrollToEnd = () => {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'instant' as ScrollBehavior, block: 'end' })
+      }
+      const tick = () => {
+        const h = viewport.scrollHeight
+        if (h === lastHeight) {
+          stableFrames++
+        } else {
+          lastHeight = h
+          stableFrames = 0
+          scrollToEnd()
+        }
+        if (stableFrames < 2) {
+          rafId = requestAnimationFrame(tick)
+        }
+      }
+      scrollToEnd()
+      rafId = requestAnimationFrame(tick)
+      // Safety timeout — stop polling after 500ms regardless
+      const timeout = setTimeout(() => {
+        cancelAnimationFrame(rafId)
+        scrollToEnd()
+      }, 500)
+      return () => {
+        cancelAnimationFrame(rafId)
+        clearTimeout(timeout)
+      }
+    }
+    if (!isNearBottomRef.current && !streamingText && !thinking) return
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'instant' as ScrollBehavior, block: 'end' })
       })
     })
   }, [messages, streamingText, thinking])
-
-  // Scroll to bottom when pane mounts (e.g. navigating back to chat)
-  useEffect(() => {
-    requestAnimationFrame(() => {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'instant' as ScrollBehavior, block: 'end' })
-    })
-  }, [])
 
   const pendingMsgRef = useRef<string | null>(null)
 
@@ -757,13 +877,17 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
     const msg = input.trim()
     const hasAttachments = attachedFiles.length > 0
     if (!msg && !hasAttachments) return
+    // Guard: if already processing and steer is unavailable, block duplicate sends
+    if (processing && !onSteer) return
     setSkillQuery(null)
     const fullMsg = hasAttachments
       ? `${msg}${msg ? '\n\n' : ''}[Attached ${attachedFiles.length} file${attachedFiles.length > 1 ? 's' : ''}: ${attachedFiles.map(f => f.name).join(', ')}]`
       : msg
 
-    if (isActive && onSteer) {
-      // Agent is working — steer it instead of starting a new chat
+    if ((isActive || processing) && onSteer) {
+      // Agent is working — steer it instead of starting a new chat.
+      // Use `processing` as a reliable backup: it's only cleared after chat_response,
+      // while streamingText/thinking can flip between chunks.
       onSteer(fullMsg)
     } else if (!connected) {
       pendingMsgRef.current = fullMsg
@@ -772,7 +896,7 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
     }
     setInput('')
     setAttachedFiles([])
-  }, [input, connected, onChat, onSteer, attachedFiles, isActive])
+  }, [input, connected, onChat, onSteer, attachedFiles, isActive, processing])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
     if (skillQuery !== null && filteredSkills.length > 0) {
@@ -825,38 +949,14 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
 
       <ScrollArea className="flex-1">
         <div className="px-7 py-5 flex flex-col gap-3">
-          {messages.length === 0 && !isActive && (
-            <div className="flex justify-start">
-              <AgentBubble content={getWelcomeMessage(userName, userRole)} files={files} />
-            </div>
-          )}
-
-          {/* Cells anchored at index 0 — before any messages exist yet */}
-          {cellsByAnchor[0]?.map(cell => (
-            <div key={cell.id} className="flex justify-start">
-              <CodeCell cell={cell} onCancel={onCancelCodeCell} />
-            </div>
-          ))}
-
-          {messages.map((msg, i) => (
-            <React.Fragment key={i}>
-              <div className={cn('flex', msg.role === 'user' ? 'justify-end' : 'justify-start')}>
-                {msg.role === 'user' ? (
-                  <div className="bg-neutral-900 dark:bg-neutral-700 text-white text-[13.5px] leading-relaxed rounded-2xl rounded-tr-sm px-4 py-2.5 max-w-[560px]">
-                    {msg.content}
-                  </div>
-                ) : (
-                  <AgentBubble content={msg.content} files={files} docs={msg.docs} />
-                )}
-              </div>
-              {/* Cells with anchorIndex === i+1 appear after the message at index i */}
-              {cellsByAnchor[i + 1]?.map(cell => (
-                <div key={cell.id} className="flex justify-start">
-                  <CodeCell cell={cell} onCancel={onCancelCodeCell} />
-                </div>
-              ))}
-            </React.Fragment>
-          ))}
+          {/* Historical messages — memoized so streaming chunks don't re-render this list */}
+          <HistoricalMessageList
+            messages={messages}
+            files={files}
+            cellsByAnchor={cellsByAnchor}
+            onCancelCodeCell={onCancelCodeCell}
+            welcomeContent={messages.length === 0 && !isActive ? getWelcomeMessage(userName, userRole) : null}
+          />
 
           {thinking && !streamingText && (
             <div className="flex justify-start">
@@ -940,7 +1040,7 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
               <div key={i} className="flex items-center gap-1.5 bg-neutral-100 dark:bg-neutral-800 rounded-md px-2 py-1 text-[12px]">
                 <Paperclip size={11} className="text-neutral-400" />
                 <span className="text-neutral-600 dark:text-neutral-300 truncate max-w-[150px]">{f.name}</span>
-                <button onClick={() => setAttachedFiles(prev => prev.filter((_, j) => j !== i))} className="text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300">
+                <button onClick={() => setAttachedFiles(prev => prev.filter((_, j) => j !== i))} aria-label={`Remove ${f.name}`} className="text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300">
                   <X size={11} />
                 </button>
               </div>
@@ -960,12 +1060,14 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
             disabled={isActive}
             className="p-1.5 rounded-md text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors disabled:opacity-30"
             title="Attach file"
+            aria-label="Attach file"
           >
             <Paperclip size={16} />
           </button>
           <div className="relative flex-1 min-w-0">
             <Input
               ref={inputRef}
+              aria-label="Message input"
               className="flex-1 w-full text-[13.5px] dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500"
               placeholder={isActive ? 'Type to steer the agent…' : !connected ? 'Connecting…' : ''}
               value={input}
@@ -993,6 +1095,7 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
                 : 'text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800'
             )}
             title="Hold to dictate (or hold Space)"
+            aria-label={dictation.recording ? 'Recording — release to stop' : 'Hold to dictate'}
           >
             <Mic size={16} />
           </button>

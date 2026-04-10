@@ -139,7 +139,7 @@ export function CapabilityCard({ name, capabilities, authFields, onConfirm }: Ca
           Confirm
         </button>
       ) : (
-        <p className="text-[12px] text-emerald-500 font-medium">Confirmed — building integration...</p>
+        <p className="text-[12px] text-emerald-500 font-medium">Confirmed — building integration…</p>
       )}
     </div>
   )

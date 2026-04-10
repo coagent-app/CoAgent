@@ -65,6 +65,9 @@ function estimateCost(entry: UsageEntry): number {
   }
 }
 
+const MAX_USAGE_ENTRIES = 1000
+const MAX_USAGE_AGE_DAYS = 30
+
 export async function recordUsage(dataDir: string, entry: UsageEntry): Promise<void> {
   await mkdir(dataDir, { recursive: true })
   const filePath = join(dataDir, USAGE_FILE)
@@ -73,6 +76,16 @@ export async function recordUsage(dataDir: string, entry: UsageEntry): Promise<v
     entries = JSON.parse(await readFile(filePath, 'utf-8'))
   } catch {}
   entries.push(entry)
+
+  // Prune on every write: drop entries older than 30 days, then cap at 1000
+  const cutoff = new Date()
+  cutoff.setDate(cutoff.getDate() - MAX_USAGE_AGE_DAYS)
+  const cutoffStr = cutoff.toISOString()
+  entries = entries.filter(e => e.timestamp >= cutoffStr)
+  if (entries.length > MAX_USAGE_ENTRIES) {
+    entries = entries.slice(entries.length - MAX_USAGE_ENTRIES)
+  }
+
   await writeFile(filePath, JSON.stringify(entries), 'utf-8')
 }
 

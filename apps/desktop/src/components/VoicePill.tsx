@@ -258,7 +258,7 @@ export function VoicePill() {
             <Shimmer />
             <AudioBars volume={volume} />
             <span style={labelStyle}>
-              {showHint ? (isLocked ? 'tap Fn to send' : 'release or tap again') : 'Listening...'}
+              {showHint ? (isLocked ? 'Tap Fn to send' : 'Release or tap again') : 'Listening…'}
             </span>
             {isLocked && (
               <div style={{
@@ -271,7 +271,7 @@ export function VoicePill() {
           </>
         )}
         {state === 'thinking' && (
-          <span style={labelStyle}>Thinking...</span>
+          <span style={labelStyle}>Thinking…</span>
         )}
         {state === 'working' && (
           <>
@@ -282,7 +282,7 @@ export function VoicePill() {
               textOverflow: 'ellipsis',
               whiteSpace: 'nowrap',
               maxWidth: 260,
-            }}>{text || 'Working...'}</span>
+            }}>{text || 'Working…'}</span>
           </>
         )}
         {isResponse && (

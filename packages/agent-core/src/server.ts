@@ -6,13 +6,12 @@ import { Agent } from './agent.js'
 import { GoogleCalendarService } from './google-calendar.js'
 import { MCPServerConfig } from './mcp-manager.js'
 import { setupComposioMcp } from './composio-setup.js'
-import { INTEGRATIONS, getIntegrationStatuses, generateAuthUrl, getRequiredFields, disconnectIntegration, getConnectedSlugs, subscribeTriggersForSlug, subscribeSingleTrigger, purgeExpiredAccounts, getAvailableTriggersForSlug, getSubscribedTriggers, setTriggerEnabled, loadPersistedTriggers, markLocalConnected, seedLocalConnectionsIfNeeded, ensureWebhookSubscription, invalidateAccountsCache } from './composio-integrations.js'
+import { INTEGRATIONS, getIntegrationStatuses, generateAuthUrl, disconnectIntegration, getConnectedSlugs, subscribeSingleTrigger, purgeExpiredAccounts, getAvailableTriggersForSlug, getSubscribedTriggers, setTriggerEnabled, loadPersistedTriggers, markLocalConnected, seedLocalConnectionsIfNeeded, ensureWebhookSubscription, invalidateAccountsCache } from './composio-integrations.js'
 import { startScheduler } from './scheduler.js'
 import { readSettings, writeSettings } from './settings.js'
 
 import { listFiles, listFolders, ingestFile, deleteFileEntry, createFolder, moveFile, moveFolder, renameFile, renameFolder, deleteFolder, saveFolderOrder, searchFiles, autoOrganizeFiles } from './file-store.js'
 import { readCanvas, listCanvases } from './canvas-store.js'
-import { randomUUID } from 'crypto'
 import { IMESSAGE_TOOLS, handleImessageTool } from './local-tools-imessage.js'
 import { CONTACTS_TOOLS, handleContactsTool } from './local-tools-contacts.js'
 import { embedTools, purgeTools, setToolEmbeddingsDir } from './tool-embeddings.js'
@@ -34,7 +33,7 @@ import { TeamClient } from '@coagent/team-core'
 import { WhatsAppClient, WhatsAppMedia } from './whatsapp-client.js'
 import { getEdition } from './edition.js'
 import type { WSClientMessage, WSServerMessage } from '@coagent/shared'
-import { join } from 'path'
+import { join, delimiter as pathDelimiter } from 'path'
 import { homedir } from 'os'
 import { initCustomMcpDir, readRegistry, writeCustomMcpCredentials, disconnectCustomMcp, deleteCustomMcp, getCustomMcpConfigs, getCustomIntegrations, readCustomMcpCode, updateCustomMcpCode, getCustomMcpDir } from './custom-mcp.js'
 
@@ -275,7 +274,7 @@ function augmentPathForGuiLaunch(): void {
     }
   } catch { /* ignore */ }
 
-  const existing = (process.env.PATH || '').split(':').filter(Boolean)
+  const existing = (process.env.PATH || '').split(pathDelimiter).filter(Boolean)
   const seen = new Set(existing)
   const toPrepend: string[] = []
   for (const c of candidates) {
@@ -285,7 +284,7 @@ function augmentPathForGuiLaunch(): void {
     }
   }
   if (toPrepend.length) {
-    process.env.PATH = [...toPrepend, ...existing].join(':')
+    process.env.PATH = [...toPrepend, ...existing].join(pathDelimiter)
     console.log(`[Server] Augmented PATH with: ${toPrepend.join(', ')}`)
   }
 }
@@ -342,7 +341,7 @@ Consolidated tools — each handles multiple actions via an \`action\` parameter
 - **exa** (search/find_similar/get_contents) — web search. Auto-saves to research DB.
 - **research** — parallel web research: dispatches multiple queries to sub-agents simultaneously for deep research from different angles.
 - **spawn_agents** — run parallel sub-agents for independent tasks. Each gets its own instructions and tools.
-- **write_document** — create HTML documents (proposals, reports, flyers, letters, invoices). Run skills(execute, 'document-design') first.
+- **write_canvas** — create HTML documents (proposals, reports, flyers, letters, invoices). Run skills(execute, 'document-design') first.
 - **queue_approval** / **add_done_item** — approval queue and activity log.
 - **update_settings** — update user profile, autonomy, schedule, voice, and other settings.
 - **notify_user** — send push notifications to the user's phone.
@@ -382,6 +381,7 @@ function buildSetupMd(connectedSlugs: string[]): string {
     github: 'GitHub', linkedin: 'LinkedIn', youtube: 'YouTube',
     calendly: 'Calendly', googlesheets: 'Google Sheets', excel: 'Excel',
     google_maps: 'Google Maps', googledrive: 'Google Drive', notion: 'Notion',
+    googledocs: 'Google Docs', apollo: 'Apollo', mailchimp: 'Mailchimp',
     hubspot: 'HubSpot', outlook: 'Outlook', teams: 'Microsoft Teams',
     salesforce: 'Salesforce', shopify: 'Shopify', clickup: 'ClickUp',
     dropbox: 'Dropbox', zoom: 'Zoom', monday: 'Monday',
@@ -406,103 +406,44 @@ This file is written during onboarding. It contains who the user is, what they d
 
   'onboarding.md': `# Onboarding
 
-This file exists because the user hasn't set up their profile yet. Follow these instructions, then delete this file when done.
+New user — not set up yet. Follow these steps, then delete this file.
 
-## Step 1: Introduction
+## Step 1: Welcome
 
-Start with this exact opening, then immediately ask the first question:
+"Hey — welcome to Co-Agent. I'm your personal AI operator. I handle your email, calendar, research, files, outreach, and whatever else you throw at me — all privately on your machine.
 
-"Hey, I'm CoAgent — your personal AI agent running privately on your machine. I work best once I know a bit about you, so let me ask a few quick questions.
+Let's get you set up real quick. What's your name?"
 
-What's your name?"
+Save: update_settings({ name: "their name" })
 
-After they answer, save it immediately: update_settings({ name: "their name" })
+## Step 2: What they do
 
-## Step 2: Name your agent
+"Nice to meet you, [name]. What do you do for work?"
 
-Ask: "What would you like to call me? Some people go with something like Jarvis, Friday, or just keep it as CoAgent — totally up to you."
+Save: update_settings({ what_you_do: "their answer" })
 
-Save their choice: update_settings({ agent_name: "their choice" })
+## Step 3: Connect their apps
 
-## Step 3: Get to know them
+Check setup.md to see what integrations are available. Then:
 
-Ask follow-up questions ONE AT A TIME. Cover:
-1. What they do for work and who they work with (clients, team, solo?)
-2. What takes up most of their time or causes the most friction day-to-day
-3. What they'd most want an AI agent handling for them automatically
-4. Which of their connected tools (check setup.md for the list) they actually use daily and want monitored
-5. What makes a good lead or client for them — revenue size, ad spend, industry, location, team size, whatever signals matter. Save this to memory as "lead_criteria".
+"To actually do things for you — send emails, check your calendar, look up contacts — I need access to your apps. Head over to the **Integrations** panel on the left and connect the ones you use. Gmail and Google Calendar are the big ones."
 
-Do NOT ask all questions at once. One question per message. Listen and ask smarter follow-ups — if they mention clients, ask about that. If they mention email overload, dig into that.
+Wait for them to confirm or ask questions. Don't rush past this — it's the most important setup step.
 
-## Step 4: Walk them through what you can do
+## Step 4: Write profile + finish
 
-Before setting boundaries, give them a clear picture of what you actually do. Send this as one message:
+Write profile.md:
 
-"Here's what I can do for you:
+# [name]
+**About**: [what they do]
 
-- **Email & messages** — read, summarize, draft, and send across anything you connect (Gmail, Outlook, Slack, iMessage, etc.)
-- **Calendar** — check your day, schedule meetings, set reminders, prep briefings before calls
-- **Files & PDFs** — search your files, read PDFs/DOCX/XLSX, fill in forms, and create new documents (resumes, invoices, proposals, letters)
-- **Research** — search the web, find companies, qualify leads, track competitors
-- **Automations** — build custom skills, routines, and follow-ups that run in the background
-- **Memory** — I remember what you tell me across sessions, so you never have to repeat yourself
-- **Custom integrations** — connect any API with natural language and I'll wire it up
+Silently set: update_settings({ autonomy: "balanced", heartbeat_interval: 30, onboarded: true })
 
-Everything runs privately on your machine."
+Then: "You're all set. I'll check your email and calendar every 30 minutes in the background. Anything that needs your approval goes to the Queue — nothing goes out without your OK.
 
-Ask: "Anything there you want me to explain in more detail, or should we set some boundaries on how I operate?"
+Just talk to me like you would an assistant. I'll figure out the rest."
 
-If they ask about something, explain it briefly. Otherwise move on.
-
-## Step 5: Set boundaries
-
-Ask: "What should I just handle without bothering you? And what should I always check with you first?"
-
-Based on their answer, set:
-- autonomy level: update_settings({ autonomy: "ask_first" | "balanced" | "autonomous" })
-- specific rules: update_settings({ autonomy_notes: "Handle: ... \nAsk first: ... \nNever: ..." })
-
-Keep the notes short — bullet points, not paragraphs. Capture their hard no's and edge cases.
-
-## Step 6: Heartbeats
-
-Explain what heartbeats are in plain language:
-
-"One more thing — I can run on a schedule in the background. I call them 'heartbeats'. Every heartbeat I wake up and check whatever you want me to: new emails, upcoming meetings, tasks due, a specific Slack channel, anything. Then I either handle it, queue it for your approval, or just update my status line.
-
-Heartbeats are off by default. Do you want me to run them? If yes, how often — every 15 minutes, 30, an hour? And what should I check each time?"
-
-If they say no (or aren't sure):
-- update_settings({ heartbeat_interval: 0 })
-- Tell them they can turn it on later in Settings anytime.
-
-If they say yes:
-- update_settings({ heartbeat_interval: N }) with their cadence in minutes
-- Write their priorities to heartbeat.md under the "## Every heartbeat" section (and "## Morning" / "## Evening" if they mentioned anything time-specific). Use memory(action: "write", file: "heartbeat.md", content: ...).
-
-## Step 7: Write their profile
-
-When you have a clear picture, write their profile to profile.md:
-
-# [their name]
-**About**: [what they do, in their words]
-**Focus**: [top 1-2 things they want help with]
-
-## How I work
-- Handle automatically: [list]
-- Always ask first: [list]
-
-## What to monitor
-- [tool]: [what to watch for]
-
-## Step 8: Wrap up
-
-End with: "Got it. I'll run in the background and surface anything that needs you.
-
-Tip: type @skill-creator anytime to build custom automations — like a daily briefing, auto follow-ups, or weekly recaps."
-
-Then: update_settings({ onboarded: true }) and delete this file (onboarding.md) — onboarding is complete.
+Delete this file (onboarding.md).
 `,
 
   'heartbeat.md': `# Heartbeat
@@ -699,7 +640,7 @@ Then write an MLS-ready description:
 - Highlight location, features, recent updates
 - End with a call to action
 
-Save the description to memory (write to a file like "listing-[address].md") and offer to create a branded listing sheet with write_document.`,
+Save the description to memory (write to a file like "listing-[address].md") and offer to create a branded listing sheet with write_canvas.`,
     },
   },
 }
@@ -922,7 +863,7 @@ function loadDocDesignSkillInstructions(): string {
 // Extend DEFAULT_SKILLS with the document-design skill loaded from disk
 DEFAULT_SKILLS['document-design'] = {
   name: 'document-design',
-  description: 'HTML document vocabulary, anti-slop design principles, and archetypes for writing or editing HTML documents via write_document/patch_document.',
+  description: 'HTML document vocabulary, anti-slop design principles, and archetypes for writing or editing HTML documents via write_canvas/patch_canvas.',
   instructions: loadDocDesignSkillInstructions(),
 }
 
@@ -958,7 +899,7 @@ let voiceProcessing = false
 let chatInProgress = false
 let agentBusy = false
 let nextHeartbeatAt: string | undefined
-let pendingChatMessage: { message: string; fileIds?: string[] } | null = null
+const pendingChatMessages: { message: string; fileIds?: string[] }[] = []
 
 const scheduler = startScheduler(agent, DATA_DIR, {
   onHeartbeat: (status, summary, nextAt) => {
@@ -1028,6 +969,64 @@ agent.onNotifyUser = (title: string, body: string) => {
 
 agent.onResearchProgress = (agents) => {
   broadcast({ type: 'research_progress', agents } as any)
+}
+
+// Queue for sub-agent results that arrive while agent is busy
+const pendingSubAgentResults: { label: string; result: string }[] = []
+
+agent.onSubAgentComplete = (agentId, label, result) => {
+  console.log(`[Server] Sub-agent "${label}" completed (${result.length} chars)`)
+  broadcast({ type: 'subagent_complete', agentId, label, resultLength: result.length } as any)
+
+  const PER_AGENT_CAP = 8000
+  const cappedResult = result.length > PER_AGENT_CAP
+    ? result.slice(0, PER_AGENT_CAP) + `\n[Truncated: result exceeded ${PER_AGENT_CAP} chars]`
+    : result
+
+  if (agentBusy) {
+    // Agent is busy — queue results, they'll be delivered when agent is free
+    pendingSubAgentResults.push({ label, result: cappedResult })
+    console.log(`[Server] Sub-agent "${label}" results queued (agent busy)`)
+    return
+  }
+
+  // Agent is idle — wake it up to deliver results
+  deliverSubAgentResults([{ label, result: cappedResult }])
+}
+
+function deliverSubAgentResults(results: { label: string; result: string }[]) {
+  if (results.length === 0) return
+  agentBusy = true
+  broadcast({ type: 'agent_thinking' } as any)
+
+  const prompt = results.map(r =>
+    `Your background agent "${r.label}" just finished. Here are the results:\n\n${r.result}`
+  ).join('\n\n---\n\n') + '\n\nSummarize these results for the user.'
+
+  agent.chat(
+    prompt,
+    (chunk) => broadcast({ type: 'chat_chunk', text: chunk } as any),
+    (tool, toolLabel) => {
+      broadcast({ type: 'chat_segment_end' } as any)
+      broadcast({ type: 'tool_start', tool, label: toolLabel } as any)
+    }
+  ).then(response => {
+    if (response.trim()) {
+      broadcast({ type: 'chat_response', message: { role: 'assistant', content: response, timestamp: new Date().toISOString() } } as any)
+    } else {
+      broadcast({ type: 'agent_stopped' } as any)
+    }
+  }).catch(err => {
+    console.error(`[Server] Sub-agent result chat error:`, err.message)
+    broadcast({ type: 'agent_stopped' } as any)
+  }).finally(() => {
+    agentBusy = false
+    // Drain any results that queued while we were delivering
+    if (pendingSubAgentResults.length > 0) {
+      const queued = pendingSubAgentResults.splice(0)
+      deliverSubAgentResults(queued)
+    }
+  })
 }
 
 agent.onBroadcast = (event) => {
@@ -1121,6 +1120,10 @@ function initGoogleCalendar(clientId: string, clientSecret: string) {
     broadcast({ type: 'calendar_update', entries: agent.calendar.getAll() } as any)
     const status = await googleCal!.getStatus()
     broadcast({ type: 'google_calendar_status', ...status } as any)
+  })
+  googleCal.setSyncResultCallback((result) => {
+    applyGoogleSyncResult(result)
+    broadcast({ type: 'calendar_update', entries: agent.calendar.getAll() } as any)
   })
   googleCal.init().then(async () => {
     agent.googleCalendarConnected = await googleCal!.isConnected()
@@ -1819,17 +1822,22 @@ function shutdown(signal: string): void {
   console.log(`[Server] ${signal} received — shutting down gracefully`)
   relay.stop()
   if (teamClient) { teamClient.stop(); teamClient = null }
-  if (wss) {
-    wss.close((err) => {
-      if (err) console.error('[Server] Error closing WebSocket server:', err)
-      else console.log('[Server] WebSocket server closed')
-      process.exit(0)
+  agent.stop()
+  Promise.race([agent.currentRunLoop, new Promise(r => setTimeout(r, 5000))])
+    .catch(() => {})
+    .finally(() => {
+      if (wss) {
+        wss.close((err) => {
+          if (err) console.error('[Server] Error closing WebSocket server:', err)
+          else console.log('[Server] WebSocket server closed')
+          process.exit(0)
+        })
+        // Force-close any still-open client connections
+        for (const client of wss.clients) client.terminate()
+      } else {
+        process.exit(0)
+      }
     })
-    // Force-close any still-open client connections
-    for (const client of wss.clients) client.terminate()
-  } else {
-    process.exit(0)
-  }
 }
 
 process.on('SIGTERM', () => shutdown('SIGTERM'))
@@ -1955,19 +1963,24 @@ async function sendRelayStatus(ws: WebSocket, forceRefresh = false): Promise<voi
     send(ws, relayStatusCache.data)
     return
   }
-  const res = await fetch(`${relay.url}/v1/account`, {
-    headers: { 'Authorization': `Bearer ${relay.token}` },
-    signal: AbortSignal.timeout(15000),
-  })
-  if (res.ok) {
-    const data = await res.json() as { model: string; usage: any; admin?: boolean }
-    const msg = { type: 'relay_status' as const, active: true, model: data.model, usage: data.usage, admin: data.admin ?? false }
-    relayStatusCache = { data: msg, ts: Date.now() }
-    send(ws, msg)
-  } else {
-    const msg = { type: 'relay_status' as const, active: false, model: null, usage: null }
-    relayStatusCache = { data: msg, ts: Date.now() }
-    send(ws, msg)
+  try {
+    const res = await fetch(`${relay.url}/v1/account`, {
+      headers: { 'Authorization': `Bearer ${relay.token}` },
+      signal: AbortSignal.timeout(15000),
+    })
+    if (res.ok) {
+      const data = await res.json() as { model: string; usage: any; admin?: boolean }
+      const msg = { type: 'relay_status' as const, active: true, model: data.model, usage: data.usage, admin: data.admin ?? false }
+      relayStatusCache = { data: msg, ts: Date.now() }
+      send(ws, msg)
+    } else {
+      const msg = { type: 'relay_status' as const, active: false, model: null, usage: null }
+      relayStatusCache = { data: msg, ts: Date.now() }
+      send(ws, msg)
+    }
+  } catch (err: any) {
+    console.warn('[Server] sendRelayStatus fetch error:', err.message)
+    send(ws, { type: 'relay_status' as const, active: false, model: null, usage: null })
   }
 }
 
@@ -2147,8 +2160,9 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
 
     if (msg.type === 'chat') {
       if (chatInProgress || agentBusy) {
-        pendingChatMessage = { message: msg.message, fileIds: msg.fileIds }
-        send(ws, { type: 'chat_queued' } as any)
+        // Agent is mid-turn — treat as a steer so the user's message is picked up immediately
+        console.log(`[Server] Chat received while busy — steering: ${msg.message.slice(0, 80)}`)
+        agent.steer(msg.message)
         return
       }
       if (!getRelayConfig()) {
@@ -2183,10 +2197,17 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
           ),
           chatTimeout
         ])
-        broadcast({
-          type: 'chat_response',
-          message: { role: 'assistant', content: streamed || response, timestamp: new Date().toISOString() }
-        } as any)
+        const fullResponse = streamed || response
+        // Skip empty responses (e.g. spawn_agents ended turn with no text)
+        if (fullResponse.trim()) {
+          broadcast({
+            type: 'chat_response',
+            message: { role: 'assistant', content: fullResponse, timestamp: new Date().toISOString() }
+          } as any)
+        } else {
+          // Still signal end of processing to UI
+          broadcast({ type: 'agent_stopped' } as any)
+        }
         send(ws, { type: 'queue_update', items: agent.queue.getPending() })
         send(ws, { type: 'done_update', items: agent.queue.getDone() })
         send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
@@ -2198,11 +2219,9 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
       } finally {
         chatInProgress = false
         agentBusy = false
-        // Drain the pending message, if any arrived while we were busy
-        if (pendingChatMessage) {
-          const pending = pendingChatMessage
-          pendingChatMessage = null
-          // Re-dispatch as a synthetic chat message through the same handler
+        // Drain the next pending message, if any arrived while we were busy
+        const pending = pendingChatMessages.shift()
+        if (pending) {
           setImmediate(() => ws.emit('message', JSON.stringify({ type: 'chat', message: pending.message, fileIds: pending.fileIds })))
         }
       }
@@ -2367,9 +2386,8 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
         send(ws, { type: 'error', message: `Voice failed: ${err.message}` })
         send(ws, { type: 'agent_stopped' })
       } finally {
-        if (pendingChatMessage) {
-          const pending = pendingChatMessage
-          pendingChatMessage = null
+        const pending = pendingChatMessages.shift()
+        if (pending) {
           setImmediate(() => ws.emit('message', JSON.stringify({ type: 'chat', message: pending.message, fileIds: pending.fileIds })))
         }
       }
@@ -2443,9 +2461,8 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
       } finally {
         chatInProgress = false
         agentBusy = false
-        if (pendingChatMessage) {
-          const pending = pendingChatMessage
-          pendingChatMessage = null
+        const pending = pendingChatMessages.shift()
+        if (pending) {
           setImmediate(() => ws.emit('message', JSON.stringify({ type: 'chat', message: pending.message, fileIds: pending.fileIds })))
         }
       }
@@ -3026,8 +3043,19 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
 
     if (msg.type === 'export_pdf') {
       try {
+        const pdfPath: string = msg.path
+        if (typeof pdfPath !== 'string' || !pdfPath || !/\.pdf$/i.test(pdfPath)) {
+          send(ws, { type: 'error', message: 'export_pdf: invalid path' })
+          return
+        }
+        const { resolve, isAbsolute } = await import('path')
+        const normalized = resolve(pdfPath)
+        if (!isAbsolute(normalized)) {
+          send(ws, { type: 'error', message: 'export_pdf: path must be absolute' })
+          return
+        }
         const buffer = Buffer.from(msg.data, 'base64')
-        await writeFile(msg.path, buffer)
+        await writeFile(normalized, buffer)
         // no response needed — file saved silently
       } catch (err: any) {
         send(ws, { type: 'error', message: `Failed to export PDF: ${err.message}` })
@@ -3155,7 +3183,7 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
             // Read-modify-write to preserve existing keys (e.g. API keys)
             let existing = ''
             try { existing = readFileSync(envPath, 'utf-8') } catch {}
-            const lines = existing.split('\n').filter(l => l.trim() && !l.startsWith('GOOGLE_CLIENT_ID=') && !l.startsWith('GOOGLE_CLIENT_SECRET='))
+            const lines = existing.split(/\r?\n/).filter(l => l.trim() && !l.startsWith('GOOGLE_CLIENT_ID=') && !l.startsWith('GOOGLE_CLIENT_SECRET='))
             lines.push(`GOOGLE_CLIENT_ID=${data.googleClientId}`, `GOOGLE_CLIENT_SECRET=${data.googleClientSecret}`)
             writeFileSync(envPath, lines.join('\n') + '\n', { mode: 0o600 })
             initGoogleCalendar(data.googleClientId, data.googleClientSecret)
@@ -3302,6 +3330,7 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
         if (!canvas) {
           send(ws, { type: 'canvas_error', canvasId: msg.canvasId, message: 'Canvas not found' })
         } else {
+          agent.activeCanvasId = canvas.id
           send(ws, { type: 'canvas_opened', canvas })
         }
       } catch (err: any) {

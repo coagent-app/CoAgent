@@ -191,16 +191,16 @@ function GeneralTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate:
     <>
       <SectionHeader eyebrow="Profile" title="About you" />
       <FieldRow label="Name">
-        <Input className="text-[13.5px] dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500" placeholder="Your name" value={nameField.value} onChange={e => nameField.onChange(e.target.value)} onBlur={nameField.onBlur} />
+        <Input aria-label="Name" className="text-[13.5px] dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500" placeholder="Your name" value={nameField.value} onChange={e => nameField.onChange(e.target.value)} onBlur={nameField.onBlur} />
       </FieldRow>
       <FieldRow label="Email">
-        <Input className="text-[13.5px] dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500" placeholder="your@email.com" value={emailField.value} onChange={e => emailField.onChange(e.target.value)} onBlur={emailField.onBlur} />
+        <Input aria-label="Email" className="text-[13.5px] dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500" placeholder="your@email.com" value={emailField.value} onChange={e => emailField.onChange(e.target.value)} onBlur={emailField.onBlur} />
       </FieldRow>
       <FieldRow label="What you do">
-        <Input className="text-[13.5px] dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500" placeholder="e.g. real estate agent, sales manager" value={roleField.value} onChange={e => roleField.onChange(e.target.value)} onBlur={roleField.onBlur} />
+        <Input aria-label="What you do" className="text-[13.5px] dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500" placeholder="e.g. real estate agent, sales manager" value={roleField.value} onChange={e => roleField.onChange(e.target.value)} onBlur={roleField.onBlur} />
       </FieldRow>
       <FieldRow label="Timezone">
-        <select value={tzValue} onChange={e => handleTimezoneChange(e.target.value)} className="w-full h-9 rounded-md border border-input bg-background px-3 py-1 text-[13.5px] text-neutral-800 dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-ring">
+        <select aria-label="Timezone" value={tzValue} onChange={e => handleTimezoneChange(e.target.value)} className="w-full h-9 rounded-md border border-input bg-background px-3 py-1 text-[13.5px] text-neutral-800 dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-ring">
           {TIMEZONES.map(tz => <option key={tz.value} value={tz.value}>{tz.label}</option>)}
         </select>
       </FieldRow>
@@ -209,7 +209,7 @@ function GeneralTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate:
 
       <SectionHeader eyebrow="Agent" title="Your agent" />
       <FieldRow label="Agent name">
-        <Input className="text-[13.5px] dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500" placeholder="e.g. Jarvis, Friday, Atlas" value={agentNameField.value} onChange={e => agentNameField.onChange(e.target.value)} onBlur={agentNameField.onBlur} />
+        <Input aria-label="Agent name" className="text-[13.5px] dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500" placeholder="e.g. Jarvis, Friday, Atlas" value={agentNameField.value} onChange={e => agentNameField.onChange(e.target.value)} onBlur={agentNameField.onBlur} />
       </FieldRow>
 
       <Separator className="my-6 dark:bg-neutral-800" />
@@ -217,6 +217,7 @@ function GeneralTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate:
       <SectionHeader eyebrow="Instructions" title="Custom instructions" />
       <FieldRow label="Tell your agent how to behave, what to prioritize, or any context it should always have">
         <textarea
+          aria-label="Custom instructions"
           className="w-full min-h-[120px] rounded-md border border-input bg-background px-3 py-2 text-[13.5px] text-neutral-800 dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500 focus:outline-none focus:ring-1 focus:ring-ring resize-y"
           placeholder="e.g. A good lead has $1M+ revenue and runs paid ads. Always follow up within 24 hours. Prefer email over Slack for client communication."
           value={instructionsField.value}
@@ -230,11 +231,11 @@ function GeneralTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate:
       <SectionHeader eyebrow="Schedule" title="Active hours" />
       <FieldRow label="Active window">
         <div className="flex items-center gap-2">
-          <select value={s.active_hours.start} onChange={e => onUpdate({ active_hours: { ...s.active_hours, start: Number(e.target.value) } })} className="h-9 rounded-md border border-input bg-background px-3 py-1 text-[13.5px] text-neutral-800 dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-ring">
+          <select aria-label="Active hours start" value={s.active_hours.start} onChange={e => onUpdate({ active_hours: { ...s.active_hours, start: Number(e.target.value) } })} className="h-9 rounded-md border border-input bg-background px-3 py-1 text-[13.5px] text-neutral-800 dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-ring">
             {HOUR_OPTIONS.filter(o => o.value < 24).map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
           <span className="text-[13px] text-neutral-400 dark:text-neutral-500">to</span>
-          <select value={s.active_hours.end} onChange={e => onUpdate({ active_hours: { ...s.active_hours, end: Number(e.target.value) } })} className="h-9 rounded-md border border-input bg-background px-3 py-1 text-[13.5px] text-neutral-800 dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-ring">
+          <select aria-label="Active hours end" value={s.active_hours.end} onChange={e => onUpdate({ active_hours: { ...s.active_hours, end: Number(e.target.value) } })} className="h-9 rounded-md border border-input bg-background px-3 py-1 text-[13.5px] text-neutral-800 dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 focus:outline-none focus:ring-1 focus:ring-ring">
             {HOUR_OPTIONS.filter(o => o.value > s.active_hours.start).map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
         </div>
@@ -370,6 +371,7 @@ function GeneralTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate:
             <div className="flex items-center gap-3">
               <input
                 type="range"
+                aria-label="Voice volume"
                 min={0}
                 max={100}
                 value={Math.round((s.voice_volume ?? 0.5) * 100)}
@@ -458,13 +460,19 @@ function formatTokens(n: number): string {
 }
 
 function UsageTab({ usage, onRefresh }: { usage: UsageSummary | null; onRefresh?: () => void }) {
-  useEffect(() => { onRefresh?.() }, [onRefresh])
+  const hasRefreshed = useRef(false)
+  useEffect(() => {
+    if (!hasRefreshed.current) {
+      hasRefreshed.current = true
+      onRefresh?.()
+    }
+  }, [])
 
   if (!usage) {
     return (
       <>
-        <SectionHeader eyebrow="Billing" title="Token Usage" />
-        <p className="text-[13px] text-neutral-400 dark:text-neutral-500">Loading usage data...</p>
+        <SectionHeader eyebrow="Billing" title="Token usage" />
+        <p className="text-[13px] text-neutral-400 dark:text-neutral-500">Loading usage data…</p>
       </>
     )
   }
@@ -477,7 +485,7 @@ function UsageTab({ usage, onRefresh }: { usage: UsageSummary | null; onRefresh?
 
   return (
     <>
-      <SectionHeader eyebrow="Billing" title="Token Usage" />
+      <SectionHeader eyebrow="Billing" title="Token usage" />
       <p className="text-[13px] text-neutral-500 dark:text-neutral-400 mb-5">
         Estimated costs for the last 30 days. Billed at exact provider rates.
       </p>
@@ -544,8 +552,14 @@ function AdminTab({
 }) {
   const [label, setLabel] = useState('')
   const [copied, setCopied] = useState(false)
+  const hasListedTokens = useRef(false)
 
-  useEffect(() => { onListTokens() }, [onListTokens])
+  useEffect(() => {
+    if (!hasListedTokens.current) {
+      hasListedTokens.current = true
+      onListTokens()
+    }
+  }, [])
 
   function handleGenerate() {
     if (!label.trim()) return
@@ -572,6 +586,7 @@ function AdminTab({
         <p className="text-[12px] font-semibold text-neutral-500 dark:text-neutral-400 uppercase tracking-widest mb-3">Create token</p>
         <div className="flex gap-2">
           <Input
+            aria-label="Token label"
             className="text-[13.5px] dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500"
             placeholder="Label (e.g. Alice's agent)"
             value={label}
@@ -668,12 +683,14 @@ function AdminTab({
 // --- Brand tab ---
 
 function ColorPickerRow({
+  label,
   value,
   defaultValue,
   placeholder,
   clearable,
   onChange,
 }: {
+  label?: string
   value: string
   defaultValue: string
   placeholder?: string
@@ -684,11 +701,13 @@ function ColorPickerRow({
     <div className="flex items-center gap-3">
       <input
         type="color"
+        aria-label={label ? `${label} color picker` : undefined}
         value={value || defaultValue}
         onChange={e => onChange(e.target.value)}
         className="w-9 h-9 rounded-lg border border-neutral-200 dark:border-neutral-700 cursor-pointer p-0.5 bg-transparent"
       />
       <Input
+        aria-label={label ? `${label} hex value` : undefined}
         value={value}
         onChange={e => {
           const v = e.target.value
@@ -763,6 +782,7 @@ function BrandTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate: (
 
       <FieldRow label="Company Name">
         <Input
+          aria-label="Company name"
           value={settings.brand_company}
           onChange={e => onUpdate({ brand_company: e.target.value })}
           placeholder="Acme Corp"
@@ -772,6 +792,7 @@ function BrandTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate: (
 
       <FieldRow label="Primary Color">
         <ColorPickerRow
+          label="Primary color"
           value={settings.brand_primary}
           defaultValue="#1a2744"
           onChange={v => onUpdate({ brand_primary: v })}
@@ -780,6 +801,7 @@ function BrandTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate: (
 
       <FieldRow label="Secondary Color">
         <ColorPickerRow
+          label="Secondary color"
           value={settings.brand_secondary}
           defaultValue="#8b5cf6"
           placeholder="Optional"
@@ -790,6 +812,7 @@ function BrandTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate: (
 
       <FieldRow label="Tertiary Color">
         <ColorPickerRow
+          label="Tertiary color"
           value={settings.brand_tertiary}
           defaultValue="#10b981"
           placeholder="Optional"
@@ -877,22 +900,44 @@ function BrandTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate: (
 
       {/* Preview */}
       <Separator className="my-5" />
-      <p className="text-[11px] font-semibold text-neutral-400 dark:text-neutral-500 uppercase tracking-widest mb-3">Preview</p>
+      <p className="text-[11px] font-semibold text-neutral-400 dark:text-neutral-500 uppercase tracking-widest mb-3">Document Preview</p>
       <div
-        className="rounded-lg border border-neutral-200 dark:border-neutral-700 p-6 bg-white dark:bg-neutral-900 space-y-5 overflow-hidden"
+        className="rounded-lg border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-900 overflow-hidden"
         style={previewCssVars}
       >
-        {logoSrc && (
-          <div className="flex justify-end -mb-2">
-            <img src={logoSrc} alt={settings.brand_company || 'logo'} className="h-6 opacity-80 object-contain" />
-          </div>
-        )}
-        <div>
-          <p className="text-[10px] font-semibold uppercase tracking-widest text-neutral-400 mb-1">Preview</p>
-          <h3 className="text-lg font-semibold" style={{ color: 'var(--canvas-primary)' }}>
+        <div className="px-6 pt-5 pb-4 space-y-3">
+          {logoSrc && (
+            <div className="mb-3">
+              <img src={logoSrc} alt={settings.brand_company || 'logo'} className="h-7 object-contain" />
+            </div>
+          )}
+          <h3 className="text-[17px] font-semibold leading-tight" style={{ color: 'var(--canvas-primary)' }}>
             {settings.brand_company || 'Sample Document'}
           </h3>
-          <p className="text-[13px] text-neutral-500 dark:text-neutral-400">How your branded documents will look</p>
+          <p className="text-[13px] text-neutral-600 dark:text-neutral-400 leading-relaxed">
+            This is how your branded documents and canvases will look when shared or exported as PDF.
+          </p>
+          {/* Mini table preview */}
+          <table className="w-full text-[11px] border-collapse mt-2">
+            <thead>
+              <tr>
+                <th className="text-left py-1.5 px-2 font-semibold text-white uppercase tracking-wider text-[10px]" style={{ background: 'var(--canvas-primary)' }}>Item</th>
+                <th className="text-left py-1.5 px-2 font-semibold text-white uppercase tracking-wider text-[10px]" style={{ background: 'var(--canvas-primary)' }}>Status</th>
+              </tr>
+            </thead>
+            <tbody className="text-neutral-600 dark:text-neutral-400">
+              <tr className="border-b border-neutral-100 dark:border-neutral-800"><td className="py-1.5 px-2">Brand colors</td><td className="py-1.5 px-2">Applied</td></tr>
+              <tr><td className="py-1.5 px-2">Logo &amp; typography</td><td className="py-1.5 px-2">Ready</td></tr>
+            </tbody>
+          </table>
+          {/* Blockquote preview */}
+          <div className="text-[12px] text-neutral-500 dark:text-neutral-400 italic pl-3 py-1 mt-1" style={{ borderLeft: '3px solid var(--canvas-primary)' }}>
+            Blockquotes and accents use your primary color.
+          </div>
+        </div>
+        {/* Footer bar */}
+        <div className="px-6 py-2 text-[10px] text-neutral-400 dark:text-neutral-500 border-t border-neutral-100 dark:border-neutral-800" style={{ borderTopColor: 'var(--canvas-primary)', borderTopWidth: '2px' }}>
+          {settings.brand_company || 'Your Company'} — Document Preview
         </div>
       </div>
     </>

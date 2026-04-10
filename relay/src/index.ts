@@ -727,8 +727,8 @@ async function handleMessagesProxy(request: Request, env: Env, ctx: ExecutionCon
 
   const { token, data } = result
 
-  // Rate limit embeddings separately — bulk indexing can spike on startup
-  const rateLimitRes = checkRateLimit(token, 'embedding')
+  // Rate limit messages API calls
+  const rateLimitRes = checkRateLimit(token, 'api')
   if (rateLimitRes) return rateLimitRes
 
   // Reset usage if new billing period (monthly)
@@ -741,7 +741,13 @@ async function handleMessagesProxy(request: Request, env: Env, ctx: ExecutionCon
 
   // Forward to Anthropic, replacing auth with the real API key
   const body = await request.text()
-  const isStream = body.includes('"stream":true') || body.includes('"stream": true')
+  let isStream = false
+  try {
+    const parsed = JSON.parse(body) as { stream?: boolean }
+    isStream = parsed.stream === true
+  } catch {
+    // Malformed JSON — treat as non-streaming
+  }
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -1168,17 +1174,26 @@ export class UserSession {
       `SELECT id, payload, received_at FROM webhook_queue ORDER BY received_at ASC`
     ).toArray()
 
+    const sentIds: string[] = []
     for (const row of rows) {
-      ws.send(JSON.stringify({
-        type: 'webhook',
-        payload: JSON.parse(row.payload as string),
-        queued: true,
-        receivedAt: row.received_at,
-      }))
+      try {
+        ws.send(JSON.stringify({
+          type: 'webhook',
+          payload: JSON.parse(row.payload as string),
+          queued: true,
+          receivedAt: row.received_at,
+        }))
+        sentIds.push(row.id as string)
+      } catch {
+        // Leave unsent items in queue for next flush
+      }
     }
 
-    // Clear queue after flushing
-    this.state.storage.sql.exec(`DELETE FROM webhook_queue`)
+    // Only delete successfully-sent items
+    if (sentIds.length > 0) {
+      const placeholders = sentIds.map(() => '?').join(',')
+      this.state.storage.sql.exec(`DELETE FROM webhook_queue WHERE id IN (${placeholders})`, ...sentIds)
+    }
   }
 }
 
@@ -1191,37 +1206,39 @@ export class TeamChannel {
   constructor(state: DurableObjectState, env: Env) {
     this.state = state
     this.env = env
-    this.state.storage.sql.exec(`
-      CREATE TABLE IF NOT EXISTS messages (
-        id TEXT PRIMARY KEY,
-        timestamp TEXT NOT NULL,
-        from_user_id TEXT NOT NULL,
-        from_name TEXT NOT NULL,
-        from_role TEXT NOT NULL,
-        is_agent INTEGER NOT NULL DEFAULT 1,
-        visible TEXT NOT NULL,
-        agent_context TEXT NOT NULL DEFAULT '',
-        to_target TEXT,
-        attachments TEXT NOT NULL DEFAULT '[]',
-        created_at INTEGER NOT NULL DEFAULT (unixepoch())
-      )
-    `)
-    this.state.storage.sql.exec(`
-      CREATE TABLE IF NOT EXISTS offline_queue (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT NOT NULL,
-        message_json TEXT NOT NULL,
-        created_at INTEGER NOT NULL DEFAULT (unixepoch())
-      )
-    `)
-    this.state.storage.sql.exec(`
-      CREATE TABLE IF NOT EXISTS team_notes (
-        key TEXT PRIMARY KEY DEFAULT 'main',
-        content TEXT NOT NULL DEFAULT '',
-        updated_by TEXT NOT NULL DEFAULT '',
-        updated_at INTEGER NOT NULL DEFAULT (unixepoch())
-      )
-    `)
+    this.state.blockConcurrencyWhile(async () => {
+      this.state.storage.sql.exec(`
+        CREATE TABLE IF NOT EXISTS messages (
+          id TEXT PRIMARY KEY,
+          timestamp TEXT NOT NULL,
+          from_user_id TEXT NOT NULL,
+          from_name TEXT NOT NULL,
+          from_role TEXT NOT NULL,
+          is_agent INTEGER NOT NULL DEFAULT 1,
+          visible TEXT NOT NULL,
+          agent_context TEXT NOT NULL DEFAULT '',
+          to_target TEXT,
+          attachments TEXT NOT NULL DEFAULT '[]',
+          created_at INTEGER NOT NULL DEFAULT (unixepoch())
+        )
+      `)
+      this.state.storage.sql.exec(`
+        CREATE TABLE IF NOT EXISTS offline_queue (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id TEXT NOT NULL,
+          message_json TEXT NOT NULL,
+          created_at INTEGER NOT NULL DEFAULT (unixepoch())
+        )
+      `)
+      this.state.storage.sql.exec(`
+        CREATE TABLE IF NOT EXISTS team_notes (
+          key TEXT PRIMARY KEY DEFAULT 'main',
+          content TEXT NOT NULL DEFAULT '',
+          updated_by TEXT NOT NULL DEFAULT '',
+          updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+        )
+      `)
+    })
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -1374,10 +1391,10 @@ export default {
     // --- Team endpoints ---
 
     if (url.pathname.startsWith('/team/')) {
-      const token = request.headers.get('Authorization')?.replace('Bearer ', '') || request.headers.get('x-api-key') || ''
       const authResult = await validateRequest(request, env)
       if (authResult instanceof Response) return authResult
-      const teamRateCheck = checkRateLimit(authResult.token, 'general')
+      const token = authResult.token
+      const teamRateCheck = checkRateLimit(token, 'general')
       if (teamRateCheck) return teamRateCheck
       const tokenData = authResult.data
       const userId = String((tokenData as any).userId)
@@ -1744,7 +1761,6 @@ export default {
         createdAt: data.createdAt,
         admin: data.admin || false,
         googleClientId: env.GOOGLE_CLIENT_ID || undefined,
-        googleClientSecret: env.GOOGLE_CLIENT_SECRET || undefined,
       })
     }
 
@@ -1824,10 +1840,16 @@ export default {
       if (rateCheck) return rateCheck
       if (!result.data.admin) return jsonResponse({ error: 'Admin access required' }, 403)
 
-      // List all tokens from KV (scan with prefix)
-      const list = await env.TOKENS.list()
+      // List all tokens from KV (scan with prefix), paginating to fetch beyond 1000
+      let cursor: string | undefined
+      let allKeys: any[] = []
+      do {
+        const result = await env.TOKENS.list({ cursor, limit: 1000 })
+        allKeys.push(...result.keys)
+        cursor = result.list_complete ? undefined : result.cursor
+      } while (cursor)
       const users: any[] = []
-      for (const key of list.keys) {
+      for (const key of allKeys) {
         if (key.name.startsWith('_') || key.name.startsWith('stripe:')) continue
         try {
           const data = await getToken(env, key.name)

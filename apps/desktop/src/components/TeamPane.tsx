@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react'
-import { Users, Send, Bot, Hash, MessageSquare, FileText, Pencil, Check } from 'lucide-react'
+import { Users, Send, Bot, Hash, FileText, Pencil, Check } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -344,7 +344,7 @@ export function TeamPane({ team, messages, teamStatus, onSendMessage, relayUrl, 
                   value={notesDraft}
                   onChange={e => setNotesDraft(e.target.value)}
                   className="w-full min-h-[400px] bg-transparent text-[13.5px] leading-relaxed text-neutral-800 dark:text-neutral-200 placeholder:text-neutral-400 dark:placeholder:text-neutral-500 focus:outline-none resize-none font-mono"
-                  placeholder="Write shared notes here... (supports markdown)"
+                  placeholder="Write shared notes here… (supports markdown)"
                   autoFocus
                 />
               ) : notesContent ? (
@@ -500,7 +500,7 @@ export function TeamPane({ team, messages, teamStatus, onSendMessage, relayUrl, 
             <Input
               ref={inputRef}
               className="flex-1 text-[13.5px] dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500"
-              placeholder={channel.type === 'dm' ? `Message ${channel.name}...` : 'Message #General — type @ to mention...'}
+              placeholder={channel.type === 'dm' ? `Message ${channel.name}…` : 'Message the team — type @ to mention an agent…'}
               value={input}
               onChange={e => handleInputChange(e.target.value)}
               onKeyDown={handleKeyDown}

@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
 import OpenAI from 'openai'
-import { readFile, writeFile, rename, mkdir } from 'fs/promises'
+import { readFile, readdir, writeFile, rename, mkdir } from 'fs/promises'
 import { existsSync } from 'fs'
 import { join } from 'path'
 import { createHash } from 'crypto'
@@ -8,21 +8,20 @@ import { MCPManager, MCPServerConfig } from './mcp-manager.js'
 import { ApprovalQueue } from './queue.js'
 import { CalendarStore } from './calendar-store.js'
 import type { TeamClient } from '@coagent/team-core'
-import { searchEventStore, markEventsDone, getUnprocessedEvents } from './relay-client.js'
+import { markEventsDone, getUnprocessedEvents } from './relay-client.js'
 import { readSettings, writeSettings } from './settings.js'
 import type { AgentSettings } from './settings.js'
-import type { AgentTrigger } from '@coagent/shared'
-import { searchFiles, readFileContent, readFileBase64, deleteFileEntry, getStorageStats, listFiles, ingestFile, createFolder, moveFile, grepFiles, getPdfFormFields, fillPdfForm, updateFileContent } from './file-store.js'
+import type { AgentTrigger, AgentMessage } from '@coagent/shared'
+import { searchFiles, readFileContent, readFileBase64, deleteFileEntry, getStorageStats, listFiles, ingestFile, createFolder, moveFile, grepFiles, getPdfFormFields, fillPdfForm } from './file-store.js'
 import { embedTools, searchToolsAndSchema, setToolEmbeddingsDir } from './tool-embeddings.js'
 import { logToolCall, extractIntegration, searchToolLogs } from './service-logger.js'
 import { recordUsage } from './usage-tracker.js'
 import { getRelayConfig } from './auth.js'
 import { runResearch } from './research.js'
-import { runSubAgents, type SubAgentTask } from './sub-agent.js'
+import { runSubAgents, spawnSubAgents, messageSubAgent, getRunningAgents, type SubAgentTask, type SubAgentProgress, type SubAgentHandle } from './sub-agent.js'
 import { streamOpenAI } from './openai-provider.js'
 import {
   createCanvas,
-  readCanvas,
   updateCanvas,
 } from './canvas-store.js'
 
@@ -33,7 +32,6 @@ function isAnthropicModel(model: string): boolean {
 
 const MOONSHOT_BASE_URL = 'https://api.moonshot.ai/v1'
 
-const HISTORY_WINDOW = 50        // total pool — recent messages
 const HISTORY_CAP = 200          // hard in-memory cap — trim from front when exceeded
 
 
@@ -60,11 +58,14 @@ async function saveSkill(dataDir: string, skill: Skill): Promise<void> {
 
 async function listSkills(dataDir: string): Promise<Skill[]> {
   const dir = await skillsDir(dataDir)
-  const { readdirSync } = await import('fs')
-  return readdirSync(dir)
-    .filter(f => f.endsWith('.json'))
-    .map(f => { try { return JSON.parse(require('fs').readFileSync(join(dir, f), 'utf-8')) } catch { return null } })
-    .filter((s): s is Skill => s !== null)
+  const allFiles = await readdir(dir).catch(() => [] as string[])
+  const jsonFiles = allFiles.filter(f => f.endsWith('.json'))
+  const skills = await Promise.all(
+    jsonFiles.map(async (f) => {
+      try { return JSON.parse(await readFile(join(dir, f), 'utf-8')) as Skill } catch { return null }
+    })
+  )
+  return skills.filter((s): s is Skill => s !== null)
 }
 
 async function deleteSkill(dataDir: string, name: string): Promise<boolean> {
@@ -203,7 +204,7 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'search_tools',
-    description: 'Discover external integration tools. ONLY for external services (Gmail, Slack, etc.) — built-in tools are called directly. Schema is provided when you call the tool.',
+    description: 'Discover external integration tools including web search. Use for external services (Gmail, Slack, web search, etc.) — built-in tools are called directly. Schema is provided when you call the tool.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -440,7 +441,7 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'spawn_agents',
-    description: 'Run parallel sub-agents for independent tasks. Each gets its own context and runs simultaneously. Sub-agents can search, read memory/files, create documents, and update memory — but cannot send emails, queue approvals, or perform external actions. Use for: parallel analysis, drafting multiple versions, research + prep simultaneously.',
+    description: 'Launch background sub-agents for independent tasks. Agents run asynchronously — this tool returns IMMEDIATELY and you must continue talking to the user without waiting. Results are delivered automatically via chat when agents finish. Sub-agents can search, read memory/files, create documents, and update memory — but cannot send emails, queue approvals, or perform external actions. Use message_agent to check on or redirect running agents.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -458,6 +459,23 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
         }
       },
       required: ['tasks']
+    }
+  },
+  {
+    name: 'message_agent',
+    description: 'Send a message to a running background sub-agent to redirect its task, provide new information, or course-correct. Use list action first to see running agents and their IDs.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['list', 'message'],
+          description: '"list" to see running agents, "message" to send a message to one'
+        },
+        agent_id: { type: 'string', description: 'ID of the sub-agent (required for message action)' },
+        message: { type: 'string', description: 'Message to inject into the sub-agent (required for message action)' }
+      },
+      required: ['action']
     }
   },
   {
@@ -508,12 +526,12 @@ Rules:
     input_schema: {
       type: 'object' as const,
       properties: {
-        canvas_id: { type: 'string', description: 'ID of the canvas to patch (from write_canvas response).' },
+        canvas_id: { type: 'string', description: 'ID of the canvas to patch. Omit to patch the currently open canvas.' },
         code: { type: 'string', description: 'Full new markdown content. Replaces existing content entirely.' },
         title: { type: 'string', description: 'Optional new title.' },
         save_to_files: { type: 'boolean', description: 'If true, also save the canvas as a PDF file in the user\'s files.' },
       },
-      required: ['canvas_id', 'code'],
+      required: ['code'],
     },
   },
 ]
@@ -550,6 +568,7 @@ const TOOL_LABELS: Record<string, string> = {
   skills: 'Managing Skills',
   memory: 'Checking Memory',
   spawn_agents: 'Running Agents',
+  message_agent: 'Messaging Agent',
   run_python: 'Coding',
   call_external_tool: 'Calling Tool',
   exa: 'Searching the Web',
@@ -728,13 +747,23 @@ function listMemoryFiles(dataDir: string): string[] {
 export function buildSystemPrompt(connectedServices: string[], agentProfilePath: string, settings: AgentSettings, dataDir: string, teamRoster?: any[], teamName?: string, googleCalendarConnected = false, composioSlugs: string[] = []): string {
   const memoryFiles = listMemoryFiles(dataDir)
 
+  // Auto-humanize slugs: "googledocs" → "Google Docs", "google_maps" → "Google Maps"
+  const humanizeSlug = (s: string): string => {
+    const special: Record<string, string> = { gmail: 'Gmail', github: 'GitHub', linkedin: 'LinkedIn', hubspot: 'HubSpot', imessage: 'iMessage', clickup: 'ClickUp' }
+    if (special[s]) return special[s]
+    return s.replace(/^google/i, 'Google ').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()).trim()
+  }
+  const integrationNames = composioSlugs.map(humanizeSlug)
+
   const serviceSection = connectedServices.length > 0
-    ? `You have access to these integrations: ${composioSlugs.join(', ')}. Never tell the user an integration is missing if it's listed here — you can reach their email, calendar, docs, and so on through these.
+    ? `You have access to these integrations: ${integrationNames.join(', ')}. Never tell the user an integration is missing if it's listed here — you can reach their email, calendar, docs, and so on through these.
 
 To use one, first call search_tools(query, context, schema) to find the exact tool name, then call_external_tool(tool_name, parameters) to run it. When you need context for the search, run memory search in parallel.
 
-Built-in tools (memory, files, schedule, skills, send_team_message, etc.) are always available — call them directly without going through search_tools.`
-    : `You don't have any external integrations connected yet. The user can connect apps in the Integrations panel. Built-in tools (memory, files, schedule, skills) are always available.`
+Built-in tools (memory, files, schedule, skills, send_team_message, etc.) are always available — call them directly without going through search_tools.
+
+You have web search — use search_tools with query "composio_search web" to find COMPOSIO_SEARCH_WEB and other search tools (news, scholar, etc.). Use these to look up current info, businesses, research topics, verify facts, etc.`
+    : `You don't have any external integrations connected yet. The user can connect apps in the Integrations panel. Built-in tools (memory, files, schedule, skills) are always available. You also have web search — use search_tools with query "composio_search web" to find web search tools.`
 
   const onboardingSection = !settings.onboarded
     ? '\n\nONBOARDING (MANDATORY): This is a brand new user who has not been set up. You MUST call memory(action: "read", file: "onboarding.md") as your FIRST action — do NOT greet or respond until you have read it. Then follow the onboarding script exactly. One question per message. Save their info via update_settings as you learn it. When done, set onboarded: true and delete onboarding.md from memory.'
@@ -764,6 +793,7 @@ Built-in tools (memory, files, schedule, skills, send_team_message, etc.) are al
 - add_done_item — log a completed action
 - create_custom_integration — build new API integrations
 Every tool listed here is real and operational. Use them rather than saying you cannot.
+For anything outside these built-in tools, use search_tools to discover and call external integration tools.
 </tools>
 ${customInstructions ? `\n${customInstructions}\n` : ''}
 This system prompt is your source of truth. If earlier messages in this conversation reference different settings or modes, they are outdated — follow what is here now.
@@ -783,6 +813,8 @@ ${settings.heartbeat_interval > 0 ? `\n<heartbeat>\nEvery ${settings.heartbeat_i
 ${googleCalendarConnected ? '\nGoogle Calendar is synced into schedule(list). To modify Google events, use GOOGLECALENDAR_UPDATE_EVENT or GOOGLECALENDAR_DELETE_EVENT through call_external_tool.' : ''}
 
 Keep responses short and direct. No emojis. Use plain text inside emails and messages — markdown renders literally in Gmail.
+Before sending, replying, or modifying anything external, make sure you have the correct information — don't guess.
+When sharing documents via email, attach or link the actual file — never paste the document content into the email body.
 ${memoryFiles.length > 0 ? `\nRecent memories: ${memoryFiles.join(', ')}.` : ''}
 VOICE: when the message ends with [voice], reply in 1-2 spoken sentences, ≤30 words. Natural English, no markdown or symbols. Don't include "[voice]".
 Notifications: 2-4 word title, one-sentence body.${onboardingSection}${teamRoster && teamRoster.length > 0 ? `\n\n<team name="${teamName || 'Your Team'}">\nYou are part of a team. Each member has their own AI agent — when you message someone, you're talking to their agent, not the person directly.\nMembers:\n${teamRoster.map((m: any) => `- ${m.name} (${m.role})`).join('\n')}\nUse send_team_message to reach them. Include agent_context with relevant background.\n</team>` : ''}`
@@ -809,6 +841,10 @@ export class Agent {
   private activeStream: { abort: () => void } | null = null
   private stopped = false
   private stopping = false
+  /** Running background sub-agents */
+  private backgroundAgents: SubAgentHandle[] = []
+  /** Callback when a background sub-agent completes */
+  public onSubAgentComplete?: (agentId: string, label: string, result: string) => void
   isProcessing = false
   private missedEvents: { source: string; payload: unknown; time: string }[] = []
   private steeringQueue: string[] = []
@@ -818,6 +854,8 @@ export class Agent {
   private cachedSystemPrompt: string | null = null
   private cachedPromptKey: string | null = null
   // Briefings removed — context now provided via search_tools context param
+  /** ID of the canvas currently displayed in the frontend */
+  public activeCanvasId: string | null = null
   public onSkillsChanged?: () => void
   public onSettingsChanged?: () => void
   public onCalendarChanged?: () => void
@@ -866,6 +904,11 @@ export class Agent {
       this.activeStream.abort()
       console.log('[Agent] Stop requested')
     }
+  }
+
+  /** Resolves when the current run loop finishes (or immediately if none). */
+  get currentRunLoop(): Promise<unknown> {
+    return this.runLoopPromise ?? Promise.resolve()
   }
 
   constructor(mcpConfigs: MCPServerConfig[], dataDir: string) {
@@ -992,8 +1035,8 @@ export class Agent {
     }
   }
 
-  getChatHistory(): { role: 'user' | 'assistant'; content: string; timestamp: string }[] {
-    const result: { role: 'user' | 'assistant'; content: string; timestamp: string }[] = []
+  getChatHistory(): AgentMessage[] {
+    const result: AgentMessage[] = []
     let inHeartbeat = false
     for (const m of this.conversationHistory) {
       let text: string
@@ -1011,6 +1054,14 @@ export class Agent {
         inHeartbeat = true
         continue
       }
+      // Hide internal sub-agent result prompts from UI
+      if (m.role === 'user' && (text.startsWith('Your background agent "') || text.startsWith('[SYSTEM: Background agent') || text.startsWith('[sub-agent-result]'))) {
+        continue
+      }
+      // Also hide steering redirects that leaked sub-agent results
+      if (m.role === 'user' && text.startsWith('[User changed direction]: [SYSTEM: Background agent')) {
+        continue
+      }
       // Skip Haiku's intermediate assistant narration during heartbeats — only show the surfaced summary
       if (inHeartbeat && m.role === 'assistant') {
         if (text.startsWith('**[Heartbeat —')) {
@@ -1020,10 +1071,24 @@ export class Agent {
         }
       }
       if (m.role === 'user') inHeartbeat = false
-      result.push({ role: m.role as 'user' | 'assistant', content: text, timestamp: new Date().toISOString() })
+      result.push({ id: '', role: m.role as 'user' | 'assistant', content: text, timestamp: (m as any).timestamp ?? '' })
     }
     // Only return the most recent 100 messages to keep the UI fast
-    return result.slice(-100)
+    const sliced = result.slice(-100)
+    // Assign stable IDs based on role + content hash (no position — survives filtering/reordering).
+    // Use a simple djb2 hash of the full content for collision resistance.
+    const seen = new Set<string>()
+    for (const m of sliced) {
+      let h = 5381
+      for (let j = 0; j < m.content.length; j++) h = ((h << 5) + h + m.content.charCodeAt(j)) >>> 0
+      let id = `msg-${m.role[0]}${h.toString(36)}`
+      // Deduplicate: if two messages have identical content, append a suffix
+      let suffix = 0
+      while (seen.has(id)) { suffix++; id = `msg-${m.role[0]}${h.toString(36)}-${suffix}` }
+      seen.add(id)
+      m.id = id
+    }
+    return sliced
   }
 
   async handleTrigger(
@@ -1093,27 +1158,9 @@ export class Agent {
       this.pinnedTaskIdx = this.conversationHistory.length - 1
     }
 
-    // Capture event IDs before processing so we can mark them done after
-    const eventIds: string[] = []
-
-    // Stream the heartbeat header before Haiku starts
-    if (isHeartbeat) {
-      const time = new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' })
-      onChunk?.(`**[Heartbeat — ${time}]**\n\n`)
-    }
-
     this.runLoopPromise = this.runLoop(onChunk, context, onToolCall)
     try {
-      const result = await this.runLoopPromise
-
-      // Mark heartbeat events as done so they don't pile up
-      if (eventIds.length > 0) {
-        markEventsDone(this.dataDir, eventIds).catch(err =>
-          console.error('[Agent] Failed to mark events done:', err.message)
-        )
-      }
-
-      // Heartbeat now runs independently via handleTrigger — no post-processing needed here
+      await this.runLoopPromise
     } finally {
       this.runLoopPromise = null
       if (isTodoDue) this.pinnedTaskIdx = null
@@ -1732,7 +1779,7 @@ Rules:
         // Each call has its own try/catch so one failure doesn't abort the batch.
         const toolCallResults = await Promise.all(toolBlocks.map(async (block): Promise<string> => {
           try {
-          let result: string
+          let result = ''
 
           if (block.name === 'get_current_time') {
             const now = new Date()
@@ -1931,7 +1978,8 @@ Rules:
                   } else if (e.due) timing = fmt(new Date(e.due))
                   const loc = e.location ? ` @ ${e.location}` : ''
                   const status = !e.enabled ? ' (disabled)' : ''
-                  return `- ${e.label} — ${timing}${loc}${status} (id: ${e.id})`
+                  const displayId = typeof e.id === 'string' && e.id.startsWith('gcal-') ? e.id.slice(5) : e.id
+                  return `- ${e.label} — ${timing}${loc}${status} (id: ${displayId})`
                 }
 
                 // Group by type for clarity
@@ -2093,7 +2141,13 @@ Rules:
                 const fullContent = await this.mcpManager.callTool('memory', 'read_memory', { path: input.file })
                 const pattern = input.pattern as string
                 const lines = fullContent.split('\n')
-                const regex = new RegExp(pattern, 'i')
+                let regex: RegExp | null = null
+                try {
+                  regex = new RegExp(pattern, 'i')
+                } catch {
+                  result = `Invalid regex pattern: ${pattern}`
+                }
+                if (regex) {
                 const CONTEXT_LINES = 2
                 const matchedIndices = new Set<number>()
 
@@ -2124,6 +2178,7 @@ Rules:
                   result = chunks.join('\n---\n')
                   console.log(`[Agent] memory grep "${pattern}" in ${input.file} — ${matchedIndices.size} lines matched (${result.length} chars vs ${fullContent.length} full)`)
                 }
+                } // end if (!result)
               } catch (err: any) {
                 result = `Memory error: ${err.message}`
               }
@@ -2254,6 +2309,7 @@ Rules:
                   code: input.code,
                   kind: input.kind,
                 })
+                this.activeCanvasId = canvas.id
                 this.onBroadcast?.({ type: 'canvas_opened', canvas })
                 if (input.save_to_files) {
                   this.onBroadcast?.({ type: 'canvas_save_to_files', canvasId: canvas.id, title: canvas.title, code: canvas.code })
@@ -2268,22 +2324,24 @@ Rules:
 
           } else if (block.name === 'patch_canvas') {
             const input = block.input as {
-              canvas_id: string
+              canvas_id?: string
               code: string
               title?: string
               save_to_files?: boolean
             }
+            const canvasId = input.canvas_id || this.activeCanvasId
             try {
-              if (!input.canvas_id || !input.code) {
-                result = 'Error: patch_canvas requires canvas_id and code.'
+              if (!canvasId || !input.code) {
+                result = 'Error: patch_canvas requires canvas_id (or an active canvas) and code.'
               } else {
-                const updated = await updateCanvas(this.dataDir, input.canvas_id, {
+                const updated = await updateCanvas(this.dataDir, canvasId, {
                   code: input.code,
                   ...(input.title !== undefined ? { title: input.title } : {}),
                 })
                 if (!updated) {
-                  result = `Error: Canvas "${input.canvas_id}" not found. Use write_canvas to create it first.`
+                  result = `Error: Canvas "${canvasId}" not found. Use write_canvas to create it first.`
                 } else {
+                  this.activeCanvasId = updated.id
                   this.onBroadcast?.({ type: 'canvas_updated', canvas: updated })
                   if (input.save_to_files) {
                     this.onBroadcast?.({ type: 'canvas_save_to_files', canvasId: updated.id, title: updated.title, code: updated.code })
@@ -2329,15 +2387,13 @@ Rules:
             }
 
           } else if (block.name === 'spawn_agents') {
-            // General-purpose parallel sub-agents
+            // Non-blocking background sub-agents
             const input = block.input as { tasks: SubAgentTask[] }
             const tasks = (input.tasks || []).slice(0, 5)
-            onToolCall?.('spawn_agents', `Running ${tasks.length} sub-agents`)
+            // No tool_start broadcast — spawn is silent, results come via Agent Complete
             try {
               const subClient = this.getOpenAIClient() || this.anthropic
-              // Build a tool executor that reuses the agent's own tool routing
               const toolExecutor = async (name: string, inp: Record<string, unknown>): Promise<string> => {
-                // Route exa tools to MCP
                 if (name === 'exa') {
                   return await this.mcpManager.callTool('exa', name, inp)
                 }
@@ -2359,34 +2415,124 @@ Rules:
                   ).slice(0, 10)
                   return matched.map(t => `${t.name}: ${t.description || ''}`).join('\n') || 'No tools found.'
                 }
-                // Files, schedule, skills — route to the main handler
-                if (name === 'files' || name === 'schedule' || name === 'skills') {
-                  // These are complex handlers — for now return a simple read
-                  return `Tool ${name} not available in sub-agents yet.`
+                if (name === 'schedule') {
+                  const action = inp.action as string
+                  if (action !== 'list') return `Sub-agents can only list schedule entries, not modify them.`
+                  const now = new Date()
+                  const allEntries = inp.filter_type
+                    ? this.calendar.getByType(inp.filter_type as any)
+                    : this.calendar.getAll()
+                  const entries = (inp.show_all as boolean)
+                    ? allEntries
+                    : allEntries.filter((e: any) => {
+                        if (e.completed) return false
+                        if (e.type === 'event') {
+                          const end = e.end || e.start
+                          if (end && new Date(end) < now) return false
+                        }
+                        return true
+                      })
+                  if (entries.length === 0) return 'No upcoming calendar entries.'
+                  return entries.map((e: any) => `- ${e.label} (${e.type}) — ${e.cron || e.due || e.start || 'no time'} (id: ${e.id})`).join('\n')
+                }
+                if (name === 'files') {
+                  const action = inp.action as string
+                  if (action === 'list') {
+                    const files = await listFiles(this.dataDir)
+                    const folderLower = (inp.folder as string | undefined)?.toLowerCase()
+                    const filtered = folderLower
+                      ? files.filter(f => f.group.toLowerCase() === folderLower || f.group.toLowerCase().startsWith(`${folderLower}/`))
+                      : files
+                    return filtered.length === 0
+                      ? (inp.folder ? `No files in folder "${inp.folder}".` : 'No files stored yet.')
+                      : filtered.map(f => `[id:${f.id}] ${f.group ? f.group + '/' : ''}${f.filename} — ${f.summary}`).join('\n')
+                  }
+                  if (action === 'search') {
+                    const files = await searchFiles(this.dataDir, inp.query as string, (inp.limit as number) ?? 5)
+                    return files.length === 0 ? 'No files found matching that query.' : files.map(f => `[id:${f.id}] [${f.group}] ${f.filename} — ${f.summary}`).join('\n')
+                  }
+                  if (action === 'grep') {
+                    if (!inp.pattern) return 'Missing pattern for grep.'
+                    const hits = await grepFiles(this.dataDir, inp.pattern as string, { folder: inp.folder as string | undefined, fileId: inp.id as string | undefined })
+                    if (hits.length === 0) return `No matches for "${inp.pattern}"${inp.folder ? ` in folder "${inp.folder}"` : ''}.`
+                    const totalMatches = hits.reduce((sum, h) => sum + h.matches.length, 0)
+                    const formatted = hits.map(h => `[id:${h.fileId}] ${h.group ? h.group + '/' : ''}${h.filename}\n${h.matches.map(m => `  ${m}`).join('\n')}`).join('\n\n')
+                    const MAX_GREP = 16000
+                    return formatted.length > MAX_GREP
+                      ? formatted.slice(0, MAX_GREP) + `\n\n[Truncated at ${MAX_GREP} chars]`
+                      : `${totalMatches} matches in ${hits.length} files:\n\n${formatted}`
+                  }
+                  if (action === 'read') {
+                    const content = await readFileContent(this.dataDir, inp.id as string)
+                    const MAX_FILE_READ = 24000
+                    return content.length > MAX_FILE_READ
+                      ? content.slice(0, MAX_FILE_READ) + `\n\n[Truncated at ${MAX_FILE_READ} chars]`
+                      : content
+                  }
+                  return `Sub-agents can only list, search, grep, or read files, not perform action "${action}".`
+                }
+                if (name === 'skills') {
+                  const action = inp.action as string
+                  if (action === 'save' || action === 'delete') {
+                    return `Sub-agents cannot modify skills.`
+                  }
+                  if (action === 'execute') {
+                    const skill = await loadSkill(this.dataDir, inp.name as string)
+                    if (!skill) return `Skill @${inp.name} not found.`
+                    return `[Skill: ${skill.name}]\n${skill.instructions}\n[/Skill]\n\nFollow these instructions now.`
+                  }
+                  // list (default)
+                  const allSkills = await listSkills(this.dataDir)
+                  return allSkills.length === 0 ? 'No skills saved yet.' : allSkills.map(s => `@${s.name} — ${s.description}`).join('\n')
                 }
                 return `Unknown tool: ${name}`
               }
 
-              result = await runSubAgents(
+              const handles = spawnSubAgents(
                 tasks,
                 subClient as any,
                 INTERNAL_TOOLS,
                 this.mcpManager,
                 toolExecutor,
                 this.dataDir,
-                (progress) => {
-                  const done = progress.filter(p => p.status === 'done').length
-                  const running = progress.filter(p => p.status === 'running').length
-                  const parts: string[] = []
-                  if (running > 0) parts.push(`${running} running`)
-                  if (done > 0) parts.push(`${done} done`)
-                  onToolCall?.('spawn_agents', `Sub-agents: ${parts.join(', ')}`)
+                undefined, // no progress callback — agents run silently in background
+                (agentId, label, agentResult) => {
+                  console.log(`[Agent] Background sub-agent "${label}" completed: ${agentResult.length} chars`)
+                  this.onSubAgentComplete?.(agentId, label, agentResult)
                 }
               )
-              console.log(`[Agent] spawn_agents (${tasks.length} tasks) → ${result.length} chars`)
+
+              this.backgroundAgents = [...this.backgroundAgents.filter(h => h.status === 'running'), ...handles]
+
+              result = `Launched ${handles.length} background agents:\n${handles.map(h => `- ${h.label} (id: ${h.id})`).join('\n')}\n\nIMPORTANT: These agents are running in the background. Do NOT wait for them. Continue responding to the user immediately. Results will be delivered automatically when agents finish. You can use message_agent(action:"list") to check status or message_agent(action:"message") to redirect them.`
+              console.log(`[Agent] spawn_agents launched ${handles.length} background agents`)
             } catch (err: any) {
               result = `Sub-agent error: ${err.message}`
               console.error('[Agent] spawn_agents error:', err.message)
+            }
+
+          } else if (block.name === 'message_agent') {
+            const input = block.input as { action: string; agent_id?: string; message?: string }
+            if (input.action === 'list') {
+              const running = getRunningAgents()
+              if (running.length === 0) {
+                result = 'No sub-agents currently running.'
+              } else {
+                result = `Running sub-agents:\n${running.map(a => `- ${a.label} (id: ${a.id}, status: ${a.status})`).join('\n')}`
+              }
+            } else if (input.action === 'message') {
+              if (!input.agent_id || !input.message) {
+                result = 'Error: agent_id and message are required for message action.'
+              } else {
+                const sent = messageSubAgent(input.agent_id, input.message)
+                if (sent) {
+                  result = `Message sent to agent ${input.agent_id}. It will pick up the instruction on its next loop.`
+                } else {
+                  result = `Could not send message — agent ${input.agent_id} not found or not running.`
+                }
+              }
+            } else {
+              result = `Unknown action: ${input.action}. Use "list" or "message".`
             }
 
           } else if (serverMap.get(block.name) === 'exa') {

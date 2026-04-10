@@ -1,5 +1,5 @@
 import { listen, emitTo, type UnlistenFn } from '@tauri-apps/api/event'
-import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
+import { setVoiceActive } from '@/hooks/useAgent'
 
 let mediaRecorder: MediaRecorder | null = null
 let audioChunks: Blob[] = []
@@ -141,7 +141,7 @@ export function showVoiceSummary(_summary: string) {
   responseAccum = ''
   responseLocked = false
   onStateChange?.('hidden')
-  ;(window as any).__voiceActive = false // voice session done
+  setVoiceActive(false) // voice session done
   // If TTS audio is playing or queued, wait for it to finish before hiding
   if (ttsPlaying || ttsQueue.length > 0) {
     ttsOnAllDone = () => { ttsOnAllDone = null; setTimeout(() => hidePill(), 500) }
@@ -293,7 +293,7 @@ export function cancelVoice() {
   if (cachedStream) { cachedStream.getTracks().forEach(t => t.stop()); cachedStream = null }
   if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; analyser = null }
   onStateChange?.('hidden')
-  ;(window as any).__voiceActive = false
+  setVoiceActive(false)
   hidePill()
   cancelTts()
   console.log('[Voice] Cancelled')
@@ -374,7 +374,7 @@ export async function registerVoiceHotkey(
       pressTime = Date.now()
       if (!mediaRecorder || mediaRecorder.state === 'inactive') {
         // Not recording — start on every press (both hold and tap)
-        ;(window as any).__voiceActive = true
+        setVoiceActive(true)
         // Track the promise so release can await it (prevents race condition)
         recordingReady = startRecording().then(() => { recordingReady = null })
       }

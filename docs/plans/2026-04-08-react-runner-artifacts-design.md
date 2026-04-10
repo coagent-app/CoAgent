@@ -7,7 +7,7 @@
 
 ## Motivation
 
-The current HTML document system (`write_document` / `patch_document` + `sec-*`/`ed-*` vocabulary + node-html-parser whitelist + scale-to-fit iframe) is brittle:
+The current HTML document system (`write_canvas` / `patch_canvas` + `sec-*`/`ed-*` vocabulary + node-html-parser whitelist + scale-to-fit iframe) is brittle:
 
 - Agent fights the whitelist, producing malformed HTML that fails validation.
 - Fixed canvas width causes horizontal scroll on narrow panes.

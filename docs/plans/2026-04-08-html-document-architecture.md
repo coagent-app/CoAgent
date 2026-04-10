@@ -142,7 +142,7 @@ And `tailwind.config.js` for the doc runtime bundle maps `background → hsl(var
 
 ### Server-side whitelist
 
-On every `write_document` and `patch_document`, the server parses the HTML (using `node-html-parser` — lightweight, no DOM) and rejects:
+On every `write_canvas` and `patch_canvas`, the server parses the HTML (using `node-html-parser` — lightweight, no DOM) and rejects:
 
 - Any tag not in: `div, section, article, header, footer, main, h1-h6, p, span, strong, em, ul, ol, li, table, thead, tbody, tr, th, td, img, figure, figcaption, blockquote, hr, br`.
 - Any class not matching `^(doc|sec-|ed-|grid|flex|gap-|p-|m-|px-|py-|mx-|my-|mt-|mb-|ml-|mr-|pt-|pb-|pl-|pr-|text-|bg-|border|rounded|font-|leading-|tracking-|w-|h-|max-w-|min-h-|items-|justify-|content-|self-|place-|col-|row-|aspect-|object-|opacity-|shadow|ring-|space-|divide-|order-|hidden|block|inline|flex-|grid-|relative|absolute|sticky|top-|left-|right-|bottom-|z-|overflow-|break-|whitespace-|truncate|uppercase|lowercase|capitalize|italic|underline|no-underline|cursor-|select-|pointer-events-|transition|duration-|ease-|delay-|animate-)`.
@@ -155,7 +155,7 @@ Rejection returns a structured error the agent can self-correct from: `{ error: 
 
 Replaces `create_document` / `update_document`.
 
-#### `write_document`
+#### `write_canvas`
 ```
 {
   title: string,
@@ -167,7 +167,7 @@ Replaces `create_document` / `update_document`.
 ```
 Creates or fully rewrites a doc. Streams — the client renders progressively as the HTML string grows. Used for: initial generation, "make this more premium," template-level regenerations.
 
-#### `patch_document`
+#### `patch_canvas`
 ```
 {
   doc_id: string,
@@ -180,7 +180,7 @@ Creates or fully rewrites a doc. Streams — the client renders progressively as
 ```
 Targeted edit. The agent assigns `id="n1"`, `id="n2"` etc. as it writes; subsequent patches reference those ids. Used for: "tighten this paragraph," "change the accent color on the hero," "add one more KPI," "make it green instead of blue" (set_theme op).
 
-Agent system prompt gets a short section that says: **prefer `patch_document` for scoped edits; use `write_document` only for new docs or full rewrites. Always assign stable ids to top-level sections so patches are addressable.**
+Agent system prompt gets a short section that says: **prefer `patch_canvas` for scoped edits; use `write_canvas` only for new docs or full rewrites. Always assign stable ids to top-level sections so patches are addressable.**
 
 ### The skill — one universal file
 
@@ -209,7 +209,7 @@ Agent system prompt gets a short section that says: **prefer `patch_document` fo
 6. **Brand kit integration** — on every new doc, read the user's brand kit from settings and populate the theme variables. Do not override user brand choices unless explicitly asked.
 7. **Examples** — 3-4 short but complete HTML docs showing different compositions with the same brand kit so the agent sees how theming drives variety independent of layout.
 
-Skill is loaded into the agent context whenever `write_document` or `patch_document` is about to be called.
+Skill is loaded into the agent context whenever `write_canvas` or `patch_canvas` is about to be called.
 
 ### Editor UX (keeps current look)
 
@@ -217,11 +217,11 @@ The CanvasPane keeps its current chrome (toolbar, Save to Files, Export, streami
 
 **Click-to-edit flow:**
 - `contentEditable="true"` set on every element matching `.ed-*`.
-- On blur or Enter, diff the text against the previous value. If changed, send `patch_document(replace_text, target_id)` to the server. No LLM call for typos.
-- Hover on any `.sec-*` shows a small toolbar (Regenerate, Restyle, Delete, Insert above/below) — the Durable/Canvas pattern. Clicking opens a scoped mini-prompt that ends up as a `patch_document` with the agent.
+- On blur or Enter, diff the text against the previous value. If changed, send `patch_canvas(replace_text, target_id)` to the server. No LLM call for typos.
+- Hover on any `.sec-*` shows a small toolbar (Regenerate, Restyle, Delete, Insert above/below) — the Durable/Canvas pattern. Clicking opens a scoped mini-prompt that ends up as a `patch_canvas` with the agent.
 
 **Streaming:**
-- During `write_document`, the iframe's document.body.innerHTML grows as chunks arrive. Autoscroll to bottom when streaming.
+- During `write_canvas`, the iframe's document.body.innerHTML grows as chunks arrive. Autoscroll to bottom when streaming.
 - No per-block arrival animation — the HTML renders naturally. Current "block arrival" fade can be reimplemented via CSS `@starting-style` on newly-inserted sections if we want it back.
 
 **Undo/redo:**
@@ -258,12 +258,12 @@ Reversible, incremental. Each phase commits cleanly and leaves the app in a work
 
 ### Phase 3 — Agent tools
 
-1. Add `write_document`, `patch_document`, `set_document_theme` tools in `agent.ts`.
+1. Add `write_canvas`, `patch_canvas`, `set_document_theme` tools in `agent.ts`.
 2. Add server-side handlers in `server.ts` that validate via the whitelist parser and persist via `html-document-store`.
 3. Add the `document-design.md` skill file. Load it into agent context when these tools are about to be called (similar to how `DOC_COMPOSITION_GUIDE` is currently injected into the `create_document` tool result).
 4. Keep old `create_document` / `update_document` tools working side-by-side during migration.
 
-**Verify:** ask the agent (with the flag on) to write a new document. It picks `write_document`, streams HTML, renders live in the iframe, text is editable, sections are movable.
+**Verify:** ask the agent (with the flag on) to write a new document. It picks `write_canvas`, streams HTML, renders live in the iframe, text is editable, sections are movable.
 
 ### Phase 4 — PrintRoute / PDF
 
@@ -285,7 +285,7 @@ Reversible, incremental. Each phase commits cleanly and leaves the app in a work
 
 ### Phase 6 — Polish
 
-1. Section-insert UX: floating "+" between sections that opens a mini-prompt (scoped `write_document`).
+1. Section-insert UX: floating "+" between sections that opens a mini-prompt (scoped `write_canvas`).
 2. Theme editor in Settings → Brand Kit (already exists) → propagate changes to open docs via `set_document_theme`.
 3. Add `@starting-style` fade-in for newly-inserted sections if the block-arrival animation is missed.
 

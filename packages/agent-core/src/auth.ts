@@ -11,7 +11,7 @@ const RELAY_URL_VAR = 'RELAY_URL'
 async function readEnvLines(dataDir: string): Promise<string[]> {
   try {
     const raw = await readFile(join(dataDir, ENV_FILE), 'utf-8')
-    return raw.split('\n')
+    return raw.split(/\r?\n/)
   } catch (err: any) {
     if (err?.code === 'ENOENT') return []
     throw err
@@ -98,7 +98,7 @@ export function loadApiKeysToEnv(dataDir: string): void {
   try {
     const { readFileSync } = require('fs') as typeof import('fs')
     const raw = readFileSync(join(dataDir, ENV_FILE), 'utf-8')
-    for (const line of raw.split('\n')) {
+    for (const line of raw.split(/\r?\n/)) {
       const trimmed = line.trim()
       if (!trimmed || trimmed.startsWith('#')) continue
       const eqIdx = trimmed.indexOf('=')

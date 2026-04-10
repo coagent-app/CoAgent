@@ -2,6 +2,7 @@ import cron from 'node-cron'
 import { execSync, spawn } from 'child_process'
 import { writeFileSync, readFileSync, unlinkSync } from 'fs'
 import { join } from 'path'
+import { tmpdir } from 'os'
 import type { Agent } from './agent.js'
 import { parseLocalDate } from './calendar-store.js'
 import { purgeEventStore } from './relay-client.js'
@@ -52,8 +53,12 @@ function setupPmsetAccess(): boolean {
 
   const user = process.env.USER
   if (!user) return false
+  if (!/^[a-zA-Z0-9_.-]+$/.test(user)) {
+    console.warn('[Scheduler] Invalid USER environment variable — skipping pmset setup')
+    return false
+  }
 
-  const tmpFile = `/tmp/coagent-sudoers-${process.pid}`
+  const tmpFile = join(tmpdir(), `coagent-sudoers-${process.pid}`)
   try {
     writeFileSync(tmpFile, `${user} ALL=(root) NOPASSWD: /usr/bin/pmset\n`, { mode: 0o440 })
     execSync(

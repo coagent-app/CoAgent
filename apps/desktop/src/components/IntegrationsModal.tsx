@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { X, ArrowLeft } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { Integration } from '@coagent/shared'
@@ -35,6 +35,8 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
   const [fieldValues, setFieldValues] = useState<Record<string, string>>({})
   const [detailSlug, setDetailSlug] = useState<string | null>(null)
   const [mobileQrDataUrl, setMobileQrDataUrl] = useState<string | null>(null)
+  const [confirmingDisconnect, setConfirmingDisconnect] = useState<string | null>(null)
+  const [confirmingDeleteSlug, setConfirmingDeleteSlug] = useState<string | null>(null)
 
   useEffect(() => {
     if (!relayCredentials?.relayUrl || !relayCredentials.token) {
@@ -51,12 +53,14 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
       .catch(() => setMobileQrDataUrl(null))
   }, [relayCredentials])
 
-  // Auto-fetch relay credentials when the mobile detail view is opened
+  // Auto-fetch relay credentials when the mobile detail view is opened (once per slug)
+  const autoConnectedRef = useRef<string | null>(null)
   useEffect(() => {
-    if (detailSlug === 'coagent:mobile') {
+    if (detailSlug === 'coagent:mobile' && autoConnectedRef.current !== detailSlug) {
+      autoConnectedRef.current = detailSlug
       onConnect('coagent:mobile')
     }
-  }, [detailSlug])
+  }, [detailSlug, onConnect])
 
   // Reset field values when pending fields change
   useEffect(() => {
@@ -94,6 +98,8 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
 
   function handleBackToGrid() {
     setDetailSlug(null)
+    setConfirmingDisconnect(null)
+    setConfirmingDeleteSlug(null)
     if (pendingFields) handleCancelFields()
   }
 
@@ -155,6 +161,9 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
       onClick={onClose}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Integrations"
         className="bg-white dark:bg-neutral-900 rounded-2xl shadow-xl w-[820px] max-h-[700px] flex flex-col"
         onClick={e => e.stopPropagation()}
       >
@@ -170,7 +179,7 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
                 <ArrowLeft size={14} />
                 <span className="text-[12px] font-medium">Integrations</span>
               </button>
-              <button onClick={onClose} className="text-neutral-400 hover:text-neutral-600 dark:text-neutral-500 dark:hover:text-neutral-300 transition-colors">
+              <button onClick={onClose} aria-label="Close" className="text-neutral-400 hover:text-neutral-600 dark:text-neutral-500 dark:hover:text-neutral-300 transition-colors">
                 <X size={16} />
               </button>
             </div>
@@ -288,6 +297,7 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
                           autoFocus={i === 0}
                           type="text"
                           placeholder={field.displayName}
+                          aria-label={field.displayName}
                           title={field.description}
                           value={fieldValues[field.name] ?? ''}
                           onChange={e => setFieldValues(prev => ({ ...prev, [field.name]: e.target.value }))}
@@ -344,13 +354,33 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
                     </button>
                   </>
                 ) : detailIntegration.connected ? (
-                  <button
-                    type="button"
-                    onClick={() => onDisconnect(detailIntegration.slug)}
-                    className="text-[13px] font-medium px-4 py-2 rounded-xl text-red-500 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950 transition-colors"
-                  >
-                    Disconnect
-                  </button>
+                  confirmingDisconnect === detailIntegration.slug ? (
+                    <>
+                      <span className="text-[12px] text-red-500 dark:text-red-400">Disconnect?</span>
+                      <button
+                        type="button"
+                        onClick={() => { onDisconnect(detailIntegration.slug); setConfirmingDisconnect(null) }}
+                        className="text-[13px] font-medium px-3 py-1.5 rounded-xl bg-red-500 text-white hover:bg-red-600 transition-colors"
+                      >
+                        Disconnect
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmingDisconnect(null)}
+                        className="text-[13px] font-medium px-3 py-1.5 rounded-xl text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmingDisconnect(detailIntegration.slug)}
+                      className="text-[13px] font-medium px-4 py-2 rounded-xl text-red-500 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950 transition-colors"
+                    >
+                      Disconnect
+                    </button>
+                  )
                 ) : (
                   <button
                     type="button"
@@ -362,13 +392,33 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
                 )}
 
                 {detailIntegration.custom && (
-                  <button
-                    type="button"
-                    onClick={() => { onDelete?.(detailIntegration.slug); handleBackToGrid() }}
-                    className="text-[13px] font-medium px-4 py-2 rounded-xl text-red-500 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950 transition-colors"
-                  >
-                    Delete
-                  </button>
+                  confirmingDeleteSlug === detailIntegration.slug ? (
+                    <>
+                      <span className="text-[12px] text-red-500 dark:text-red-400">Delete?</span>
+                      <button
+                        type="button"
+                        onClick={() => { onDelete?.(detailIntegration.slug); handleBackToGrid() }}
+                        className="text-[13px] font-medium px-3 py-1.5 rounded-xl bg-red-500 text-white hover:bg-red-600 transition-colors"
+                      >
+                        Delete
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmingDeleteSlug(null)}
+                        className="text-[13px] font-medium px-3 py-1.5 rounded-xl text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmingDeleteSlug(detailIntegration.slug)}
+                      className="text-[13px] font-medium px-4 py-2 rounded-xl text-red-500 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950 transition-colors"
+                    >
+                      Delete
+                    </button>
+                  )
                 )}
 
                 <div className="flex items-center gap-1.5 ml-1">
@@ -425,7 +475,7 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
             {/* Header */}
             <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-neutral-100 dark:border-neutral-800">
               <h2 className="text-[15px] font-semibold text-neutral-900 dark:text-neutral-100">Integrations</h2>
-              <button onClick={onClose} className="text-neutral-400 hover:text-neutral-600 dark:text-neutral-500 dark:hover:text-neutral-300 transition-colors">
+              <button onClick={onClose} aria-label="Close" className="text-neutral-400 hover:text-neutral-600 dark:text-neutral-500 dark:hover:text-neutral-300 transition-colors">
                 <X size={16} />
               </button>
             </div>
@@ -435,7 +485,8 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
               <input
                 autoFocus
                 type="text"
-                placeholder="Search..."
+                placeholder="Search integrations…"
+                aria-label="Search integrations"
                 value={search}
                 onChange={e => setSearch(e.target.value)}
                 className="w-full text-[13px] bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg px-3 py-2 outline-none focus:border-neutral-400 dark:focus:border-neutral-500 transition-colors text-neutral-800 dark:text-neutral-100 placeholder-neutral-400 dark:placeholder-neutral-500"

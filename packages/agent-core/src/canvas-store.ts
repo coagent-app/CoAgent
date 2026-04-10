@@ -26,15 +26,26 @@ function canvasPath(dataDir: string, id: string): string {
 // both create `<path>.tmp`; the first rename wins, the second ENOENTs.
 const writeLocks = new Map<string, Promise<void>>()
 
-let canvasDirCreated = false
+// Shared promise so concurrent callers all await the same mkdir — no double-create race.
+// Reset to null on rejection so subsequent calls can retry rather than re-awaiting a
+// permanently-settled rejected promise.
+let ensureDirPromise: Promise<void> | null = null
+function ensureCanvasDir(dir: string): Promise<void> {
+  if (!ensureDirPromise) {
+    ensureDirPromise = mkdir(dir, { recursive: true })
+      .then(() => {})
+      .catch((err) => {
+        ensureDirPromise = null
+        throw err
+      })
+  }
+  return ensureDirPromise
+}
 
 async function writeCanvasAtomic(path: string, canvas: Canvas): Promise<void> {
   const prev = writeLocks.get(path) || Promise.resolve()
   const next = prev.catch(() => {}).then(async () => {
-    if (!canvasDirCreated) {
-      await mkdir(join(path, '..'), { recursive: true })
-      canvasDirCreated = true
-    }
+    await ensureCanvasDir(join(path, '..'))
     const tmpPath = `${path}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`
     await writeFile(tmpPath, JSON.stringify(canvas, null, 2), 'utf-8')
     await rename(tmpPath, path)
@@ -45,6 +56,35 @@ async function writeCanvasAtomic(path: string, canvas: Canvas): Promise<void> {
   } finally {
     if (writeLocks.get(path) === next) writeLocks.delete(path)
   }
+}
+
+// Transform-based write: reads and writes atomically within the same per-path queue entry
+async function transformCanvasAtomic(path: string, transform: (current: Canvas | null) => Canvas | null): Promise<Canvas | null> {
+  let result: Canvas | null = null
+  const prev = writeLocks.get(path) || Promise.resolve()
+  const next = prev.catch(() => {}).then(async () => {
+    await ensureCanvasDir(join(path, '..'))
+    let current: Canvas | null = null
+    try {
+      const raw = await readFile(path, 'utf-8')
+      current = JSON.parse(raw) as Canvas
+    } catch {
+      // file doesn't exist yet
+    }
+    const updated = transform(current)
+    if (updated === null) { result = null; return }
+    const tmpPath = `${path}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`
+    await writeFile(tmpPath, JSON.stringify(updated, null, 2), 'utf-8')
+    await rename(tmpPath, path)
+    result = updated
+  })
+  writeLocks.set(path, next)
+  try {
+    await next
+  } finally {
+    if (writeLocks.get(path) === next) writeLocks.delete(path)
+  }
+  return result
 }
 
 // ── public API ───────────────────────────────────────────────────────────
@@ -97,25 +137,23 @@ export async function updateCanvas(
   id: string,
   patch: CanvasPatch,
 ): Promise<Canvas | null> {
-  const canvas = await readCanvas(dataDir, id)
-  if (!canvas) return null
+  return transformCanvasAtomic(canvasPath(dataDir, id), (canvas) => {
+    if (!canvas) return null
 
-  // Only snapshot when code actually changes
-  const versions = patch.code !== undefined && patch.code !== canvas.code
-    ? [{ savedAt: canvas.updatedAt, code: canvas.code }, ...(canvas.versions || [])].slice(0, MAX_VERSIONS)
-    : (canvas.versions || [])
+    // Only snapshot when code actually changes
+    const versions = patch.code !== undefined && patch.code !== canvas.code
+      ? [{ savedAt: canvas.updatedAt, code: canvas.code }, ...(canvas.versions || [])].slice(0, MAX_VERSIONS)
+      : (canvas.versions || [])
 
-  const updated: Canvas = {
-    ...canvas,
-    ...(patch.title !== undefined ? { title: patch.title } : {}),
-    ...(patch.code !== undefined ? { code: patch.code } : {}),
-    ...(patch.kind !== undefined ? { kind: patch.kind } : {}),
-    updatedAt: new Date().toISOString(),
-    versions,
-  }
-
-  await writeCanvasAtomic(canvasPath(dataDir, id), updated)
-  return updated
+    return {
+      ...canvas,
+      ...(patch.title !== undefined ? { title: patch.title } : {}),
+      ...(patch.code !== undefined ? { code: patch.code } : {}),
+      ...(patch.kind !== undefined ? { kind: patch.kind } : {}),
+      updatedAt: new Date().toISOString(),
+      versions,
+    }
+  })
 }
 
 export async function listCanvases(

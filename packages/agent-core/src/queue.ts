@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid'
-import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from 'fs'
+import { readFileSync, mkdirSync, existsSync } from 'fs'
+import { writeFile, rename } from 'fs/promises'
 import { join } from 'path'
 import type { ApprovalItem, DoneItem } from '@coagent/shared'
 
@@ -11,6 +12,7 @@ export class ApprovalQueue {
   private queuePath: string
   private donePath: string
   private purgeTimer: ReturnType<typeof setTimeout> | null = null
+  private saveDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(dataDir: string) {
     this.queuePath = join(dataDir, 'queue.json')
@@ -48,6 +50,7 @@ export class ApprovalQueue {
   /** Call on shutdown to clean up timer */
   destroy(): void {
     if (this.purgeTimer) clearTimeout(this.purgeTimer)
+    if (this.saveDebounceTimer) { clearTimeout(this.saveDebounceTimer); this.saveDebounceTimer = null; this.flushSave() }
   }
 
   private load<T>(path: string, fallback: T): T {
@@ -57,14 +60,21 @@ export class ApprovalQueue {
     return fallback
   }
 
-  private save(): void {
+  private flushSave(): void {
+    const items = JSON.stringify(this.items, null, 2)
+    const done = JSON.stringify(this.done, null, 2)
     const tmpQ = this.queuePath + '.tmp'
-    writeFileSync(tmpQ, JSON.stringify(this.items, null, 2))
-    renameSync(tmpQ, this.queuePath)
-
     const tmpD = this.donePath + '.tmp'
-    writeFileSync(tmpD, JSON.stringify(this.done, null, 2))
-    renameSync(tmpD, this.donePath)
+    writeFile(tmpQ, items).then(() => rename(tmpQ, this.queuePath)).catch(console.error)
+    writeFile(tmpD, done).then(() => rename(tmpD, this.donePath)).catch(console.error)
+  }
+
+  private save(): void {
+    if (this.saveDebounceTimer) clearTimeout(this.saveDebounceTimer)
+    this.saveDebounceTimer = setTimeout(() => {
+      this.saveDebounceTimer = null
+      this.flushSave()
+    }, 200)
   }
 
   add(item: NewItem): ApprovalItem {

@@ -33,6 +33,7 @@ export class GoogleCalendarService {
   private pollTimer: ReturnType<typeof setInterval> | null = null
   private onUpdate: (() => void) | null = null
   private onStoreEvents: ((entries: CalendarEntry[]) => void) | null = null
+  private onSyncResult: ((result: { entries: CalendarEntry[]; changed: boolean; full: boolean; removedIds?: string[] }) => void) | null = null
 
   constructor(
     private clientId: string,
@@ -53,6 +54,11 @@ export class GoogleCalendarService {
   /** Set callback for storing synced events into the calendar store */
   setStoreCallback(cb: (entries: CalendarEntry[]) => void): void {
     this.onStoreEvents = cb
+  }
+
+  /** Set callback for full sync results (adds + removals) */
+  setSyncResultCallback(cb: (result: { entries: CalendarEntry[]; changed: boolean; full: boolean; removedIds?: string[] }) => void): void {
+    this.onSyncResult = cb
   }
 
   /** Check if user has connected Google Calendar */
@@ -316,9 +322,12 @@ export class GoogleCalendarService {
   private startPolling(): void {
     this.stopPolling()
     this.pollTimer = setInterval(() => {
-      this.sync().then(({ entries, changed }) => {
-        if (changed && entries.length > 0 && this.onStoreEvents) {
-          this.onStoreEvents(entries)
+      this.sync().then((result) => {
+        if (!result.changed) return
+        if (this.onSyncResult) {
+          this.onSyncResult(result)
+        } else if (this.onStoreEvents && result.entries.length > 0) {
+          this.onStoreEvents(result.entries)
         }
       }).catch(err => console.error('[GoogleCal] Poll sync error:', err.message))
     }, 10 * 60 * 1000)

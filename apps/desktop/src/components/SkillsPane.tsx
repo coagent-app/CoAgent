@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { Zap, ChevronRight, Pencil, Trash2, X, Check, Wand2, Puzzle, MessageSquare } from 'lucide-react'
+import { Zap, ChevronRight, Pencil, Trash2, X, Check } from 'lucide-react'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { cn } from '@/lib/utils'
 
@@ -329,6 +329,7 @@ export function SkillsPane({ skills, onUpdate, onDelete }: SkillsPaneProps) {
                     </button>
                     <button
                       onClick={() => setConfirmDelete(selected.name)}
+                      title="Delete skill"
                       className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[12px] font-medium text-neutral-500 hover:text-red-500 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
                     >
                       <Trash2 size={13} />

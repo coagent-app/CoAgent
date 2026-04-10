@@ -15,6 +15,14 @@ const BADGE_VARIANTS: Record<string, string> = {
   other:    'bg-neutral-100 text-neutral-600 border-neutral-200',
 }
 
+const BADGE_VARIANTS_DARK: Record<string, string> = {
+  contract: 'dark:bg-violet-950 dark:text-violet-300 dark:border-violet-800',
+  analysis: 'dark:bg-emerald-950 dark:text-emerald-300 dark:border-emerald-800',
+  cma:      'dark:bg-amber-950 dark:text-amber-300 dark:border-amber-800',
+  email:    'dark:bg-sky-950 dark:text-sky-300 dark:border-sky-800',
+  other:    'dark:bg-neutral-800 dark:text-neutral-300 dark:border-neutral-700',
+}
+
 // Inline styles for markdown elements to keep a neutral prose-like appearance
 // that matches the existing neutral tone without relying on @tailwindcss/typography.
 const markdownComponents: React.ComponentProps<typeof ReactMarkdown>['components'] = {
@@ -45,22 +53,22 @@ const markdownComponents: React.ComponentProps<typeof ReactMarkdown>['components
   li: ({ children }) => (
     <li style={{ marginBottom: '0.2em', lineHeight: '1.6' }}>{children}</li>
   ),
-  hr: () => (
-    <hr style={{ border: 'none', borderTop: '1px solid #e5e5e5', margin: '0.75em 0' }} />
+  hr: ({ }) => (
+    <hr className="border-none border-t border-neutral-200 dark:border-neutral-700 my-3" />
   ),
   code: ({ children, className }) => {
     const isBlock = className?.startsWith('language-')
     if (isBlock) {
       return (
-        <pre style={{ background: '#f0f0ee', borderRadius: '4px', padding: '0.6em 0.8em', overflowX: 'auto', marginBottom: '0.5em' }}>
-          <code style={{ fontFamily: 'monospace', fontSize: '0.85em' }}>{children}</code>
+        <pre className="bg-neutral-100 dark:bg-neutral-800 rounded px-3 py-2.5 overflow-x-auto mb-2" style={{ fontFamily: 'monospace', fontSize: '0.85em' }}>
+          <code>{children}</code>
         </pre>
       )
     }
-    return <code style={{ fontFamily: 'monospace', fontSize: '0.85em', background: '#f0f0ee', borderRadius: '3px', padding: '0 0.3em' }}>{children}</code>
+    return <code className="bg-neutral-100 dark:bg-neutral-800 rounded px-1" style={{ fontFamily: 'monospace', fontSize: '0.85em', padding: '0 0.3em' }}>{children}</code>
   },
   blockquote: ({ children }) => (
-    <blockquote style={{ borderLeft: '3px solid #d4d4d4', paddingLeft: '0.8em', color: '#737373', margin: '0.5em 0' }}>{children}</blockquote>
+    <blockquote className="border-l-[3px] border-neutral-300 dark:border-neutral-600 pl-3 text-neutral-500 dark:text-neutral-400 my-2">{children}</blockquote>
   ),
 }
 
@@ -84,7 +92,7 @@ export function DetailPane({ item, onApprove, onReject, onEdit }: DetailPaneProp
   if (!item) {
     return (
       <div className="flex-1 bg-white dark:bg-neutral-950 flex items-center justify-center">
-        <p className="text-[14px] text-neutral-400 dark:text-neutral-500">Select an item from the queue to review it</p>
+        <p className="text-[14px] text-neutral-400 dark:text-neutral-500">Select an item from the queue to review it.</p>
       </div>
     )
   }
@@ -110,7 +118,8 @@ export function DetailPane({ item, onApprove, onReject, onEdit }: DetailPaneProp
         <span
           className={cn(
             'inline-block text-[10px] font-semibold uppercase tracking-wider border rounded px-1.5 py-0.5 mb-3',
-            BADGE_VARIANTS[item.type] ?? BADGE_VARIANTS.other
+            BADGE_VARIANTS[item.type] ?? BADGE_VARIANTS.other,
+            BADGE_VARIANTS_DARK[item.type] ?? BADGE_VARIANTS_DARK.other
           )}
         >
           {item.type}

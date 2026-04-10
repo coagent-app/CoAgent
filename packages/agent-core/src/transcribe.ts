@@ -17,7 +17,7 @@ import {
   statSync,
   writeFileSync,
 } from 'fs'
-import { mkdir, unlink, writeFile } from 'fs/promises'
+import { mkdir, unlink } from 'fs/promises'
 import * as https from 'https'
 import * as http from 'http'
 import { join, extname, basename, dirname } from 'path'

@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid'
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs'
+import { readFileSync, mkdirSync, existsSync } from 'fs'
+import { writeFile } from 'fs/promises'
 import { join } from 'path'
 import type { CalendarEntry, TodoItem } from '@coagent/shared'
 
@@ -21,6 +22,7 @@ export class CalendarStore {
   private entries: CalendarEntry[] = []
   private filePath: string
   private dataDir: string
+  private saveDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(dataDir: string) {
     this.dataDir = dataDir
@@ -39,7 +41,11 @@ export class CalendarStore {
   }
 
   private save(): void {
-    writeFileSync(this.filePath, JSON.stringify(this.entries, null, 2))
+    if (this.saveDebounceTimer) clearTimeout(this.saveDebounceTimer)
+    this.saveDebounceTimer = setTimeout(() => {
+      this.saveDebounceTimer = null
+      writeFile(this.filePath, JSON.stringify(this.entries, null, 2)).catch(console.error)
+    }, 200)
   }
 
   /** One-time migration: convert todos.json → calendar entries */

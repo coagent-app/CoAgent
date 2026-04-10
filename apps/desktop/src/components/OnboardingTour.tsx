@@ -26,36 +26,81 @@ const STEPS = [
 
 type StepId = typeof STEPS[number]['id']
 
-const FEATURE_CONTENT: Record<string, { icon: React.ElementType; title: string; description: string }> = {
+const FEATURE_CONTENT: Record<string, { icon: React.ElementType; title: string; description: string; details: string[] }> = {
   chat: {
     icon: MessageSquare,
     title: 'Chat',
-    description: 'Talk to your agent naturally — ask it to draft emails, research topics, manage tasks, or anything else. It remembers your conversations and learns your preferences.',
+    description: 'Your main interface with Co-Agent. Talk naturally — it understands context and takes real actions.',
+    details: [
+      'Draft and send emails, Slack messages, and notifications',
+      'Research the web, companies, and people in real time',
+      'Remembers everything across conversations — preferences, contacts, past work',
+      'Runs Python code, analyzes data, and creates visualizations',
+      'Spawns multiple sub-agents to handle parallel tasks simultaneously',
+      'Attach files, images, or voice — drop them right into the chat',
+    ],
   },
   schedule: {
     icon: CalendarDays,
     title: 'Schedule',
-    description: 'Your agent manages tasks, routines, and calendar events. Connect Google Calendar for two-way sync, set active hours, and automate recurring work.',
+    description: 'Your agent works on a schedule — even when you\'re not looking. Set routines and let it handle recurring work autonomously.',
+    details: [
+      'Two-way Google Calendar sync — your agent sees and creates events',
+      'Daily heartbeats: your agent wakes up, checks your calendar, and runs tasks',
+      'Set active hours so it only works when you want it to',
+      'Cron-based routines — "check my leads every Monday" just works',
+      'Wakes your Mac from sleep to run scheduled tasks on time',
+    ],
   },
   queue: {
     icon: Inbox,
     title: 'Queue',
-    description: 'When your agent wants to do something that needs approval — like sending an email — it goes here first. Review, edit, approve, or reject.',
+    description: 'You stay in control. Before your agent sends an email, posts a message, or takes any external action — it asks for your approval here.',
+    details: [
+      'Review every outgoing email, Slack message, or API call before it happens',
+      'Edit the content inline — fix a subject line or tweak the wording',
+      'Approve or reject with one click',
+      'Batch approve when you trust the agent\'s judgment',
+      'Nothing leaves your machine without your explicit OK',
+    ],
   },
   skills: {
     icon: Zap,
     title: 'Skills',
-    description: 'Reusable automations you can trigger anytime. Create custom workflows, connect APIs, and chain multiple actions together.',
+    description: 'Pre-built and custom automations your agent can use. Think of them as reusable playbooks it follows.',
+    details: [
+      'Comes with built-in skills — email outreach, lead research, document creation',
+      'Create your own: describe a workflow in plain English and save it',
+      'Skills can chain tools together — research → draft → send, all in one step',
+      'Share skills across conversations — build once, use forever',
+      'Edit and refine skills as your workflow evolves',
+    ],
   },
   files: {
     icon: FolderOpen,
     title: 'Files',
-    description: 'Upload documents for your agent to reference. It can search, summarize, fill PDFs, and generate branded documents.',
+    description: 'Your agent\'s knowledge base. Upload documents, and it can search, read, and reference them in any conversation.',
+    details: [
+      'Supports PDF, DOCX, XLSX, images, and text files',
+      'Video and audio files are automatically transcribed — your agent can search spoken content',
+      'Semantic search — find files by meaning, not just keywords',
+      'Fill PDF forms programmatically with your agent',
+      'Auto-organizes files into folders based on content',
+      'Generated documents (proposals, reports) are saved here automatically',
+    ],
   },
   integrations: {
     icon: Puzzle,
     title: 'Integrations',
-    description: 'Connect Gmail, Slack, Google Calendar, WhatsApp, and more. Your agent uses them to take real actions on your behalf.',
+    description: 'Connect the apps you already use. Your agent can read from and act on all of them.',
+    details: [
+      'Gmail — read, draft, send, and reply to emails',
+      'Google Calendar — view, create, and manage events',
+      'Slack — read channels and send messages',
+      'Apollo — find people, companies, and enrich contact data',
+      'Notion, Google Docs, Calendly, Mailchimp, and more',
+      'Each integration gives your agent real tools — not just data access',
+    ],
   },
 }
 
@@ -168,8 +213,11 @@ export function OnboardingTour({ settings, onUpdate, onOpenIntegrations, onNavig
               <p className="text-[13px] text-neutral-400 dark:text-neutral-500 mb-1">
                 Private Beta
               </p>
-              <p className="text-[14px] text-neutral-500 dark:text-neutral-400 leading-relaxed mb-6">
-                Your personal AI assistant that runs privately on your machine.
+              <p className="text-[14px] text-neutral-500 dark:text-neutral-400 leading-relaxed mb-2">
+                Your personal AI operator that runs privately on your machine. It connects to your email, calendar, files, and apps — then takes real actions on your behalf.
+              </p>
+              <p className="text-[12.5px] text-neutral-400 dark:text-neutral-500 leading-relaxed mb-6">
+                Let's walk through what it can do.
               </p>
 
               {!hasRelay ? (
@@ -200,7 +248,7 @@ export function OnboardingTour({ settings, onUpdate, onOpenIntegrations, onNavig
                     disabled={activating}
                     className="w-full py-2.5 rounded-xl bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900 text-[14px] font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
                   >
-                    {activating ? 'Activating...' : 'Activate'}
+                    {activating ? 'Activating…' : 'Activate'}
                   </button>
                 </div>
               ) : (
@@ -220,7 +268,7 @@ export function OnboardingTour({ settings, onUpdate, onOpenIntegrations, onNavig
       {/* Feature step — floating card at bottom center */}
       {feature && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 pointer-events-auto">
-          <div className="bg-white dark:bg-neutral-900 rounded-2xl shadow-2xl border border-neutral-200 dark:border-neutral-700 w-[480px] overflow-hidden">
+          <div className="bg-white dark:bg-neutral-900 rounded-2xl shadow-2xl border border-neutral-200 dark:border-neutral-700 w-[520px] overflow-hidden">
             {/* Progress */}
             <div className="h-1 bg-neutral-100 dark:bg-neutral-800">
               <div
@@ -230,7 +278,7 @@ export function OnboardingTour({ settings, onUpdate, onOpenIntegrations, onNavig
             </div>
 
             <div className="p-5">
-              <div className="flex items-start gap-4">
+              <div className="flex items-start gap-4 mb-3">
                 {/* Icon */}
                 <div className="w-10 h-10 rounded-xl bg-indigo-50 dark:bg-indigo-950 flex items-center justify-center flex-shrink-0">
                   <feature.icon className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
@@ -247,8 +295,18 @@ export function OnboardingTour({ settings, onUpdate, onOpenIntegrations, onNavig
                 </div>
               </div>
 
+              {/* Detail bullets */}
+              <div className="ml-14 mb-3 space-y-1.5">
+                {feature.details.map((detail, i) => (
+                  <div key={i} className="flex items-start gap-2">
+                    <div className="w-1 h-1 rounded-full bg-neutral-300 dark:bg-neutral-600 mt-[7px] flex-shrink-0" />
+                    <p className="text-[12.5px] text-neutral-500 dark:text-neutral-400 leading-snug">{detail}</p>
+                  </div>
+                ))}
+              </div>
+
               {/* Nav */}
-              <div className="flex items-center gap-3 mt-4 pt-3 border-t border-neutral-100 dark:border-neutral-800">
+              <div className="flex items-center gap-3 pt-3 border-t border-neutral-100 dark:border-neutral-800">
                 <button
                   onClick={back}
                   className="flex items-center gap-1 text-[12.5px] text-neutral-400 dark:text-neutral-500 hover:text-neutral-600 dark:hover:text-neutral-300 transition-colors"
@@ -290,7 +348,7 @@ export function OnboardingTour({ settings, onUpdate, onOpenIntegrations, onNavig
                   You're all set!
                 </h2>
                 <p className="text-[13.5px] text-neutral-500 dark:text-neutral-400">
-                  Start chatting, or jump into any of these:
+                  Connect your apps first so your agent can actually do things — then start chatting.
                 </p>
               </div>
 

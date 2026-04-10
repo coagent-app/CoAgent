@@ -110,6 +110,7 @@ export interface AgentMessageDoc {
 }
 
 export interface AgentMessage {
+  id?: string
   role: 'user' | 'assistant'
   content: string
   timestamp: string
@@ -297,10 +298,14 @@ export type WSServerMessage =
   | { type: 'canvas_error'; canvasId?: string; message: string }
   | { type: 'canvas_save_to_files'; canvasId: string; title: string; code: string }
   | { type: 'python_run'; requestId: string; conversationId: string; code: string; timeoutMs?: number }
+  | { type: 'python_streaming'; requestId: string; conversationId?: string; partialCode: string }
+  | { type: 'transcription_status'; fileId: string; status: 'started' | 'done' }
+  | { type: 'team_status'; status: 'processing' | 'idle'; from?: string }
   | { type: 'code_cell_start'; cellId: string; code: string }
   | { type: 'code_cell_event'; cellId: string; event: PythonEvent }
   | { type: 'code_cell_done'; cellId: string; stdout: string; stderr: string; resultRepr?: string; durationMs: number; figures?: string[] }
   | { type: 'code_cell_error'; cellId: string; errorType: string; message: string; traceback: string; stdout: string; stderr: string }
+  | { type: 'subagent_complete'; agentId: string; label: string; resultLength: number }
 
 export type PythonEvent =
   | { type: 'stdout'; line: string }

@@ -10,6 +10,7 @@ import {
   setHours, getHours,
 } from 'date-fns'
 import type { CalendarEntry, GoogleCalendarInfo } from '@coagent/shared'
+import { hexToRgba } from '@/lib/colors'
 
 type CalendarView = 'week' | 'month' | 'day' | 'agenda'
 
@@ -40,15 +41,6 @@ function typeColors(type: string) {
   return TYPE_COLORS[type as keyof typeof TYPE_COLORS] ?? TYPE_COLORS.task
 }
 
-/** Hex (#rrggbb) → rgba string with given alpha */
-function hexToRgba(hex: string, alpha: number): string {
-  const h = hex.replace('#', '')
-  if (h.length !== 6) return `rgba(59, 130, 246, ${alpha})` // fallback blue-500
-  const r = parseInt(h.slice(0, 2), 16)
-  const g = parseInt(h.slice(2, 4), 16)
-  const b = parseInt(h.slice(4, 6), 16)
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`
-}
 
 /** Type fallback colors when no per-calendar color is available */
 const TYPE_HEX: Record<string, string> = {
@@ -189,10 +181,10 @@ export function CalendarPane({
         <div className="flex items-center gap-3">
           {view !== 'agenda' && (
             <>
-              <button onClick={() => navigate(-1)} className="p-1 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded">
+              <button title="Previous" onClick={() => navigate(-1)} className="p-1 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded">
                 <ChevronLeft size={16} />
               </button>
-              <button onClick={() => navigate(1)} className="p-1 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded">
+              <button title="Next" onClick={() => navigate(1)} className="p-1 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded">
                 <ChevronRight size={16} />
               </button>
               <button onClick={goToday} className="text-[12px] px-2 py-0.5 rounded bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700">
@@ -202,7 +194,7 @@ export function CalendarPane({
           )}
           <h2 className="text-[15px] font-semibold text-neutral-900 dark:text-neutral-100">{headerLabel}</h2>
           {syncing && (
-            <span className="text-[10px] text-neutral-400 dark:text-neutral-500 animate-pulse">syncing...</span>
+            <span className="text-[10px] text-neutral-400 dark:text-neutral-500 animate-pulse">Syncing…</span>
           )}
         </div>
         <div className="flex items-center gap-2">
@@ -276,6 +268,7 @@ function EntryDetailPanel({
   onDelete: (id: string) => void
   onClose: () => void
 }) {
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
   const colors = typeColors(entry.type)
   const canComplete = entry.type === 'task' || entry.type === 'followup'
   const isGoogleEvent = entry.source === 'google'
@@ -304,6 +297,7 @@ function EntryDetailPanel({
         </span>
         <button
           onClick={onClose}
+          title="Close"
           className="text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300 transition-colors"
         >
           <X size={14} />
@@ -405,13 +399,31 @@ function EntryDetailPanel({
                 Mark complete
               </button>
             )}
-            <button
-              onClick={() => onDelete(entry.id)}
-              className="flex items-center justify-center gap-1.5 w-full text-[12px] font-medium text-red-500 dark:text-red-400 bg-red-50 dark:bg-red-900/20 hover:bg-red-100 dark:hover:bg-red-900/40 rounded-md px-3 py-1.5 transition-colors"
-            >
-              <Trash2 size={13} />
-              Delete
-            </button>
+            {confirmingDelete ? (
+              <div className="flex items-center gap-2 px-3 py-2 bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 rounded-md">
+                <span className="text-[12px] text-red-600 dark:text-red-400 flex-1">Delete this entry?</span>
+                <button
+                  onClick={() => { onDelete(entry.id); setConfirmingDelete(false) }}
+                  className="px-2.5 py-1 rounded text-[11px] font-medium bg-red-500 text-white hover:bg-red-600 transition-colors"
+                >
+                  Delete
+                </button>
+                <button
+                  onClick={() => setConfirmingDelete(false)}
+                  className="px-2.5 py-1 rounded text-[11px] font-medium text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-700 transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => setConfirmingDelete(true)}
+                className="flex items-center justify-center gap-1.5 w-full text-[12px] font-medium text-red-500 dark:text-red-400 bg-red-50 dark:bg-red-900/20 hover:bg-red-100 dark:hover:bg-red-900/40 rounded-md px-3 py-1.5 transition-colors"
+              >
+                <Trash2 size={13} />
+                Delete
+              </button>
+            )}
           </>
         )}
       </div>
@@ -532,6 +544,7 @@ function GoogleCalendarModal({
                       {/* Toggle checkbox */}
                       <input
                         type="checkbox"
+                        aria-label={`Enable ${cal.name}`}
                         checked={cal.enabled}
                         onChange={e => onToggle(cal.id, e.target.checked)}
                         className="flex-shrink-0 w-3.5 h-3.5 rounded accent-blue-600 cursor-pointer"
@@ -692,6 +705,7 @@ function AgendaSection({
             {entry.source !== 'google' && (
               <button
                 onClick={e => { e.stopPropagation(); onDelete(entry.id) }}
+                title="Delete entry"
                 className="opacity-0 group-hover:opacity-100 transition-opacity text-neutral-300 dark:text-neutral-600 hover:text-red-500 flex-shrink-0 mt-0.5"
               >
                 <Trash2 size={13} />
@@ -761,7 +775,7 @@ function WeekView({
             'sticky top-0 z-40 bg-white dark:bg-neutral-950 text-center py-2 border-b border-l border-neutral-100 dark:border-neutral-800',
             isToday(day) && 'bg-blue-50 dark:bg-blue-950/20'
           )}>
-            <p className="text-[10px] text-neutral-400 uppercase">{format(day, 'EEE')}</p>
+            <p className="text-[10px] text-neutral-400 dark:text-neutral-500 uppercase">{format(day, 'EEE')}</p>
             <p className={cn('text-[14px] font-medium', isToday(day) ? 'text-blue-600' : 'text-neutral-700 dark:text-neutral-300')}>{format(day, 'd')}</p>
           </div>
         ))}
@@ -888,7 +902,7 @@ function MonthView({
               !isSameMonth(day, anchor) && 'opacity-40',
               isToday(day) && 'bg-blue-50/50 dark:bg-blue-950/20'
             )}>
-              <p className={cn('text-[11px] font-medium mb-0.5', isToday(day) ? 'text-blue-600' : 'text-neutral-500')}>{format(day, 'd')}</p>
+              <p className={cn('text-[11px] font-medium mb-0.5', isToday(day) ? 'text-blue-600' : 'text-neutral-500 dark:text-neutral-400')}>{format(day, 'd')}</p>
               {dayEntries.slice(0, 3).map(entry => {
                 const style = getEventStyle(entry, calendars, isDark)
                 return (

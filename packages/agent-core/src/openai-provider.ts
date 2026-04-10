@@ -252,6 +252,7 @@ export async function streamOpenAI(
   if (params.model.startsWith('kimi')) {
     createParams.thinking = { type: 'disabled' }
   }
+  console.log(`[OpenAI] Request: model=${createParams.model}, max_tokens=${createParams.max_tokens}, thinking=${JSON.stringify(createParams.thinking ?? 'none')}`)
   const stream = await (client.chat.completions as any).create(createParams, { signal })
 
   // Accumulate the full response from stream deltas
@@ -279,6 +280,9 @@ export async function streamOpenAI(
     // Reasoning content (Kimi thinking)
     if (delta.reasoning_content) {
       reasoningContent += delta.reasoning_content
+      if (reasoningContent.length === delta.reasoning_content.length) {
+        console.log(`[OpenAI] ⚠️ Kimi IS sending reasoning tokens despite thinking=disabled`)
+      }
     }
 
     // Text content
@@ -317,6 +321,11 @@ export async function streamOpenAI(
     if (chunk.choices?.[0]?.finish_reason) {
       finishReason = chunk.choices[0].finish_reason
     }
+  }
+
+  console.log(`[OpenAI] Response done: text=${textContent.length} chars, reasoning=${reasoningContent.length} chars, prompt=${promptTokens}, completion=${completionTokens}, cached=${cachedTokens}, finish=${finishReason}`)
+  if (reasoningContent.length > 0) {
+    console.log(`[OpenAI] ⚠️ Reasoning tokens received (${reasoningContent.length} chars) — thinking disable flag may not be working`)
   }
 
   // Build Anthropic-compatible content blocks

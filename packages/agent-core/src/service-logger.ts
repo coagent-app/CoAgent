@@ -81,6 +81,9 @@ export function extractIntegration(serverName: string, toolName: string): string
 
 // ── Logging ──────────────────────────────────────────────────────────────────
 
+const MAX_TOOL_LOG_ENTRIES = 500
+const MAX_TOOL_LOG_AGE_DAYS = 7
+
 /** Append a tool call entry to the daily log and embed it into LanceDB. */
 export function logToolCall(
   dataDir: string,
@@ -92,7 +95,7 @@ export function logToolCall(
   const integration = extractIntegration(service, tool)
 
   const path = logPath(dataDir)
-  const log: ToolLogEntry[] = existsSync(path)
+  let log: ToolLogEntry[] = existsSync(path)
     ? JSON.parse(readFileSync(path, 'utf-8'))
     : []
 
@@ -108,6 +111,16 @@ export function logToolCall(
 
   const entry: ToolLogEntry = { service: integration, tool, params: cleanParams, result: trimmedResult, ts: new Date().toISOString() }
   log.push(entry)
+
+  // Prune on every write: drop entries older than 7 days, then cap at 500
+  const cutoff = new Date()
+  cutoff.setDate(cutoff.getDate() - MAX_TOOL_LOG_AGE_DAYS)
+  const cutoffStr = cutoff.toISOString()
+  log = log.filter(e => e.ts >= cutoffStr)
+  if (log.length > MAX_TOOL_LOG_ENTRIES) {
+    log = log.slice(log.length - MAX_TOOL_LOG_ENTRIES)
+  }
+
   writeFileSync(path, JSON.stringify(log, null, 2))
 
   // Embed async into LanceDB — don't block the tool call

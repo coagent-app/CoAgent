@@ -14,7 +14,7 @@ interface CodeCellProps {
  * On done, the cell auto-collapses unless the user expanded it.
  */
 export function CodeCell({ cell, onCancel }: CodeCellProps) {
-  const [expanded, setExpanded] = useState(true)
+  const [expanded, setExpanded] = useState(cell.status !== 'done')
   const [userToggled, setUserToggled] = useState(false)
 
   // Auto-collapse code panel on done (but keep stdout/result visible).

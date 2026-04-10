@@ -76,17 +76,20 @@ export function CanvasPane({ canvas, streaming = false, streamingCode, settings,
 
   const brandCSS = useMemo(() => buildBrandCSS(brand), [brand])
 
-  // Build logo header HTML
+  // Build logo header HTML — escape user-supplied values to prevent XSS
   const logoHtml = useMemo(() => {
     if (!brand.name && !brand.logoUrl) return ''
+    const escAttr = (s: string) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    const escText = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     if (brand.logoUrl) {
-      return `<div class="canvas-logo"><img src="${brand.logoUrl}" alt="${brand.name || 'Logo'}" /></div>`
+      return `<div class="canvas-logo"><img src="${escAttr(brand.logoUrl)}" alt="${escAttr(brand.name || 'Logo')}" /></div>`
     }
-    return `<div class="canvas-logo"><div class="canvas-logo-text">${brand.name}</div></div>`
+    return `<div class="canvas-logo"><div class="canvas-logo-text">${escText(brand.name)}</div></div>`
   }, [brand.name, brand.logoUrl])
 
   // Stable base srcdoc — CSS + structure only, no content. Rebuilt only when
   // brand CSS changes (which causes a full reload anyway).
+  // Content updates are sent via postMessage to avoid needing allow-same-origin.
   const srcdoc = useMemo(() => {
     return `<!DOCTYPE html>
 <html lang="en">
@@ -100,6 +103,18 @@ export function CanvasPane({ canvas, streaming = false, streamingCode, settings,
 <div id="logo"></div>
 <div id="content"></div>
 </div>
+<script>
+window.addEventListener('message', function(e) {
+  if (!e.data || typeof e.data !== 'object') return;
+  if (e.data.type === 'set_content') {
+    var el = document.getElementById('content');
+    if (el) el.innerHTML = e.data.html;
+  } else if (e.data.type === 'set_logo') {
+    var el = document.getElementById('logo');
+    if (el) el.innerHTML = e.data.html;
+  }
+});
+</script>
 </body>
 </html>`
   }, [brandCSS])
@@ -129,50 +144,14 @@ export function CanvasPane({ canvas, streaming = false, streamingCode, settings,
     }
   }, [debouncedCode])
 
-  // Write content into the iframe DOM without reloading it
+  // Write content into the iframe via postMessage (no allow-same-origin needed)
   const updateIframeContent = useCallback((html: string) => {
-    const doc = iframeRef.current?.contentDocument
-    if (!doc) return
-
-    const contentEl = doc.getElementById('content')
-    if (contentEl) contentEl.innerHTML = html
-
-    // Handle Mermaid diagrams
-    const mermaidEls = doc.querySelectorAll('code.language-mermaid')
-    if (mermaidEls.length) {
-      mermaidEls.forEach(el => {
-        const pre = el.parentElement
-        if (!pre) return
-        const div = doc.createElement('div')
-        div.className = 'mermaid'
-        div.textContent = el.textContent
-        pre.replaceWith(div)
-      })
-
-      const win = doc.defaultView as any
-      if (!win?.mermaid) {
-        const s = doc.createElement('script')
-        s.src = 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js'
-        s.onload = () => {
-          const m = (doc.defaultView as any)?.mermaid
-          if (m) {
-            m.initialize({ startOnLoad: false, theme: 'neutral' })
-            m.run()
-          }
-        }
-        doc.head.appendChild(s)
-      } else {
-        win.mermaid.run()
-      }
-    }
+    iframeRef.current?.contentWindow?.postMessage({ type: 'set_content', html }, '*')
   }, [])
 
   // Populate logo once iframe is ready; update when brand changes
   const updateIframeLogo = useCallback((html: string) => {
-    const doc = iframeRef.current?.contentDocument
-    if (!doc) return
-    const logoEl = doc.getElementById('logo')
-    if (logoEl) logoEl.innerHTML = html
+    iframeRef.current?.contentWindow?.postMessage({ type: 'set_logo', html }, '*')
   }, [])
 
   // After iframe loads, seed both logo and content
@@ -267,6 +246,8 @@ export function CanvasPane({ canvas, streaming = false, streamingCode, settings,
                 }}
                 className="flex items-center gap-1 px-2 py-1 rounded-md text-[11.5px] font-medium text-neutral-500 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
                 title="Canvas history"
+                aria-label="Canvas history"
+                aria-expanded={historyOpen}
               >
                 <History size={12} />
               </button>
@@ -321,6 +302,7 @@ export function CanvasPane({ canvas, streaming = false, streamingCode, settings,
             onClick={onClose}
             className="p-1 rounded-md text-neutral-500 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
             title="Close canvas"
+            aria-label="Close canvas"
           >
             <X size={14} />
           </button>
@@ -328,12 +310,12 @@ export function CanvasPane({ canvas, streaming = false, streamingCode, settings,
       </div>
 
       {/* Canvas surface */}
-      <div className="flex-1 overflow-auto p-3">
+      <div className="flex-1 overflow-auto p-3 relative">
         <iframe
           ref={iframeRef}
           srcDoc={srcdoc}
           onLoad={handleLoad}
-          sandbox="allow-same-origin allow-modals allow-scripts allow-popups"
+          sandbox="allow-scripts allow-popups"
           title={canvas.title || 'Canvas'}
           className="border-0 block bg-white shadow-sm rounded-md w-full min-h-full"
         />

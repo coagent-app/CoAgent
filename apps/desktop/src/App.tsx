@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { Button } from '@/components/ui/button'
 import { Sidebar } from '@/components/Sidebar'
 import type { View } from '@/components/Sidebar'
 import { QueuePane } from '@/components/QueuePane'
@@ -16,8 +15,8 @@ import { OnboardingTour } from '@/components/OnboardingTour'
 import { useAgent } from '@/hooks/useAgent'
 import { useUpdater } from '@/hooks/useUpdater'
 import { useTheme } from '@/hooks/useTheme'
-import { cn } from '@/lib/utils'
 import { registerVoiceHotkey, unregisterVoiceHotkey, cancelVoice, setTtsVolume } from '@/lib/voice'
+import { setVoiceActive } from '@/hooks/useAgent'
 import { primeKernelPool, sweepIdleWorkers } from '@/python/python-kernel'
 import { emit } from '@tauri-apps/api/event'
 import type { ApprovalItem } from '@coagent/shared'
@@ -63,7 +62,7 @@ export default function App() {
     if (voiceEnabled) {
       setTtsVolume(settings?.voice_volume ?? 0.5)
       registerVoiceHotkey('fn', (base64) => {
-        ;(window as any).__voiceActive = true
+        setVoiceActive(true)
         window.dispatchEvent(new CustomEvent('coagent-ws-send', {
           detail: { type: 'voice_audio', data: base64 }
         }))
@@ -74,6 +73,10 @@ export default function App() {
     }
     return () => { unregisterVoiceHotkey() }
   }, [voiceEnabled])
+
+  useEffect(() => {
+    if (voiceEnabled) setTtsVolume(settings?.voice_volume ?? 0.5)
+  }, [settings?.voice_volume, voiceEnabled])
 
 
   function handleApprove(id: string) {
