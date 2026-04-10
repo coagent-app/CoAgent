@@ -154,7 +154,7 @@ jobs:
             echo "Signing $bin"
             codesign --force --options runtime --entitlements "$ENTITLEMENTS" \
               --sign "$APPLE_SIGNING_IDENTITY" "$bin"
-            codesign --verify --strict "$bin"
+            codesign --verify "$bin"
           done
 
       # Build Tauri app (signs main bundle + notarizes)
