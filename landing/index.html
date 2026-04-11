@@ -1,0 +1,974 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Co-Agent — Your Personal AI Operator</title>
+  <meta name="description" content="Co-Agent is a personal AI operator for freelancers. Automate email, CRM, scheduling, and client workflows — all from one desktop app." />
+  <meta property="og:title" content="Co-Agent — Your Personal AI Operator" />
+  <meta property="og:description" content="Automate your freelance workflows. Email, CRM, scheduling, and more — handled by your personal AI operator." />
+  <meta property="og:type" content="website" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'system-ui', 'sans-serif'],
+          },
+          colors: {
+            brand: {
+              50: '#f8f8f8',
+              100: '#f0f0f0',
+              200: '#e4e4e4',
+              300: '#d1d1d1',
+              400: '#a3a3a3',
+              500: '#737373',
+              600: '#525252',
+              700: '#404040',
+              800: '#262626',
+              900: '#171717',
+              950: '#0a0a0a',
+            }
+          },
+          animation: {
+            'fade-in': 'fadeIn 0.8s ease-out forwards',
+            'fade-up': 'fadeUp 0.8s ease-out forwards',
+            'fade-up-delay': 'fadeUp 0.8s ease-out 0.15s forwards',
+            'fade-up-delay-2': 'fadeUp 0.8s ease-out 0.3s forwards',
+            'fade-up-delay-3': 'fadeUp 0.8s ease-out 0.45s forwards',
+            'pulse-soft': 'pulseSoft 3s ease-in-out infinite',
+            'shimmer': 'shimmer 4s ease-in-out infinite',
+          },
+          keyframes: {
+            fadeIn: {
+              '0%': { opacity: '0' },
+              '100%': { opacity: '1' },
+            },
+            fadeUp: {
+              '0%': { opacity: '0', transform: 'translateY(20px)' },
+              '100%': { opacity: '1', transform: 'translateY(0)' },
+            },
+            pulseSoft: {
+              '0%, 100%': { opacity: '0.4' },
+              '50%': { opacity: '1' },
+            },
+            shimmer: {
+              '0%': { backgroundPosition: '-200% center' },
+              '100%': { backgroundPosition: '200% center' },
+            },
+          },
+        }
+      }
+    }
+  </script>
+  <style>
+    /* Base resets */
+    *, *::before, *::after { box-sizing: border-box; }
+    html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+    body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif; }
+
+    /* Gradient text */
+    .gradient-text {
+      background: linear-gradient(135deg, #171717 0%, #525252 50%, #171717 100%);
+      background-size: 200% 200%;
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+      animation: shimmer 6s ease-in-out infinite;
+    }
+    .dark .gradient-text {
+      background: linear-gradient(135deg, #f5f5f5 0%, #a3a3a3 50%, #f5f5f5 100%);
+      background-size: 200% 200%;
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    /* Grid pattern bg */
+    .grid-bg {
+      background-image:
+        linear-gradient(rgba(0,0,0,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,0,0,0.03) 1px, transparent 1px);
+      background-size: 64px 64px;
+    }
+    .dark .grid-bg {
+      background-image:
+        linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+      background-size: 64px 64px;
+    }
+
+    /* Radial glow */
+    .hero-glow {
+      position: absolute;
+      width: 800px;
+      height: 600px;
+      top: -200px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: radial-gradient(ellipse at center, rgba(0,0,0,0.04) 0%, transparent 70%);
+      pointer-events: none;
+    }
+    .dark .hero-glow {
+      background: radial-gradient(ellipse at center, rgba(255,255,255,0.03) 0%, transparent 70%);
+    }
+
+    /* App preview mockup */
+    .app-preview {
+      background: linear-gradient(145deg, #fafafa 0%, #f5f5f5 100%);
+      border: 1px solid #e5e5e5;
+      box-shadow:
+        0 0 0 1px rgba(0,0,0,0.03),
+        0 2px 4px rgba(0,0,0,0.04),
+        0 12px 40px rgba(0,0,0,0.08);
+    }
+    .dark .app-preview {
+      background: linear-gradient(145deg, #1a1a1a 0%, #141414 100%);
+      border: 1px solid #2a2a2a;
+      box-shadow:
+        0 0 0 1px rgba(255,255,255,0.03),
+        0 2px 4px rgba(0,0,0,0.2),
+        0 12px 40px rgba(0,0,0,0.4);
+    }
+
+    /* Feature card */
+    .feature-card {
+      transition: all 0.3s ease;
+    }
+    .feature-card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 30px rgba(0,0,0,0.08);
+    }
+    .dark .feature-card:hover {
+      box-shadow: 0 8px 30px rgba(0,0,0,0.3);
+    }
+
+    /* Integration logos orbit */
+    .orbit-ring {
+      border: 1px dashed rgba(0,0,0,0.08);
+    }
+    .dark .orbit-ring {
+      border: 1px dashed rgba(255,255,255,0.08);
+    }
+
+    /* Invite page */
+    .invite-card {
+      background: white;
+      border: 1px solid #e5e5e5;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.04), 0 8px 30px rgba(0,0,0,0.06);
+    }
+    .dark .invite-card {
+      background: #1a1a1a;
+      border: 1px solid #2a2a2a;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.2), 0 8px 30px rgba(0,0,0,0.3);
+    }
+
+    /* Integration icons — ensure visibility on all backgrounds */
+    .integration-icon img {
+      border-radius: 6px;
+    }
+
+    /* Smooth page transitions */
+    .page { display: none; }
+    .page.active { display: block; }
+
+    /* Status dot pulse */
+    .status-dot {
+      width: 6px; height: 6px;
+      background: #22c55e;
+      border-radius: 50%;
+      animation: pulseSoft 3s ease-in-out infinite;
+    }
+
+    /* Button press effect */
+    .btn-primary:active { transform: scale(0.98); }
+
+    /* Copy tooltip */
+    .copy-tooltip {
+      opacity: 0;
+      transition: opacity 0.2s;
+      pointer-events: none;
+    }
+    .copy-tooltip.show {
+      opacity: 1;
+    }
+
+    /* Scroll reveal */
+    .reveal {
+      opacity: 0;
+      transform: translateY(20px);
+      transition: opacity 0.6s ease, transform 0.6s ease;
+    }
+    .reveal.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    /* Marquee scroll */
+    .marquee-track {
+      display: flex;
+      gap: 2.5rem;
+      animation: marqueeScroll 45s linear infinite;
+      width: max-content;
+    }
+    .marquee-track:hover {
+      animation-play-state: paused;
+    }
+    @keyframes marqueeScroll {
+      0% { transform: translateX(0); }
+      100% { transform: translateX(-50%); }
+    }
+  </style>
+</head>
+<body class="bg-white dark:bg-brand-950 text-brand-900 dark:text-brand-100 min-h-screen">
+
+  <!-- ============================================================
+       MARKETING PAGE
+       ============================================================ -->
+  <div id="page-marketing" class="page active">
+
+    <!-- NAV -->
+    <nav class="fixed top-0 left-0 right-0 z-50 bg-white/80 dark:bg-brand-950/80 backdrop-blur-xl border-b border-brand-200/60 dark:border-brand-800/60">
+      <div class="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <img src="icon-transparent.png" alt="Co-Agent" class="w-10 h-10 brightness-0 dark:brightness-100" />
+          <span class="text-[15px] font-semibold tracking-tight">Co-Agent</span>
+        </div>
+        <div class="hidden sm:flex items-center gap-8 text-[13px] text-brand-500 dark:text-brand-400">
+          <a href="#features" class="hover:text-brand-900 dark:hover:text-brand-100 transition-colors">Features</a>
+          <a href="#integrations" class="hover:text-brand-900 dark:hover:text-brand-100 transition-colors">Integrations</a>
+          <a href="#pricing" class="hover:text-brand-900 dark:hover:text-brand-100 transition-colors">Pricing</a>
+        </div>
+        <div class="flex items-center gap-3">
+          <button onclick="toggleDark()" class="w-8 h-8 rounded-lg flex items-center justify-center text-brand-400 hover:text-brand-600 dark:text-brand-500 dark:hover:text-brand-300 hover:bg-brand-100 dark:hover:bg-brand-800 transition-all" aria-label="Toggle dark mode">
+            <svg id="icon-sun" class="w-4 h-4 hidden dark:block" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v2.25m6.364.386l-1.591 1.591M21 12h-2.25m-.386 6.364l-1.591-1.591M12 18.75V21m-4.773-4.227l-1.591 1.591M5.25 12H3m4.227-4.773L5.636 5.636M15.75 12a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0z" />
+            </svg>
+            <svg id="icon-moon" class="w-4 h-4 block dark:hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M21.752 15.002A9.718 9.718 0 0118 15.75c-5.385 0-9.75-4.365-9.75-9.75 0-1.33.266-2.597.748-3.752A9.753 9.753 0 003 11.25C3 16.635 7.365 21 12.75 21a9.753 9.753 0 009.002-5.998z" />
+            </svg>
+          </button>
+          <a href="#download" class="btn-primary inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-brand-900 dark:bg-brand-100 text-white dark:text-brand-900 text-[13px] font-medium hover:bg-brand-800 dark:hover:bg-brand-200 transition-all">
+            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+            Download
+          </a>
+        </div>
+      </div>
+    </nav>
+
+    <!-- HERO -->
+    <section class="relative pt-32 pb-20 sm:pt-40 sm:pb-28 overflow-hidden grid-bg">
+      <div class="hero-glow"></div>
+      <div class="max-w-4xl mx-auto px-6 text-center relative z-10">
+        <div class="animate-fade-up opacity-0 inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-brand-200 dark:border-brand-800 bg-brand-50 dark:bg-brand-900 text-[12px] font-medium text-brand-500 dark:text-brand-400 mb-8">
+          <span class="status-dot"></span>
+          Private Beta &mdash; Invite Only
+        </div>
+
+        <h1 class="animate-fade-up opacity-0 text-[clamp(2rem,5vw,3.5rem)] font-bold tracking-tight leading-[1.1] mb-6">
+          <span class="gradient-text">Your personal AI operator</span><br />
+          <span class="text-brand-400 dark:text-brand-500">for freelancers</span>
+        </h1>
+
+        <p class="animate-fade-up-delay opacity-0 text-[15px] sm:text-[17px] text-brand-500 dark:text-brand-400 max-w-xl mx-auto leading-relaxed mb-10">
+          Co-Agent connects to your email, CRM, calendar, and tools &mdash; then handles the busywork so you can focus on billable hours.
+        </p>
+
+        <div class="animate-fade-up-delay-2 opacity-0 flex flex-col sm:flex-row items-center justify-center gap-3">
+          <a href="#download" class="btn-primary inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-brand-900 dark:bg-brand-100 text-white dark:text-brand-900 text-[13px] font-semibold hover:bg-brand-800 dark:hover:bg-brand-200 transition-all shadow-md shadow-brand-900/10 dark:shadow-brand-100/10">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+            Download for macOS
+          </a>
+          <span class="text-[12px] text-brand-400 dark:text-brand-500">Free download &middot; Invite code required to activate</span>
+        </div>
+      </div>
+
+      <!-- App Preview Mockup -->
+      <div class="max-w-5xl mx-auto px-6 mt-16 sm:mt-20 animate-fade-up-delay-3 opacity-0">
+        <div class="app-preview rounded-2xl overflow-hidden">
+          <!-- Window chrome -->
+          <div class="flex items-center gap-2 px-5 py-3.5 border-b border-brand-200/60 dark:border-brand-800/60">
+            <div class="flex gap-1.5">
+              <div class="w-2.5 h-2.5 rounded-full bg-brand-300 dark:bg-brand-700"></div>
+              <div class="w-2.5 h-2.5 rounded-full bg-brand-300 dark:bg-brand-700"></div>
+              <div class="w-2.5 h-2.5 rounded-full bg-brand-300 dark:bg-brand-700"></div>
+            </div>
+            <div class="flex-1 text-center text-[11px] text-brand-400 dark:text-brand-600 font-medium">Co-Agent</div>
+          </div>
+          <!-- App body mockup -->
+          <div class="flex min-h-[360px] sm:min-h-[420px]">
+            <!-- Sidebar mock -->
+            <div class="w-44 border-r border-brand-200/60 dark:border-brand-800/60 p-3 hidden sm:block">
+              <div class="text-[13px] font-semibold text-brand-900 dark:text-brand-100 px-2 mb-4">Co-Agent</div>
+              <div class="space-y-0.5">
+                <div class="flex items-center gap-2 px-2 py-1.5 rounded-md bg-brand-100 dark:bg-brand-800 text-[12px] font-medium text-brand-900 dark:text-brand-100">
+                  <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" /></svg>
+                  Open
+                </div>
+                <div class="flex items-center gap-2 px-2 py-1.5 text-[12px] text-brand-400 dark:text-brand-500">
+                  <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+                  Skills
+                </div>
+                <div class="flex items-center gap-2 px-2 py-1.5 text-[12px] text-brand-400 dark:text-brand-500">
+                  <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
+                  Schedule
+                </div>
+                <div class="flex items-center gap-2 px-2 py-1.5 text-[12px] text-brand-400 dark:text-brand-500">
+                  <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-2.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" /></svg>
+                  Queue
+                </div>
+              </div>
+              <div class="mt-6 pt-4 border-t border-brand-200/40 dark:border-brand-800/40">
+                <div class="text-[9px] font-semibold text-brand-300 dark:text-brand-600 uppercase tracking-widest px-2 mb-2">Integrations</div>
+                <div class="space-y-1.5 px-2">
+                  <div class="flex items-center gap-2 text-[11px] text-brand-400 dark:text-brand-500">
+                    <svg class="w-3.5 h-3.5 flex-shrink-0" viewBox="0 0 24 24"><path d="M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 010 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z" fill="#EA4335"/></svg>
+                    <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 flex-shrink-0"></span> Gmail
+                  </div>
+                  <div class="flex items-center gap-2 text-[11px] text-brand-400 dark:text-brand-500">
+                    <svg class="w-3.5 h-3.5 flex-shrink-0" viewBox="0 0 24 24"><path d="M18.164 7.93A3.502 3.502 0 0017.5 1a3.5 3.5 0 00-2.555 5.89L12.5 8.72V5.91A3.003 3.003 0 0012 0a3 3 0 00-.5 5.91v2.81l-2.445-1.83A3.5 3.5 0 006.5 1 3.502 3.502 0 005.836 7.93L3.5 9.68v4.64l2.336 1.75A3.502 3.502 0 006.5 23a3.5 3.5 0 002.555-5.89l2.445-1.83v2.81A3.003 3.003 0 0012 24a3 3 0 00.5-5.91v-2.81l2.445 1.83A3.5 3.5 0 0017.5 23a3.502 3.502 0 00.664-6.93L20.5 14.32V9.68l-2.336-1.75zM12 14.32L9.5 12 12 9.68 14.5 12 12 14.32z" fill="#FF7A59"/></svg>
+                    <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 flex-shrink-0"></span> HubSpot
+                  </div>
+                  <div class="flex items-center gap-2 text-[11px] text-brand-400 dark:text-brand-500">
+                    <svg class="w-3.5 h-3.5 flex-shrink-0" viewBox="0 0 24 24"><path d="M5.042 15.165a2.528 2.528 0 01-2.52 2.523A2.528 2.528 0 010 15.165a2.527 2.527 0 012.522-2.52h2.52v2.52zm1.271 0a2.527 2.527 0 012.521-2.52 2.527 2.527 0 012.521 2.52v6.313A2.528 2.528 0 018.834 24a2.528 2.528 0 01-2.521-2.522v-6.313z" fill="#E01E5A"/><path d="M8.834 5.042a2.528 2.528 0 01-2.521-2.52A2.528 2.528 0 018.834 0a2.528 2.528 0 012.521 2.522v2.52H8.834zm0 1.271a2.528 2.528 0 012.521 2.521 2.527 2.527 0 01-2.521 2.521H2.522A2.528 2.528 0 010 8.834a2.528 2.528 0 012.522-2.521h6.312z" fill="#36C5F0"/><path d="M18.956 8.834a2.528 2.528 0 012.522-2.521A2.528 2.528 0 0124 8.834a2.528 2.528 0 01-2.522 2.521h-2.522V8.834zm-1.27 0a2.528 2.528 0 01-2.523 2.521 2.527 2.527 0 01-2.52-2.521V2.522A2.527 2.527 0 0115.163 0a2.528 2.528 0 012.523 2.522v6.312z" fill="#2EB67D"/><path d="M15.163 18.956a2.528 2.528 0 012.523 2.522A2.528 2.528 0 0115.163 24a2.527 2.527 0 01-2.52-2.522v-2.522h2.52zm0-1.27a2.527 2.527 0 01-2.52-2.523 2.527 2.527 0 012.52-2.52h6.314A2.528 2.528 0 0124 15.163a2.528 2.528 0 01-2.523 2.523h-6.314z" fill="#ECB22E"/></svg>
+                    <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 flex-shrink-0"></span> Slack
+                  </div>
+                </div>
+              </div>
+            </div>
+            <!-- Chat mock — animated sequence -->
+            <div id="demo-chat" class="flex-1 flex flex-col p-4 sm:p-6">
+              <div class="flex-1 space-y-4">
+                <!-- User message — types in -->
+                <div id="demo-user" class="flex justify-end opacity-0 translate-y-2 transition-all duration-500">
+                  <div class="bg-brand-900 dark:bg-brand-700 rounded-2xl rounded-tr-sm px-3.5 py-2.5 text-[13px] max-w-[280px] text-white">
+                    <span id="demo-user-text"></span><span id="demo-cursor" class="inline-block w-[2px] h-[14px] bg-white/70 ml-0.5 align-middle animate-pulse"></span>
+                  </div>
+                </div>
+                <!-- Typing indicator -->
+                <div id="demo-typing" class="flex gap-3 items-start opacity-0 transition-all duration-300">
+                  <div class="w-6 h-6 rounded-full bg-brand-900 dark:bg-brand-100 flex-shrink-0 flex items-center justify-center">
+                    <img src="icon-transparent.png" alt="" class="w-4 h-4 brightness-100" />
+                  </div>
+                  <div class="bg-brand-100 dark:bg-brand-800 rounded-2xl rounded-tl-sm px-3.5 py-2.5">
+                    <div class="flex gap-1">
+                      <div class="w-1.5 h-1.5 rounded-full bg-brand-400 dark:bg-brand-500 animate-bounce" style="animation-delay:0ms"></div>
+                      <div class="w-1.5 h-1.5 rounded-full bg-brand-400 dark:bg-brand-500 animate-bounce" style="animation-delay:150ms"></div>
+                      <div class="w-1.5 h-1.5 rounded-full bg-brand-400 dark:bg-brand-500 animate-bounce" style="animation-delay:300ms"></div>
+                    </div>
+                  </div>
+                </div>
+                <!-- Agent response -->
+                <div id="demo-agent" class="flex gap-3 items-start opacity-0 translate-y-2 transition-all duration-500" style="display:none">
+                  <div class="w-6 h-6 rounded-full bg-brand-900 dark:bg-brand-100 flex-shrink-0 flex items-center justify-center">
+                    <img src="icon-transparent.png" alt="" class="w-4 h-4 brightness-100" />
+                  </div>
+                  <div class="space-y-2 max-w-[280px]">
+                    <div class="bg-brand-100 dark:bg-brand-800 rounded-2xl rounded-tl-sm px-3.5 py-2.5 text-[13px] text-brand-700 dark:text-brand-300">
+                      <span id="demo-agent-text"></span>
+                    </div>
+                    <div class="flex flex-wrap items-center gap-1.5 px-1">
+                      <div id="demo-badge1" class="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-brand-50 dark:bg-brand-900 border border-brand-200 dark:border-brand-800 text-[10px] text-brand-500 dark:text-brand-400 opacity-0 translate-y-1 transition-all duration-300">
+                        <svg class="w-2.5 h-2.5 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" /></svg>
+                        HubSpot: 4 contacts
+                      </div>
+                      <div id="demo-badge2" class="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-brand-50 dark:bg-brand-900 border border-brand-200 dark:border-brand-800 text-[10px] text-brand-500 dark:text-brand-400 opacity-0 translate-y-1 transition-all duration-300">
+                        <svg class="w-2.5 h-2.5 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" /></svg>
+                        Gmail: 4 drafts
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <!-- Input mock -->
+              <div class="mt-4 flex items-center gap-2 px-3 py-2.5 rounded-xl border border-brand-200 dark:border-brand-800 bg-brand-50/50 dark:bg-brand-900/50">
+                <svg class="w-4 h-4 text-brand-300 dark:text-brand-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 01-6.364-6.364l10.94-10.94A3 3 0 1119.5 7.372L8.552 18.32m.009-.01l-.01.01m5.699-9.941l-7.81 7.81a1.5 1.5 0 002.112 2.13" /></svg>
+                <span class="text-[13px] text-brand-300 dark:text-brand-600 flex-1">Ask Co-Agent anything&hellip;</span>
+                <svg class="w-4 h-4 text-brand-300 dark:text-brand-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" /></svg>
+                <div class="w-7 h-7 rounded-lg bg-brand-900 dark:bg-brand-100 flex items-center justify-center flex-shrink-0">
+                  <svg class="w-3.5 h-3.5 text-white dark:text-brand-900" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 19V5m0 0l-7 7m7-7l7 7" /></svg>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SOCIAL PROOF BAR -->
+    <section class="py-10 border-t border-b border-brand-100 dark:border-brand-900">
+      <div class="max-w-4xl mx-auto px-6">
+        <div class="flex flex-col sm:flex-row items-center justify-center gap-8 sm:gap-16 text-[13px] text-brand-400 dark:text-brand-500">
+          <div class="flex items-center gap-3">
+            <span class="text-[24px] font-bold text-brand-900 dark:text-brand-100">30+</span>
+            <span>integrations<br/>supported</span>
+          </div>
+          <div class="hidden sm:block w-px h-8 bg-brand-200 dark:bg-brand-800"></div>
+          <div class="flex items-center gap-3">
+            <span class="text-[24px] font-bold text-brand-900 dark:text-brand-100">24/7</span>
+            <span>autonomous<br/>operation</span>
+          </div>
+          <div class="hidden sm:block w-px h-8 bg-brand-200 dark:bg-brand-800"></div>
+          <div class="flex items-center gap-3">
+            <span class="text-[24px] font-bold text-brand-900 dark:text-brand-100">10x</span>
+            <span>faster than<br/>manual workflows</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- FEATURES -->
+    <section id="features" class="py-20 sm:py-28">
+      <div class="max-w-6xl mx-auto px-6">
+        <div class="text-center mb-16 reveal">
+          <p class="text-[12px] font-semibold text-brand-400 dark:text-brand-500 uppercase tracking-widest mb-3">How it works</p>
+          <h2 class="text-[clamp(1.5rem,3vw,2.25rem)] font-bold tracking-tight mb-4">Connect. Instruct. Automate.</h2>
+          <p class="text-[15px] text-brand-500 dark:text-brand-400 max-w-lg mx-auto">Co-Agent lives on your Mac and operates your business tools on your behalf &mdash; like having a virtual assistant that never sleeps.</p>
+        </div>
+
+        <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          <!-- Feature 1 -->
+          <div class="feature-card reveal rounded-2xl border border-brand-200 dark:border-brand-800 bg-white dark:bg-brand-900 p-6">
+            <div class="w-10 h-10 rounded-xl bg-brand-100 dark:bg-brand-800 flex items-center justify-center mb-4">
+              <svg class="w-5 h-5 text-brand-600 dark:text-brand-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
+              </svg>
+            </div>
+            <h3 class="text-[15px] font-semibold mb-2">Email Triage & Drafts</h3>
+            <p class="text-[13px] text-brand-500 dark:text-brand-400 leading-relaxed">Reads your inbox, flags what matters, and drafts replies in your tone. Handles follow-ups automatically.</p>
+          </div>
+
+          <!-- Feature 2 -->
+          <div class="feature-card reveal rounded-2xl border border-brand-200 dark:border-brand-800 bg-white dark:bg-brand-900 p-6">
+            <div class="w-10 h-10 rounded-xl bg-brand-100 dark:bg-brand-800 flex items-center justify-center mb-4">
+              <svg class="w-5 h-5 text-brand-600 dark:text-brand-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M18 18.72a9.094 9.094 0 003.741-.479 3 3 0 00-4.682-2.72m.94 3.198l.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0112 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 016 18.719m12 0a5.971 5.971 0 00-.941-3.197m0 0A5.995 5.995 0 0012 12.75a5.995 5.995 0 00-5.058 2.772m0 0a3 3 0 00-4.681 2.72 8.986 8.986 0 003.74.477m.94-3.197a5.971 5.971 0 00-.94 3.197M15 6.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z" />
+              </svg>
+            </div>
+            <h3 class="text-[15px] font-semibold mb-2">CRM Automation</h3>
+            <p class="text-[13px] text-brand-500 dark:text-brand-400 leading-relaxed">Updates your CRM contacts, logs interactions, and moves deals through your pipeline automatically. Works with HubSpot, Salesforce, and more.</p>
+          </div>
+
+          <!-- Feature 3 -->
+          <div class="feature-card reveal rounded-2xl border border-brand-200 dark:border-brand-800 bg-white dark:bg-brand-900 p-6">
+            <div class="w-10 h-10 rounded-xl bg-brand-100 dark:bg-brand-800 flex items-center justify-center mb-4">
+              <svg class="w-5 h-5 text-brand-600 dark:text-brand-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 012.25-2.25h13.5A2.25 2.25 0 0121 7.5v11.25m-18 0A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75m-18 0v-7.5A2.25 2.25 0 015.25 9h13.5A2.25 2.25 0 0121 11.25v7.5" />
+              </svg>
+            </div>
+            <h3 class="text-[15px] font-semibold mb-2">Smart Scheduling</h3>
+            <p class="text-[13px] text-brand-500 dark:text-brand-400 leading-relaxed">Manages your calendar, proposes meeting times, and blocks focus hours. Works across Google Calendar and iCal.</p>
+          </div>
+
+          <!-- Feature 4 -->
+          <div class="feature-card reveal rounded-2xl border border-brand-200 dark:border-brand-800 bg-white dark:bg-brand-900 p-6">
+            <div class="w-10 h-10 rounded-xl bg-brand-100 dark:bg-brand-800 flex items-center justify-center mb-4">
+              <svg class="w-5 h-5 text-brand-600 dark:text-brand-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 0v3.75m-16.5-3.75v3.75m16.5 0v3.75C20.25 16.153 16.556 18 12 18s-8.25-1.847-8.25-4.125v-3.75m16.5 0c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125" />
+              </svg>
+            </div>
+            <h3 class="text-[15px] font-semibold mb-2">Intelligent Persistent Memory</h3>
+            <p class="text-[13px] text-brand-500 dark:text-brand-400 leading-relaxed">Remembers your clients, preferences, and context across every conversation. Gets smarter the more you use it.</p>
+          </div>
+
+          <!-- Feature 5 -->
+          <div class="feature-card reveal rounded-2xl border border-brand-200 dark:border-brand-800 bg-white dark:bg-brand-900 p-6">
+            <div class="w-10 h-10 rounded-xl bg-brand-100 dark:bg-brand-800 flex items-center justify-center mb-4">
+              <svg class="w-5 h-5 text-brand-600 dark:text-brand-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+              </svg>
+            </div>
+            <h3 class="text-[15px] font-semibold mb-2">Document Generation</h3>
+            <p class="text-[13px] text-brand-500 dark:text-brand-400 leading-relaxed">Creates proposals, reports, and client deliverables from conversation. Export to PDF with your branding.</p>
+          </div>
+
+          <!-- Feature 6 -->
+          <div class="feature-card reveal rounded-2xl border border-brand-200 dark:border-brand-800 bg-white dark:bg-brand-900 p-6">
+            <div class="w-10 h-10 rounded-xl bg-brand-100 dark:bg-brand-800 flex items-center justify-center mb-4">
+              <svg class="w-5 h-5 text-brand-600 dark:text-brand-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
+              </svg>
+            </div>
+            <h3 class="text-[15px] font-semibold mb-2">Privacy First</h3>
+            <p class="text-[13px] text-brand-500 dark:text-brand-400 leading-relaxed">Runs locally on your Mac. Your data never leaves your machine. No cloud storage, no third-party access.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- INTEGRATIONS — Scrolling marquee -->
+    <section id="integrations" class="py-16 sm:py-20 bg-brand-50 dark:bg-brand-900/50 border-t border-b border-brand-100 dark:border-brand-900 overflow-hidden">
+      <div class="max-w-4xl mx-auto px-6 text-center mb-10">
+        <div class="reveal">
+          <p class="text-[12px] font-semibold text-brand-400 dark:text-brand-500 uppercase tracking-widest mb-3">Integrations</p>
+          <h2 class="text-[clamp(1.5rem,3vw,2.25rem)] font-bold tracking-tight mb-4">Works with your tools</h2>
+          <p class="text-[15px] text-brand-500 dark:text-brand-400 max-w-lg mx-auto">One-click connections to the apps you already use. Co-Agent acts on your behalf &mdash; reading, writing, and updating in real time.</p>
+        </div>
+      </div>
+
+      <!-- Marquee track — duplicated for seamless loop -->
+      <div class="relative overflow-hidden">
+        <div class="absolute left-0 top-0 bottom-0 w-24 bg-gradient-to-r from-brand-50 dark:from-brand-950 to-transparent z-10"></div>
+        <div class="absolute right-0 top-0 bottom-0 w-24 bg-gradient-to-l from-brand-50 dark:from-brand-950 to-transparent z-10"></div>
+        <div class="marquee-track py-4">
+          <!-- Set 1 -->
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 010 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z" fill="#EA4335"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Gmail</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M18.164 7.93A3.502 3.502 0 0017.5 1a3.5 3.5 0 00-2.555 5.89L12.5 8.72V5.91A3.003 3.003 0 0012 0a3 3 0 00-.5 5.91v2.81l-2.445-1.83A3.5 3.5 0 006.5 1 3.502 3.502 0 005.836 7.93L3.5 9.68v4.64l2.336 1.75A3.502 3.502 0 006.5 23a3.5 3.5 0 002.555-5.89l2.445-1.83v2.81A3.003 3.003 0 0012 24a3 3 0 00.5-5.91v-2.81l2.445 1.83A3.5 3.5 0 0017.5 23a3.502 3.502 0 00.664-6.93L20.5 14.32V9.68l-2.336-1.75zM12 14.32L9.5 12 12 9.68 14.5 12 12 14.32z" fill="#FF7A59"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">HubSpot</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M5.042 15.165a2.528 2.528 0 01-2.52 2.523A2.528 2.528 0 010 15.165a2.527 2.527 0 012.522-2.52h2.52v2.52zm1.271 0a2.527 2.527 0 012.521-2.52 2.527 2.527 0 012.521 2.52v6.313A2.528 2.528 0 018.834 24a2.528 2.528 0 01-2.521-2.522v-6.313z" fill="#E01E5A"/><path d="M8.834 5.042a2.528 2.528 0 01-2.521-2.52A2.528 2.528 0 018.834 0a2.528 2.528 0 012.521 2.522v2.52H8.834zm0 1.271a2.528 2.528 0 012.521 2.521 2.527 2.527 0 01-2.521 2.521H2.522A2.528 2.528 0 010 8.834a2.528 2.528 0 012.522-2.521h6.312z" fill="#36C5F0"/><path d="M18.956 8.834a2.528 2.528 0 012.522-2.521A2.528 2.528 0 0124 8.834a2.528 2.528 0 01-2.522 2.521h-2.522V8.834zm-1.27 0a2.528 2.528 0 01-2.523 2.521 2.527 2.527 0 01-2.52-2.521V2.522A2.527 2.527 0 0115.163 0a2.528 2.528 0 012.523 2.522v6.312z" fill="#2EB67D"/><path d="M15.163 18.956a2.528 2.528 0 012.523 2.522A2.528 2.528 0 0115.163 24a2.527 2.527 0 01-2.52-2.522v-2.522h2.52zm0-1.27a2.527 2.527 0 01-2.52-2.523 2.527 2.527 0 012.52-2.52h6.314A2.528 2.528 0 0124 15.163a2.528 2.528 0 01-2.523 2.523h-6.314z" fill="#ECB22E"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Slack</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M18.316 5.684H24v12.632h-5.684V5.684z" fill="#188038"/><path d="M5.684 5.684H0v12.632h5.684V5.684z" fill="#EA4335"/><path d="M18.316 5.684H5.684v12.632h12.632V5.684z" fill="#FBBC04"/><path d="M5.684 5.684V0h12.632v5.684H5.684z" fill="#4285F4"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Google Calendar</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M13.976 9.15c-2.172-.806-3.356-1.426-3.356-2.409 0-.831.683-1.305 1.901-1.305 2.227 0 4.515.858 6.09 1.631l.89-5.494C18.252.975 15.697 0 12.165 0 9.667 0 7.589.654 6.104 1.872 4.56 3.147 3.757 4.992 3.757 7.218c0 4.039 2.467 5.76 6.476 7.219 2.585.92 3.445 1.574 3.445 2.583 0 .98-.84 1.545-2.354 1.545-1.875 0-4.965-.921-6.99-2.109l-.9 5.555C5.175 22.99 8.385 24 11.714 24c2.641 0 4.843-.624 6.328-1.813 1.664-1.305 2.525-3.236 2.525-5.732 0-4.128-2.524-5.851-6.594-7.305h.003z" fill="#635BFF"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Stripe</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M6.915 4.03c-1.968 0-3.402 1.233-4.267 2.98C1.58 8.923.78 11.46.78 12s.8 3.077 1.868 4.99c.865 1.747 2.3 2.98 4.267 2.98 1.218 0 2.175-.363 2.986-1.07.892-.779 1.628-1.989 2.399-3.63l.468-.998.468.998c.771 1.641 1.507 2.851 2.4 3.63.81.707 1.767 1.07 2.985 1.07 1.968 0 3.402-1.233 4.267-2.98C23.956 15.077 24.756 12.54 24.756 12s-.8-3.077-1.868-4.99c-.865-1.747-2.3-2.98-4.267-2.98-1.218 0-2.175.363-2.985 1.07-.893.779-1.629 1.989-2.4 3.63L12.77 9.728l-.468-.998c-.771-1.641-1.507-2.851-2.4-3.63-.81-.707-1.768-1.07-2.986-1.07z" fill="#0081FB"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Meta Ads</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M3.2 14.84L9.76 3.44a3.58 3.58 0 016.16 3.64L9.36 18.48a3.58 3.58 0 01-6.16-3.64z" fill="#FBBC04"/><path d="M20.8 14.84L14.24 3.44a3.58 3.58 0 00-6.16 3.64l6.56 11.4a3.58 3.58 0 006.16-3.64z" fill="#4285F4"/><circle cx="3.58" cy="18.48" r="3.58" fill="#34A853"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Google Ads</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z" fill="#0A66C2"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">LinkedIn</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5 text-brand-900 dark:text-brand-100" viewBox="0 0 36 36"><path d="M24.347 10.44L34.785 15.19c2.283-3.119.93-7.101-3.028-8.905L17.95 0 4.138 6.286C.18 8.083-1.174 12.071 1.11 15.19l10.271-4.672L17.944 7.542l6.397 2.899z" fill="currentColor"/><path d="M24.347 20.847L34.785 25.597c2.283-3.119.93-7.101-3.028-8.905L17.95 10.406 4.138 16.692c-3.958 1.798-5.312 5.786-3.029 8.905l10.271-4.673L17.944 17.948l6.397 2.899z" fill="currentColor"/><path d="M24.347 31.249L34.785 36c2.283-3.12.93-7.101-3.028-8.906L17.95 20.809 4.143 27.094c-3.958 1.804-5.318 5.786-3.034 8.905l10.271-4.673L17.944 28.35l6.397 2.899z" fill="currentColor"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Follow Up Boss</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M9.517 3.31h4.966v6.621h3.31L12 16.552 6.207 9.931h3.31V3.31zM0 19.034h24v1.655H0v-1.655z" fill="#4C00FF"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">DocuSign</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M12.01 1.485c-2.082 0-3.754.02-3.743.047.01.02 1.708 3.001 3.774 6.62l3.76 6.574h3.76c2.081 0 3.753-.02 3.742-.047-.005-.02-1.708-3.001-3.775-6.62l-3.76-6.574zm-4.76 1.73a789.828 789.861 0 0 0-3.63 6.319L0 15.868l1.89 3.298 1.885 3.297 3.62-6.335 3.618-6.33-1.88-3.287C8.1 4.704 7.255 3.22 7.25 3.214zm2.259 12.653-.203.348c-.114.198-.96 1.672-1.88 3.287a423.93 423.948 0 0 1-1.698 2.97c-.01.026 3.24.042 7.222.042h7.244l1.796-3.157c.992-1.734 1.85-3.23 1.906-3.323l.104-.167h-7.249z" fill="#4285F4"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Google Drive</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M14.185 0c-1.702.008-3.693.467-6.068 1.331C.115 4.244-1.581 7.881 1.33 15.883c2.912 8.002 6.55 9.698 14.552 6.786 8.002-2.913 9.699-6.55 6.786-14.552C20.62 2.491 18.214-.018 14.185 0z" fill="#9187FF"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Fathom</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M22.84 2.998v18c.009 1.647-1.32 2.99-2.967 2.998a2.98 2.98 0 01-.368-.02c-1.528-.227-2.648-1.556-2.61-3.1V3.12c-.037-1.546 1.085-2.876 2.615-3.1 1.636-.192 3.118.98 3.31 2.616.014.12.02.24.02.362zM4.133 18.055c-1.642 0-2.973 1.33-2.973 2.972S2.491 24 4.133 24s2.972-1.331 2.972-2.973-1.33-2.972-2.972-2.972zm7.873-9.01c-.017 0-.034 0-.051.001-1.65.09-2.93 1.474-2.891 3.125v7.985c0 2.167.953 3.482 2.35 3.763 1.612.327 3.184-.715 3.51-2.327.04-.197.06-.398.06-.6V9.034c.003-1.647-1.33-2.985-2.978-2.988z" fill="#E37400"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Google Analytics</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M10.006 5.415a4.195 4.195 0 013.045-1.306c1.56 0 2.954.9 3.69 2.205.63-.3 1.35-.45 2.1-.45 2.85 0 5.159 2.34 5.159 5.22s-2.31 5.22-5.176 5.22c-.345 0-.69-.044-1.02-.104a3.75 3.75 0 01-3.3 1.95c-.6 0-1.155-.15-1.65-.375A4.314 4.314 0 018.88 20.4a4.302 4.302 0 01-4.05-2.82c-.27.062-.54.076-.825.076-2.204 0-4.005-1.8-4.005-4.05 0-1.5.811-2.805 2.01-3.51-.255-.57-.39-1.2-.39-1.846 0-2.58 2.1-4.65 4.65-4.65 1.53 0 2.85.705 3.72 1.8" fill="#00A1E0"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Salesforce</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M19.655 14.262c.281 0 .557.023.828.064 0 .005-.005.01-.005.014-.105.267-.234.534-.381.786l-1.219 2.106c-1.112 1.936-3.177 3.127-5.411 3.127h-2.432c-2.23 0-4.294-1.191-5.412-3.127l-1.218-2.106a6.251 6.251 0 0 1 0-6.252l1.218-2.106C6.736 4.832 8.8 3.641 11.035 3.641h2.432c2.23 0 4.294 1.191 5.411 3.127l1.219 2.106c.147.252.271.519.381.786 0 .004.005.009.005.014-.267.041-.543.064-.828.064-1.816 0-2.501-.607-3.291-1.306-.764-.676-1.711-1.517-3.44-1.517h-1.029c-1.251 0-2.387.455-3.2 1.278-.796.805-1.233 1.904-1.233 3.099v1.411c0 1.196.437 2.295 1.233 3.099.813.823 1.949 1.278 3.2 1.278h1.034c1.729 0 2.676-.841 3.439-1.517.791-.703 1.471-1.306 3.287-1.301Zm.005-3.237c.399 0 .794-.036 1.179-.11-.002-.004-.002-.01-.002-.014-.073-.414-.193-.823-.349-1.218.731-.12 1.407-.396 1.986-.819 0-.004-.005-.013-.005-.018-.331-1.085-.832-2.101-1.489-3.03-.649-.915-1.435-1.719-2.331-2.395-1.867-1.398-4.088-2.138-6.428-2.138-1.448 0-2.855.28-4.175.841-1.273.543-2.423 1.315-3.407 2.299S2.878 6.552 2.341 7.83c-.557 1.324-.842 2.726-.842 4.175 0 1.448.281 2.855.842 4.174.542 1.274 1.314 2.423 2.298 3.407s2.129 1.761 3.407 2.299c1.324.556 2.727.841 4.175.841 2.34 0 4.561-.74 6.428-2.137a10.815 10.815 0 0 0 2.331-2.396c.652-.929 1.158-1.949 1.489-3.03 0-.004.005-.014.005-.018-.579-.423-1.255-.699-1.986-.819.161-.395.276-.804.349-1.218.005-.009.005-.014.005-.023.869.166 1.692.506 2.404 1.035.685.505.552 1.075.446 1.416C22.184 20.437 17.619 24 12.221 24c-6.625 0-12-5.375-12-12s5.37-12 12-12c5.398 0 9.963 3.563 11.471 8.464.106.341.239.915-.446 1.421-.717.529-1.535.873-2.404 1.034.128.716.128 1.45 0 2.166-.387-.074-.782-.11-1.182-.11-4.184 0-3.968 2.823-6.736 2.823h-1.029c-1.899 0-3.15-1.357-3.15-3.095v-1.411c0-1.738 1.251-3.094 3.15-3.094h1.034c2.768 0 2.552 2.823 6.731 2.827Z" fill="#006BFF"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Calendly</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5 text-brand-800 dark:text-brand-200" viewBox="0 0 24 24"><path d="M4.459 4.208c.746.606 1.026.56 2.428.466l13.215-.793c.28 0 .047-.28-.046-.326L17.86 1.968c-.42-.326-.981-.7-2.055-.607L3.01 2.295c-.466.046-.56.28-.374.466zm.793 3.08v13.904c0 .747.373 1.027 1.214.98l14.523-.84c.841-.046.935-.56.935-1.167V6.354c0-.606-.233-.933-.748-.887l-15.177.887c-.56.047-.747.327-.747.933zm14.337.745c.093.42 0 .84-.42.888l-.7.14v10.264c-.608.327-1.168.514-1.635.514-.748 0-.935-.234-1.495-.933l-4.577-7.186v6.952L12.21 19s0 .84-1.168.84l-3.222.186c-.093-.186 0-.653.327-.746l.84-.233V9.854L7.822 9.76c-.094-.42.14-1.026.793-1.073l3.456-.233 4.764 7.279v-6.44l-1.215-.139c-.093-.514.28-.887.747-.933zM1.936 1.035l13.31-.98c1.634-.14 2.055-.047 3.082.7l4.249 2.986c.7.513.934.653.934 1.213v16.378c0 1.026-.373 1.634-1.68 1.726l-15.458.934c-.98.047-1.448-.093-1.962-.747l-3.129-4.06c-.56-.747-.793-1.306-.793-1.96V2.667c0-.839.374-1.54 1.447-1.632z" fill="currentColor"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Notion</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M12 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0zm.642 4.1335c.9554 0 1.7296.776 1.7296 1.7332v9.0667h1.6c1.614 0 2.9275-1.3156 2.9275-2.933 0-1.6173-1.3136-2.9333-2.9276-2.9333h-.6654V7.3334h.6654c2.5722 0 4.6577 2.0897 4.6577 4.667 0 2.5774-2.0855 4.6666-4.6577 4.6666H12.642zM7.9837 7.333h3.3291v12.533c-.9555 0-1.73-.7759-1.73-1.7332V9.0662H7.9837c-1.6146 0-2.9277 1.316-2.9277 2.9334 0 1.6175 1.3131 2.9333 2.9277 2.9333h.6654v1.7332h-.6654c-2.5725 0-4.6577-2.0892-4.6577-4.6665 0-2.5771 2.0852-4.6666 4.6577-4.6666Z" fill="#2CA01C"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">QuickBooks</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M14.728 0v6h6l-6-6zm1.363 10.636h-3.41v1.91h3.41v-1.91zm0 3.273h-3.41v1.91h3.41v-1.91zM20.727 6.5v15.864c0 .904-.732 1.636-1.636 1.636H4.909a1.636 1.636 0 0 1-1.636-1.636V1.636C3.273.732 4.005 0 4.909 0h9.318v6.5h6.5zm-3.273 2.773H6.545v7.909h10.91v-7.91zm-6.136 4.636H7.91v1.91h3.41v-1.91zm0-3.273H7.91v1.91h3.41v-1.91z" fill="#34A853"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Google Sheets</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M21.147 0H2.853A2.86 2.86 0 000 2.853v18.294A2.86 2.86 0 002.853 24h18.294A2.86 2.86 0 0024 21.147V2.853A2.86 2.86 0 0021.147 0zM10.34 17.287a.953.953 0 01-.953.953h-4a.954.954 0 01-.954-.953V5.38a.953.953 0 01.954-.953h4a.954.954 0 01.953.953zm9.233-5.467a.944.944 0 01-.953.947h-4a.947.947 0 01-.953-.947V5.38a.953.953 0 01.953-.953h4a.954.954 0 01.953.953z" fill="#0052CC"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Trello</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M18.78 12.653c-2.882 0-5.22 2.336-5.22 5.22s2.338 5.22 5.22 5.22 5.22-2.34 5.22-5.22-2.336-5.22-5.22-5.22zm-13.56 0c-2.88 0-5.22 2.337-5.22 5.22s2.338 5.22 5.22 5.22 5.22-2.338 5.22-5.22-2.336-5.22-5.22-5.22zm12-6.525c0 2.883-2.337 5.22-5.22 5.22-2.882 0-5.22-2.337-5.22-5.22 0-2.88 2.338-5.22 5.22-5.22 2.883 0 5.22 2.34 5.22 5.22z" fill="#F06A6A"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Asana</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M15.337 23.979l7.216-1.561s-2.604-17.613-2.625-17.73c-.018-.116-.114-.192-.211-.192s-1.929-.136-1.929-.136-1.275-1.274-1.439-1.411c-.045-.037-.075-.057-.121-.074l-.914 21.104h.023zM11.71 11.305s-.81-.424-1.774-.424c-1.447 0-1.504.906-1.504 1.141 0 1.232 3.24 1.715 3.24 4.629 0 2.295-1.44 3.76-3.406 3.76-2.354 0-3.54-1.465-3.54-1.465l.646-2.086s1.245 1.066 2.28 1.066c.675 0 .975-.545.975-.932 0-1.619-2.654-1.694-2.654-4.359-.034-2.237 1.571-4.416 4.827-4.416 1.257 0 1.875.361 1.875.361l-.945 2.715-.02.01zM11.17.83c.136 0 .271.038.405.135-.984.465-2.064 1.639-2.508 3.992-.656.213-1.293.405-1.889.578C7.697 3.75 8.951.84 11.17.84V.83zm1.235 2.949v.135c-.754.232-1.583.484-2.394.736.466-1.777 1.333-2.645 2.085-2.971.193.501.309 1.176.309 2.1zm.539-2.234c.694.074 1.141.867 1.429 1.755-.349.114-.735.231-1.158.366v-.252c0-.752-.096-1.371-.271-1.871v.002zm2.992 1.289c-.02 0-.06.021-.078.021s-.289.075-.714.21c-.423-1.233-1.176-2.37-2.508-2.37h-.115C12.135.209 11.669 0 11.265 0 8.159 0 6.675 3.877 6.21 5.846c-1.194.365-2.063.636-2.16.674-.675.213-.694.232-.772.87-.075.462-1.83 14.063-1.83 14.063L15.009 24l.927-21.166z" fill="#7AB55C"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Shopify</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 38 30"><g transform="translate(-104.85,-67.3)"><path d="M123.117 82.954c-.909.262-1.911.266-2.849.226-1.09-.046-2.245-.184-3.252-.631-.828-.368-1.492-1.032-1.145-1.992.246-.676.789-1.281 1.417-1.621.707-.384 1.483-.321 2.19.025.793.389 1.453 1.022 2.051 1.66.314.335.613.682.909 1.033.136.162 1.06 1.084.679 1.3zm15.113.33c-1.398-.326-3.05-.209-4.452-.433-2.208-.353-5.497-2.928-7.28-5.545-1.239-1.818-1.83-3.67-2.777-5.927-.661-1.575-2.103-6.558-4.118-4.226-.83.961-1.759 4.122-2.438 4.078-.503.117-.585-.863-.744-1.282-.288-.76-.442-1.64-.829-2.357-.309-.573-.715-1.26-1.337-1.538-1.108-.57-2.444 1.148-3.107 3.184-.284 1.092-2.189 3.209-3.019 3.721-3.776 2.33-11.355 4.785-12.128 12.96-.004.033 0 .136.128.044.904-.655 11.156-8.039 4.576 6.235-4.03 8.744 15.431 14.313 16.432 14.335.135.004.125-.057.129-.097 1.553-13.958 16.896-12.489 20.469-15.831 3.541-3.312 3.613-6.518.495-7.32z" fill="#FA5320"/></g></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Hunter</span></div>
+          <!-- Set 2 (duplicate for seamless loop) -->
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 010 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z" fill="#EA4335"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Gmail</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M18.164 7.93A3.502 3.502 0 0017.5 1a3.5 3.5 0 00-2.555 5.89L12.5 8.72V5.91A3.003 3.003 0 0012 0a3 3 0 00-.5 5.91v2.81l-2.445-1.83A3.5 3.5 0 006.5 1 3.502 3.502 0 005.836 7.93L3.5 9.68v4.64l2.336 1.75A3.502 3.502 0 006.5 23a3.5 3.5 0 002.555-5.89l2.445-1.83v2.81A3.003 3.003 0 0012 24a3 3 0 00.5-5.91v-2.81l2.445 1.83A3.5 3.5 0 0017.5 23a3.502 3.502 0 00.664-6.93L20.5 14.32V9.68l-2.336-1.75zM12 14.32L9.5 12 12 9.68 14.5 12 12 14.32z" fill="#FF7A59"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">HubSpot</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M5.042 15.165a2.528 2.528 0 01-2.52 2.523A2.528 2.528 0 010 15.165a2.527 2.527 0 012.522-2.52h2.52v2.52zm1.271 0a2.527 2.527 0 012.521-2.52 2.527 2.527 0 012.521 2.52v6.313A2.528 2.528 0 018.834 24a2.528 2.528 0 01-2.521-2.522v-6.313z" fill="#E01E5A"/><path d="M8.834 5.042a2.528 2.528 0 01-2.521-2.52A2.528 2.528 0 018.834 0a2.528 2.528 0 012.521 2.522v2.52H8.834zm0 1.271a2.528 2.528 0 012.521 2.521 2.527 2.527 0 01-2.521 2.521H2.522A2.528 2.528 0 010 8.834a2.528 2.528 0 012.522-2.521h6.312z" fill="#36C5F0"/><path d="M18.956 8.834a2.528 2.528 0 012.522-2.521A2.528 2.528 0 0124 8.834a2.528 2.528 0 01-2.522 2.521h-2.522V8.834zm-1.27 0a2.528 2.528 0 01-2.523 2.521 2.527 2.527 0 01-2.52-2.521V2.522A2.527 2.527 0 0115.163 0a2.528 2.528 0 012.523 2.522v6.312z" fill="#2EB67D"/><path d="M15.163 18.956a2.528 2.528 0 012.523 2.522A2.528 2.528 0 0115.163 24a2.527 2.527 0 01-2.52-2.522v-2.522h2.52zm0-1.27a2.527 2.527 0 01-2.52-2.523 2.527 2.527 0 012.52-2.52h6.314A2.528 2.528 0 0124 15.163a2.528 2.528 0 01-2.523 2.523h-6.314z" fill="#ECB22E"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Slack</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M18.316 5.684H24v12.632h-5.684V5.684z" fill="#188038"/><path d="M5.684 5.684H0v12.632h5.684V5.684z" fill="#EA4335"/><path d="M18.316 5.684H5.684v12.632h12.632V5.684z" fill="#FBBC04"/><path d="M5.684 5.684V0h12.632v5.684H5.684z" fill="#4285F4"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Google Calendar</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M13.976 9.15c-2.172-.806-3.356-1.426-3.356-2.409 0-.831.683-1.305 1.901-1.305 2.227 0 4.515.858 6.09 1.631l.89-5.494C18.252.975 15.697 0 12.165 0 9.667 0 7.589.654 6.104 1.872 4.56 3.147 3.757 4.992 3.757 7.218c0 4.039 2.467 5.76 6.476 7.219 2.585.92 3.445 1.574 3.445 2.583 0 .98-.84 1.545-2.354 1.545-1.875 0-4.965-.921-6.99-2.109l-.9 5.555C5.175 22.99 8.385 24 11.714 24c2.641 0 4.843-.624 6.328-1.813 1.664-1.305 2.525-3.236 2.525-5.732 0-4.128-2.524-5.851-6.594-7.305h.003z" fill="#635BFF"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Stripe</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M6.915 4.03c-1.968 0-3.402 1.233-4.267 2.98C1.58 8.923.78 11.46.78 12s.8 3.077 1.868 4.99c.865 1.747 2.3 2.98 4.267 2.98 1.218 0 2.175-.363 2.986-1.07.892-.779 1.628-1.989 2.399-3.63l.468-.998.468.998c.771 1.641 1.507 2.851 2.4 3.63.81.707 1.767 1.07 2.985 1.07 1.968 0 3.402-1.233 4.267-2.98C23.956 15.077 24.756 12.54 24.756 12s-.8-3.077-1.868-4.99c-.865-1.747-2.3-2.98-4.267-2.98-1.218 0-2.175.363-2.985 1.07-.893.779-1.629 1.989-2.4 3.63L12.77 9.728l-.468-.998c-.771-1.641-1.507-2.851-2.4-3.63-.81-.707-1.768-1.07-2.986-1.07z" fill="#0081FB"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Meta Ads</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M3.2 14.84L9.76 3.44a3.58 3.58 0 016.16 3.64L9.36 18.48a3.58 3.58 0 01-6.16-3.64z" fill="#FBBC04"/><path d="M20.8 14.84L14.24 3.44a3.58 3.58 0 00-6.16 3.64l6.56 11.4a3.58 3.58 0 006.16-3.64z" fill="#4285F4"/><circle cx="3.58" cy="18.48" r="3.58" fill="#34A853"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Google Ads</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z" fill="#0A66C2"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">LinkedIn</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5 text-brand-900 dark:text-brand-100" viewBox="0 0 36 36"><path d="M24.347 10.44L34.785 15.19c2.283-3.119.93-7.101-3.028-8.905L17.95 0 4.138 6.286C.18 8.083-1.174 12.071 1.11 15.19l10.271-4.672L17.944 7.542l6.397 2.899z" fill="currentColor"/><path d="M24.347 20.847L34.785 25.597c2.283-3.119.93-7.101-3.028-8.905L17.95 10.406 4.138 16.692c-3.958 1.798-5.312 5.786-3.029 8.905l10.271-4.673L17.944 17.948l6.397 2.899z" fill="currentColor"/><path d="M24.347 31.249L34.785 36c2.283-3.12.93-7.101-3.028-8.906L17.95 20.809 4.143 27.094c-3.958 1.804-5.318 5.786-3.034 8.905l10.271-4.673L17.944 28.35l6.397 2.899z" fill="currentColor"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Follow Up Boss</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M9.517 3.31h4.966v6.621h3.31L12 16.552 6.207 9.931h3.31V3.31zM0 19.034h24v1.655H0v-1.655z" fill="#4C00FF"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">DocuSign</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M12.01 1.485c-2.082 0-3.754.02-3.743.047.01.02 1.708 3.001 3.774 6.62l3.76 6.574h3.76c2.081 0 3.753-.02 3.742-.047-.005-.02-1.708-3.001-3.775-6.62l-3.76-6.574zm-4.76 1.73a789.828 789.861 0 0 0-3.63 6.319L0 15.868l1.89 3.298 1.885 3.297 3.62-6.335 3.618-6.33-1.88-3.287C8.1 4.704 7.255 3.22 7.25 3.214zm2.259 12.653-.203.348c-.114.198-.96 1.672-1.88 3.287a423.93 423.948 0 0 1-1.698 2.97c-.01.026 3.24.042 7.222.042h7.244l1.796-3.157c.992-1.734 1.85-3.23 1.906-3.323l.104-.167h-7.249z" fill="#4285F4"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Google Drive</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M14.185 0c-1.702.008-3.693.467-6.068 1.331C.115 4.244-1.581 7.881 1.33 15.883c2.912 8.002 6.55 9.698 14.552 6.786 8.002-2.913 9.699-6.55 6.786-14.552C20.62 2.491 18.214-.018 14.185 0z" fill="#9187FF"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Fathom</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M22.84 2.998v18c.009 1.647-1.32 2.99-2.967 2.998a2.98 2.98 0 01-.368-.02c-1.528-.227-2.648-1.556-2.61-3.1V3.12c-.037-1.546 1.085-2.876 2.615-3.1 1.636-.192 3.118.98 3.31 2.616.014.12.02.24.02.362zM4.133 18.055c-1.642 0-2.973 1.33-2.973 2.972S2.491 24 4.133 24s2.972-1.331 2.972-2.973-1.33-2.972-2.972-2.972zm7.873-9.01c-.017 0-.034 0-.051.001-1.65.09-2.93 1.474-2.891 3.125v7.985c0 2.167.953 3.482 2.35 3.763 1.612.327 3.184-.715 3.51-2.327.04-.197.06-.398.06-.6V9.034c.003-1.647-1.33-2.985-2.978-2.988z" fill="#E37400"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Google Analytics</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M10.006 5.415a4.195 4.195 0 013.045-1.306c1.56 0 2.954.9 3.69 2.205.63-.3 1.35-.45 2.1-.45 2.85 0 5.159 2.34 5.159 5.22s-2.31 5.22-5.176 5.22c-.345 0-.69-.044-1.02-.104a3.75 3.75 0 01-3.3 1.95c-.6 0-1.155-.15-1.65-.375A4.314 4.314 0 018.88 20.4a4.302 4.302 0 01-4.05-2.82c-.27.062-.54.076-.825.076-2.204 0-4.005-1.8-4.005-4.05 0-1.5.811-2.805 2.01-3.51-.255-.57-.39-1.2-.39-1.846 0-2.58 2.1-4.65 4.65-4.65 1.53 0 2.85.705 3.72 1.8" fill="#00A1E0"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Salesforce</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M19.655 14.262c.281 0 .557.023.828.064 0 .005-.005.01-.005.014-.105.267-.234.534-.381.786l-1.219 2.106c-1.112 1.936-3.177 3.127-5.411 3.127h-2.432c-2.23 0-4.294-1.191-5.412-3.127l-1.218-2.106a6.251 6.251 0 0 1 0-6.252l1.218-2.106C6.736 4.832 8.8 3.641 11.035 3.641h2.432c2.23 0 4.294 1.191 5.411 3.127l1.219 2.106c.147.252.271.519.381.786 0 .004.005.009.005.014-.267.041-.543.064-.828.064-1.816 0-2.501-.607-3.291-1.306-.764-.676-1.711-1.517-3.44-1.517h-1.029c-1.251 0-2.387.455-3.2 1.278-.796.805-1.233 1.904-1.233 3.099v1.411c0 1.196.437 2.295 1.233 3.099.813.823 1.949 1.278 3.2 1.278h1.034c1.729 0 2.676-.841 3.439-1.517.791-.703 1.471-1.306 3.287-1.301Zm.005-3.237c.399 0 .794-.036 1.179-.11-.002-.004-.002-.01-.002-.014-.073-.414-.193-.823-.349-1.218.731-.12 1.407-.396 1.986-.819 0-.004-.005-.013-.005-.018-.331-1.085-.832-2.101-1.489-3.03-.649-.915-1.435-1.719-2.331-2.395-1.867-1.398-4.088-2.138-6.428-2.138-1.448 0-2.855.28-4.175.841-1.273.543-2.423 1.315-3.407 2.299S2.878 6.552 2.341 7.83c-.557 1.324-.842 2.726-.842 4.175 0 1.448.281 2.855.842 4.174.542 1.274 1.314 2.423 2.298 3.407s2.129 1.761 3.407 2.299c1.324.556 2.727.841 4.175.841 2.34 0 4.561-.74 6.428-2.137a10.815 10.815 0 0 0 2.331-2.396c.652-.929 1.158-1.949 1.489-3.03 0-.004.005-.014.005-.018-.579-.423-1.255-.699-1.986-.819.161-.395.276-.804.349-1.218.005-.009.005-.014.005-.023.869.166 1.692.506 2.404 1.035.685.505.552 1.075.446 1.416C22.184 20.437 17.619 24 12.221 24c-6.625 0-12-5.375-12-12s5.37-12 12-12c5.398 0 9.963 3.563 11.471 8.464.106.341.239.915-.446 1.421-.717.529-1.535.873-2.404 1.034.128.716.128 1.45 0 2.166-.387-.074-.782-.11-1.182-.11-4.184 0-3.968 2.823-6.736 2.823h-1.029c-1.899 0-3.15-1.357-3.15-3.095v-1.411c0-1.738 1.251-3.094 3.15-3.094h1.034c2.768 0 2.552 2.823 6.731 2.827Z" fill="#006BFF"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Calendly</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5 text-brand-800 dark:text-brand-200" viewBox="0 0 24 24"><path d="M4.459 4.208c.746.606 1.026.56 2.428.466l13.215-.793c.28 0 .047-.28-.046-.326L17.86 1.968c-.42-.326-.981-.7-2.055-.607L3.01 2.295c-.466.046-.56.28-.374.466zm.793 3.08v13.904c0 .747.373 1.027 1.214.98l14.523-.84c.841-.046.935-.56.935-1.167V6.354c0-.606-.233-.933-.748-.887l-15.177.887c-.56.047-.747.327-.747.933zm14.337.745c.093.42 0 .84-.42.888l-.7.14v10.264c-.608.327-1.168.514-1.635.514-.748 0-.935-.234-1.495-.933l-4.577-7.186v6.952L12.21 19s0 .84-1.168.84l-3.222.186c-.093-.186 0-.653.327-.746l.84-.233V9.854L7.822 9.76c-.094-.42.14-1.026.793-1.073l3.456-.233 4.764 7.279v-6.44l-1.215-.139c-.093-.514.28-.887.747-.933zM1.936 1.035l13.31-.98c1.634-.14 2.055-.047 3.082.7l4.249 2.986c.7.513.934.653.934 1.213v16.378c0 1.026-.373 1.634-1.68 1.726l-15.458.934c-.98.047-1.448-.093-1.962-.747l-3.129-4.06c-.56-.747-.793-1.306-.793-1.96V2.667c0-.839.374-1.54 1.447-1.632z" fill="currentColor"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Notion</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M12 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0zm.642 4.1335c.9554 0 1.7296.776 1.7296 1.7332v9.0667h1.6c1.614 0 2.9275-1.3156 2.9275-2.933 0-1.6173-1.3136-2.9333-2.9276-2.9333h-.6654V7.3334h.6654c2.5722 0 4.6577 2.0897 4.6577 4.667 0 2.5774-2.0855 4.6666-4.6577 4.6666H12.642zM7.9837 7.333h3.3291v12.533c-.9555 0-1.73-.7759-1.73-1.7332V9.0662H7.9837c-1.6146 0-2.9277 1.316-2.9277 2.9334 0 1.6175 1.3131 2.9333 2.9277 2.9333h.6654v1.7332h-.6654c-2.5725 0-4.6577-2.0892-4.6577-4.6665 0-2.5771 2.0852-4.6666 4.6577-4.6666Z" fill="#2CA01C"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">QuickBooks</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M14.728 0v6h6l-6-6zm1.363 10.636h-3.41v1.91h3.41v-1.91zm0 3.273h-3.41v1.91h3.41v-1.91zM20.727 6.5v15.864c0 .904-.732 1.636-1.636 1.636H4.909a1.636 1.636 0 0 1-1.636-1.636V1.636C3.273.732 4.005 0 4.909 0h9.318v6.5h6.5zm-3.273 2.773H6.545v7.909h10.91v-7.91zm-6.136 4.636H7.91v1.91h3.41v-1.91zm0-3.273H7.91v1.91h3.41v-1.91z" fill="#34A853"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Google Sheets</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M21.147 0H2.853A2.86 2.86 0 000 2.853v18.294A2.86 2.86 0 002.853 24h18.294A2.86 2.86 0 0024 21.147V2.853A2.86 2.86 0 0021.147 0zM10.34 17.287a.953.953 0 01-.953.953h-4a.954.954 0 01-.954-.953V5.38a.953.953 0 01.954-.953h4a.954.954 0 01.953.953zm9.233-5.467a.944.944 0 01-.953.947h-4a.947.947 0 01-.953-.947V5.38a.953.953 0 01.953-.953h4a.954.954 0 01.953.953z" fill="#0052CC"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Trello</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M18.78 12.653c-2.882 0-5.22 2.336-5.22 5.22s2.338 5.22 5.22 5.22 5.22-2.34 5.22-5.22-2.336-5.22-5.22-5.22zm-13.56 0c-2.88 0-5.22 2.337-5.22 5.22s2.338 5.22 5.22 5.22 5.22-2.338 5.22-5.22-2.336-5.22-5.22-5.22zm12-6.525c0 2.883-2.337 5.22-5.22 5.22-2.882 0-5.22-2.337-5.22-5.22 0-2.88 2.338-5.22 5.22-5.22 2.883 0 5.22 2.34 5.22 5.22z" fill="#F06A6A"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Asana</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M15.337 23.979l7.216-1.561s-2.604-17.613-2.625-17.73c-.018-.116-.114-.192-.211-.192s-1.929-.136-1.929-.136-1.275-1.274-1.439-1.411c-.045-.037-.075-.057-.121-.074l-.914 21.104h.023zM11.71 11.305s-.81-.424-1.774-.424c-1.447 0-1.504.906-1.504 1.141 0 1.232 3.24 1.715 3.24 4.629 0 2.295-1.44 3.76-3.406 3.76-2.354 0-3.54-1.465-3.54-1.465l.646-2.086s1.245 1.066 2.28 1.066c.675 0 .975-.545.975-.932 0-1.619-2.654-1.694-2.654-4.359-.034-2.237 1.571-4.416 4.827-4.416 1.257 0 1.875.361 1.875.361l-.945 2.715-.02.01zM11.17.83c.136 0 .271.038.405.135-.984.465-2.064 1.639-2.508 3.992-.656.213-1.293.405-1.889.578C7.697 3.75 8.951.84 11.17.84V.83zm1.235 2.949v.135c-.754.232-1.583.484-2.394.736.466-1.777 1.333-2.645 2.085-2.971.193.501.309 1.176.309 2.1zm.539-2.234c.694.074 1.141.867 1.429 1.755-.349.114-.735.231-1.158.366v-.252c0-.752-.096-1.371-.271-1.871v.002zm2.992 1.289c-.02 0-.06.021-.078.021s-.289.075-.714.21c-.423-1.233-1.176-2.37-2.508-2.37h-.115C12.135.209 11.669 0 11.265 0 8.159 0 6.675 3.877 6.21 5.846c-1.194.365-2.063.636-2.16.674-.675.213-.694.232-.772.87-.075.462-1.83 14.063-1.83 14.063L15.009 24l.927-21.166z" fill="#7AB55C"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Shopify</span></div>
+          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 38 30"><g transform="translate(-104.85,-67.3)"><path d="M123.117 82.954c-.909.262-1.911.266-2.849.226-1.09-.046-2.245-.184-3.252-.631-.828-.368-1.492-1.032-1.145-1.992.246-.676.789-1.281 1.417-1.621.707-.384 1.483-.321 2.19.025.793.389 1.453 1.022 2.051 1.66.314.335.613.682.909 1.033.136.162 1.06 1.084.679 1.3zm15.113.33c-1.398-.326-3.05-.209-4.452-.433-2.208-.353-5.497-2.928-7.28-5.545-1.239-1.818-1.83-3.67-2.777-5.927-.661-1.575-2.103-6.558-4.118-4.226-.83.961-1.759 4.122-2.438 4.078-.503.117-.585-.863-.744-1.282-.288-.76-.442-1.64-.829-2.357-.309-.573-.715-1.26-1.337-1.538-1.108-.57-2.444 1.148-3.107 3.184-.284 1.092-2.189 3.209-3.019 3.721-3.776 2.33-11.355 4.785-12.128 12.96-.004.033 0 .136.128.044.904-.655 11.156-8.039 4.576 6.235-4.03 8.744 15.431 14.313 16.432 14.335.135.004.125-.057.129-.097 1.553-13.958 16.896-12.489 20.469-15.831 3.541-3.312 3.613-6.518.495-7.32z" fill="#FA5320"/></g></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Hunter</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- HOW IT WORKS -->
+    <section class="py-20 sm:py-28">
+      <div class="max-w-4xl mx-auto px-6">
+        <div class="text-center mb-16 reveal">
+          <p class="text-[12px] font-semibold text-brand-400 dark:text-brand-500 uppercase tracking-widest mb-3">Workflow</p>
+          <h2 class="text-[clamp(1.5rem,3vw,2.25rem)] font-bold tracking-tight">Set it up in minutes</h2>
+        </div>
+
+        <div class="grid sm:grid-cols-3 gap-8 sm:gap-4 reveal">
+          <div class="text-center">
+            <div class="w-12 h-12 rounded-2xl bg-brand-900 dark:bg-brand-100 text-white dark:text-brand-900 flex items-center justify-center text-[16px] font-bold mx-auto mb-4">1</div>
+            <h3 class="text-[15px] font-semibold mb-2">Connect your apps</h3>
+            <p class="text-[13px] text-brand-500 dark:text-brand-400 leading-relaxed">One-click OAuth for Gmail, HubSpot, Google Ads, Meta Ads, and 30+ more tools.</p>
+          </div>
+          <div class="text-center">
+            <div class="w-12 h-12 rounded-2xl bg-brand-900 dark:bg-brand-100 text-white dark:text-brand-900 flex items-center justify-center text-[16px] font-bold mx-auto mb-4">2</div>
+            <h3 class="text-[15px] font-semibold mb-2">Tell it what to do</h3>
+            <p class="text-[13px] text-brand-500 dark:text-brand-400 leading-relaxed">Natural language instructions. "Follow up with cold leads" or "Draft my weekly invoice."</p>
+          </div>
+          <div class="text-center">
+            <div class="w-12 h-12 rounded-2xl bg-brand-900 dark:bg-brand-100 text-white dark:text-brand-900 flex items-center justify-center text-[16px] font-bold mx-auto mb-4">3</div>
+            <h3 class="text-[15px] font-semibold mb-2">Review & monitor</h3>
+            <p class="text-[13px] text-brand-500 dark:text-brand-400 leading-relaxed">Co-Agent queues results for your review. Check progress, adjust priorities, and stay in control.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- PRICING -->
+    <section id="pricing" class="py-20 sm:py-28 bg-brand-50 dark:bg-brand-900/50 border-t border-b border-brand-100 dark:border-brand-900">
+      <div class="max-w-4xl mx-auto px-6">
+        <div class="text-center mb-14 reveal">
+          <p class="text-[12px] font-semibold text-brand-400 dark:text-brand-500 uppercase tracking-widest mb-3">Pricing</p>
+          <h2 class="text-[clamp(1.5rem,3vw,2.25rem)] font-bold tracking-tight mb-4">One plan. Everything included.</h2>
+          <p class="text-[15px] text-brand-500 dark:text-brand-400 max-w-md mx-auto">No tiers, no feature gates. Every Co-Agent user gets the full experience.</p>
+        </div>
+
+        <div class="reveal max-w-sm mx-auto">
+          <div class="rounded-2xl border border-brand-200 dark:border-brand-800 bg-white dark:bg-brand-900 p-8 text-center">
+            <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-brand-200 dark:border-brand-800 text-[11px] font-medium text-brand-500 dark:text-brand-400 mb-6">
+              <span class="status-dot"></span>
+              Private Beta
+            </div>
+            <div class="mb-1">
+              <span class="text-[48px] font-bold tracking-tight">$79</span>
+              <span class="text-[15px] text-brand-400 dark:text-brand-500">/mo</span>
+            </div>
+            <p class="text-[13px] text-brand-400 dark:text-brand-500 mb-8">Billed monthly. Cancel anytime.</p>
+
+            <ul class="space-y-3 text-left mb-8">
+              <li class="flex items-start gap-3 text-[13px]">
+                <svg class="w-4 h-4 text-emerald-500 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" /></svg>
+                <span class="text-brand-600 dark:text-brand-300">Unlimited conversations & automations</span>
+              </li>
+              <li class="flex items-start gap-3 text-[13px]">
+                <svg class="w-4 h-4 text-emerald-500 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" /></svg>
+                <span class="text-brand-600 dark:text-brand-300">All 30+ integrations included</span>
+              </li>
+              <li class="flex items-start gap-3 text-[13px]">
+                <svg class="w-4 h-4 text-emerald-500 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" /></svg>
+                <span class="text-brand-600 dark:text-brand-300">Background scheduling & autonomous tasks</span>
+              </li>
+              <li class="flex items-start gap-3 text-[13px]">
+                <svg class="w-4 h-4 text-emerald-500 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" /></svg>
+                <span class="text-brand-600 dark:text-brand-300">Document & report generation (PDF export)</span>
+              </li>
+              <li class="flex items-start gap-3 text-[13px]">
+                <svg class="w-4 h-4 text-emerald-500 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" /></svg>
+                <span class="text-brand-600 dark:text-brand-300">Runs locally &mdash; your data stays on your Mac</span>
+              </li>
+              <li class="flex items-start gap-3 text-[13px]">
+                <svg class="w-4 h-4 text-emerald-500 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" /></svg>
+                <span class="text-brand-600 dark:text-brand-300">Priority support & feature requests</span>
+              </li>
+            </ul>
+
+            <a href="#download" class="btn-primary flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-brand-900 dark:bg-brand-100 text-white dark:text-brand-900 text-[14px] font-semibold hover:bg-brand-800 dark:hover:bg-brand-200 transition-all">
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+              Download for macOS
+            </a>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- DOWNLOAD -->
+    <section id="download" class="py-20 sm:py-28">
+      <div class="max-w-xl mx-auto px-6 text-center">
+        <div class="reveal">
+          <div class="w-14 h-14 rounded-2xl bg-brand-900 dark:bg-brand-100 flex items-center justify-center mx-auto mb-6">
+            <svg class="w-7 h-7 text-white dark:text-brand-900" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+          </div>
+          <h2 class="text-[clamp(1.5rem,3vw,2.25rem)] font-bold tracking-tight mb-4">Download Co-Agent</h2>
+          <p class="text-[15px] text-brand-500 dark:text-brand-400 mb-8">Get started in under a minute. Download the app, enter your invite code, and connect your tools.</p>
+
+          <a
+            id="main-download-btn"
+            href="#"
+            class="btn-primary inline-flex items-center justify-center gap-2.5 px-8 py-4 rounded-xl bg-brand-900 dark:bg-brand-100 text-white dark:text-brand-900 text-[15px] font-semibold hover:bg-brand-800 dark:hover:bg-brand-200 transition-all shadow-lg shadow-brand-900/10 dark:shadow-brand-100/10 mb-4"
+          >
+            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+            Download for macOS
+          </a>
+
+          <p class="text-[12px] text-brand-400 dark:text-brand-500">Requires macOS 13 or later &middot; Apple Silicon & Intel</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- FOOTER -->
+    <footer class="border-t border-brand-100 dark:border-brand-900 py-10">
+      <div class="max-w-6xl mx-auto px-6">
+        <div class="flex flex-col sm:flex-row items-center justify-between gap-6">
+          <div class="flex items-center gap-2">
+            <img src="icon-transparent.png" alt="Co-Agent" class="w-9 h-9 brightness-0 dark:brightness-100" />
+            <span class="text-[13px] font-semibold">Co-Agent</span>
+          </div>
+          <div class="flex items-center gap-6 text-[12px] text-brand-400 dark:text-brand-500">
+            <a href="mailto:hello@coagent.ai" class="hover:text-brand-600 dark:hover:text-brand-300 transition-colors">Contact</a>
+            <a href="#" class="hover:text-brand-600 dark:hover:text-brand-300 transition-colors">Terms</a>
+            <a href="#" class="hover:text-brand-600 dark:hover:text-brand-300 transition-colors">Privacy</a>
+          </div>
+          <p class="text-[11px] text-brand-300 dark:text-brand-600">&copy; 2026 Co-Agent. All rights reserved.</p>
+        </div>
+      </div>
+    </footer>
+
+  </div>
+
+  <!-- ============================================================
+       REFERRAL PAGE (/join/REF_xxx)
+       ============================================================ -->
+  <div id="page-invite" class="page">
+    <div class="min-h-screen flex items-center justify-center px-6 py-16 grid-bg relative">
+      <div class="hero-glow"></div>
+
+      <div class="w-full max-w-md relative z-10">
+        <!-- Loading state -->
+        <div id="invite-loading" class="text-center">
+          <div class="w-10 h-10 rounded-xl bg-brand-900 dark:bg-brand-100 flex items-center justify-center mx-auto mb-6">
+            <svg class="w-5 h-5 text-white dark:text-brand-900 animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+          </div>
+          <p class="text-[14px] text-brand-500 dark:text-brand-400">Verifying referral&hellip;</p>
+        </div>
+
+        <!-- Valid referral -->
+        <div id="invite-valid" class="hidden">
+          <div class="invite-card rounded-2xl p-8">
+            <div class="text-center mb-8">
+              <div class="w-12 h-12 rounded-xl bg-brand-900 dark:bg-brand-100 flex items-center justify-center mx-auto mb-5">
+                <svg class="w-6 h-6 text-white dark:text-brand-900" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+              </div>
+              <h1 class="text-[22px] font-bold tracking-tight mb-2">You've been referred to Co-Agent</h1>
+              <p class="text-[14px] text-brand-500 dark:text-brand-400">Your personal AI operator is ready. Download the app and enter the referral code below to get started.</p>
+            </div>
+
+            <!-- Download button -->
+            <a
+              id="invite-download"
+              href="#"
+              class="btn-primary flex items-center justify-center gap-2.5 w-full py-3.5 rounded-xl bg-brand-900 dark:bg-brand-100 text-white dark:text-brand-900 text-[14px] font-semibold hover:bg-brand-800 dark:hover:bg-brand-200 transition-all mb-6 shadow-lg shadow-brand-900/10 dark:shadow-brand-100/10"
+            >
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+              Download for macOS
+            </a>
+
+            <!-- Referral code display -->
+            <div class="border border-brand-200 dark:border-brand-800 rounded-xl p-4">
+              <div class="flex items-center justify-between mb-2">
+                <span class="text-[11px] font-semibold text-brand-400 dark:text-brand-500 uppercase tracking-widest">Your Referral Code</span>
+                <button onclick="copyRefCode()" class="relative text-[11px] font-medium text-brand-500 hover:text-brand-700 dark:text-brand-400 dark:hover:text-brand-200 transition-colors flex items-center gap-1">
+                  <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9.75a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" /></svg>
+                  Copy
+                  <span id="copy-tooltip" class="copy-tooltip absolute -top-8 left-1/2 -translate-x-1/2 px-2 py-1 rounded bg-brand-900 dark:bg-brand-100 text-white dark:text-brand-900 text-[10px] whitespace-nowrap">Copied!</span>
+                </button>
+              </div>
+              <div id="ref-code-display" class="font-mono text-[18px] font-bold text-brand-900 dark:text-brand-100 tracking-wider select-all"></div>
+            </div>
+
+            <p class="text-[12px] text-brand-400 dark:text-brand-500 text-center mt-5">
+              You'll enter this code in the app after downloading.
+            </p>
+          </div>
+
+          <p class="text-center text-[12px] text-brand-400 dark:text-brand-500 mt-6">
+            <a href="/" class="hover:text-brand-600 dark:hover:text-brand-300 transition-colors underline underline-offset-2">Learn more about Co-Agent</a>
+          </p>
+        </div>
+
+        <!-- Invalid referral -->
+        <div id="invite-invalid" class="hidden text-center">
+          <div class="invite-card rounded-2xl p-8 mb-6">
+            <div class="w-12 h-12 rounded-xl bg-red-50 dark:bg-red-900/20 flex items-center justify-center mx-auto mb-5">
+              <svg class="w-6 h-6 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" /></svg>
+            </div>
+            <h1 class="text-[20px] font-bold tracking-tight mb-2">Invalid referral link</h1>
+            <p class="text-[14px] text-brand-500 dark:text-brand-400 mb-6">This referral link is expired or invalid. You can still download Co-Agent directly.</p>
+            <a href="/#download" class="btn-primary inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-brand-900 dark:bg-brand-100 text-white dark:text-brand-900 text-[14px] font-semibold hover:bg-brand-800 dark:hover:bg-brand-200 transition-all">
+              Go to Download
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" /></svg>
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================
+       SCRIPTS
+       ============================================================ -->
+  <script>
+    // ---- Configuration ----
+    const RELAY_URL = 'https://coagent-relay.workers.dev';
+
+    // ---- Dark mode ----
+    function toggleDark() {
+      document.documentElement.classList.toggle('dark');
+      localStorage.setItem('theme', document.documentElement.classList.contains('dark') ? 'dark' : 'light');
+    }
+    // Init theme
+    (function() {
+      const saved = localStorage.getItem('theme');
+      if (saved === 'dark' || (!saved && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+        document.documentElement.classList.add('dark');
+      }
+    })();
+
+    // ---- Scroll reveal ----
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('visible');
+          observer.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.1 });
+
+    document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+
+    // ---- Routing ----
+    function route() {
+      const path = window.location.pathname;
+      const joinMatch = path.match(/^\/join\/(REF_\w+)$/);
+
+      if (joinMatch) {
+        showPage('invite');
+        validateInvite(joinMatch[1]);
+      } else {
+        showPage('marketing');
+        // Re-observe reveal elements when returning to marketing
+        document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+      }
+    }
+
+    function showPage(name) {
+      document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+      const page = document.getElementById('page-' + name);
+      if (page) page.classList.add('active');
+    }
+
+    // ---- Referral validation ----
+    async function validateInvite(refCode) {
+      const loading = document.getElementById('invite-loading');
+      const valid = document.getElementById('invite-valid');
+      const invalid = document.getElementById('invite-invalid');
+
+      loading.classList.remove('hidden');
+      valid.classList.add('hidden');
+      invalid.classList.add('hidden');
+
+      try {
+        const res = await fetch(`${RELAY_URL}/invite/validate?ref=${encodeURIComponent(refCode)}`);
+        const data = await res.json();
+
+        if (data.valid) {
+          document.getElementById('ref-code-display').textContent = refCode;
+          loading.classList.add('hidden');
+          valid.classList.remove('hidden');
+        } else {
+          loading.classList.add('hidden');
+          invalid.classList.remove('hidden');
+        }
+      } catch (err) {
+        console.error('Referral validation failed:', err);
+        loading.classList.add('hidden');
+        invalid.classList.remove('hidden');
+      }
+    }
+
+    // ---- Copy referral code ----
+    function copyRefCode() {
+      const code = document.getElementById('ref-code-display').textContent;
+      navigator.clipboard.writeText(code).then(() => {
+        const tooltip = document.getElementById('copy-tooltip');
+        tooltip.classList.add('show');
+        setTimeout(() => tooltip.classList.remove('show'), 1500);
+      });
+    }
+
+    // ---- Smooth scroll for anchor links ----
+    document.addEventListener('click', (e) => {
+      const anchor = e.target.closest('a[href^="#"]');
+      if (anchor) {
+        e.preventDefault();
+        const target = document.querySelector(anchor.getAttribute('href'));
+        if (target) {
+          target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      }
+    });
+
+    // ---- Demo chat animation ----
+    function runDemoChat() {
+      const userMsg = 'Follow up with all leads who haven\'t replied in 3 days. Draft personal emails for each one.';
+      const agentMsg = 'Found 4 leads without replies. Drafting follow-ups now\u2026';
+      const userEl = document.getElementById('demo-user');
+      const userText = document.getElementById('demo-user-text');
+      const cursor = document.getElementById('demo-cursor');
+      const typingEl = document.getElementById('demo-typing');
+      const agentEl = document.getElementById('demo-agent');
+      const agentText = document.getElementById('demo-agent-text');
+      const badge1 = document.getElementById('demo-badge1');
+      const badge2 = document.getElementById('demo-badge2');
+
+      if (!userEl) return;
+
+      // Reset
+      userText.textContent = '';
+      agentText.textContent = '';
+      userEl.style.opacity = '0';
+      typingEl.style.opacity = '0';
+      agentEl.style.display = 'none';
+      agentEl.style.opacity = '0';
+      badge1.style.opacity = '0';
+      badge2.style.opacity = '0';
+
+      // Step 1: Show user bubble, type message
+      setTimeout(() => {
+        userEl.style.opacity = '1';
+        userEl.style.transform = 'translateY(0)';
+        let i = 0;
+        const typeUser = setInterval(() => {
+          userText.textContent = userMsg.slice(0, ++i);
+          if (i >= userMsg.length) {
+            clearInterval(typeUser);
+            cursor.style.display = 'none';
+
+            // Step 2: Show typing indicator
+            setTimeout(() => {
+              typingEl.style.opacity = '1';
+
+              // Step 3: Replace typing with agent response
+              setTimeout(() => {
+                typingEl.style.opacity = '0';
+                setTimeout(() => {
+                  typingEl.style.display = 'none';
+                  agentEl.style.display = 'flex';
+                  requestAnimationFrame(() => {
+                    agentEl.style.opacity = '1';
+                    agentEl.style.transform = 'translateY(0)';
+                    // Type agent message
+                    let j = 0;
+                    const typeAgent = setInterval(() => {
+                      agentText.textContent = agentMsg.slice(0, ++j);
+                      if (j >= agentMsg.length) {
+                        clearInterval(typeAgent);
+                        // Step 4: Badges slide in
+                        setTimeout(() => {
+                          badge1.style.opacity = '1';
+                          badge1.style.transform = 'translateY(0)';
+                          setTimeout(() => {
+                            badge2.style.opacity = '1';
+                            badge2.style.transform = 'translateY(0)';
+                            // Done — no loop
+                          }, 300);
+                        }, 400);
+                      }
+                    }, 25);
+                  });
+                }, 300);
+              }, 1200);
+            }, 500);
+          }
+        }, 35);
+      }, 800);
+    }
+
+    // Start demo when the mockup scrolls into view
+    const demoObs = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          runDemoChat();
+          demoObs.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.3 });
+    const demoChat = document.getElementById('demo-chat');
+    if (demoChat) demoObs.observe(demoChat);
+
+    // ---- Init ----
+    route();
+    window.addEventListener('popstate', route);
+  </script>
+
+</body>
+</html>
