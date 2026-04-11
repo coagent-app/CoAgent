@@ -697,6 +697,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_deep_link::init())
         .manage(ServerProcess(Arc::new(Mutex::new(None))))
         .setup(|app| {
             #[cfg(not(debug_assertions))]
@@ -817,6 +818,38 @@ fn main() {
             log("[Tauri] Dev mode — skipping sidecar server (beforeDevCommand handles it)");
 
             let _ = APP_HANDLE.set(app.handle().clone());
+
+            // Deep link: listen for coagent:// URLs and extract token or session_id
+            let handle_for_deeplink = app.handle().clone();
+            app.listen("deep-link://new-url", move |event| {
+                if let Ok(urls) = serde_json::from_str::<Vec<String>>(event.payload()) {
+                    for url in urls {
+                        log(&format!("[DeepLink] Received: {}", url));
+                        // Parse coagent://activate?token=xxx or coagent://activate?session_id=xxx
+                        if let Some(query) = url.strip_prefix("coagent://activate") {
+                            let query = query.strip_prefix('?').unwrap_or(query);
+                            let mut params = std::collections::HashMap::new();
+                            for pair in query.split('&') {
+                                if let Some((key, value)) = pair.split_once('=') {
+                                    params.insert(key.to_string(), value.trim().to_string());
+                                }
+                            }
+                            if let Some(token) = params.get("token") {
+                                if !token.is_empty() {
+                                    log(&format!("[DeepLink] Token received: {}...", &token[..token.len().min(8)]));
+                                    let _ = handle_for_deeplink.emit("deep-link-activate", serde_json::json!({ "token": token }));
+                                }
+                            }
+                            if let Some(session_id) = params.get("session_id") {
+                                if !session_id.is_empty() {
+                                    log(&format!("[DeepLink] Checkout session: {}...", &session_id[..session_id.len().min(12)]));
+                                    let _ = handle_for_deeplink.emit("deep-link-activate", serde_json::json!({ "sessionId": session_id }));
+                                }
+                            }
+                        }
+                    }
+                }
+            });
 
             // Voice pill: position at bottom center
             // NOTE: with_webview Obj-C styling removed — deadlocks the main thread in

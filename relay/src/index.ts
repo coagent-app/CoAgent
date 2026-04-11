@@ -6,12 +6,14 @@ export interface Env {
   MOONSHOT_API_KEY: string
   COMPOSIO_API_KEY: string
   STRIPE_WEBHOOK_SECRET: string
+  STRIPE_API_KEY: string
   COMPOSIO_WEBHOOK_SECRET?: string  // Standard Webhooks HMAC secret — optional, warns if unset
   EXA_WEBHOOK_SECRET?: string       // Shared secret for Exa monitor webhooks — optional, warns if unset
   GOOGLE_TTS_API_KEY?: string       // Google Cloud TTS — cheaper than OpenAI ($4/1M vs $15/1M)
   GOOGLE_CLIENT_ID?: string         // Google OAuth — served to desktop apps on activation
   GOOGLE_CLIENT_SECRET?: string
   TOKENS: KVNamespace
+  BACKUPS: R2Bucket
   USER_SESSION: DurableObjectNamespace
   TEAM_CHANNEL: DurableObjectNamespace
 }
@@ -37,15 +39,20 @@ interface UsageData {
 }
 
 interface TokenData {
-  userId: number          // numeric user ID for Composio isolation
+  userId: number
   stripeCustomerId: string
-  model: string           // chosen model id e.g. 'claude-sonnet-4-6'
-  supportAmount: number   // monthly support amount in cents
+  model: string
   usage: UsageData
   createdAt: string
-  expiresAt?: string      // ISO date — token rejected after this date (beta trials, etc.)
   active: boolean
   admin?: boolean
+  // Partners program
+  tier: 'founder' | 'early_access' | 'standard'
+  referralCode: string
+  referredBy?: string
+  stripeConnectId?: string
+  commissionRate: number
+  accruedCommission?: number
 }
 
 // --- Model configs ---
@@ -149,6 +156,60 @@ function generateToken(): string {
   const bytes = new Uint8Array(32)
   crypto.getRandomValues(bytes)
   return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
+}
+
+function generateReferralCode(): string {
+  const bytes = new Uint8Array(6)
+  crypto.getRandomValues(bytes)
+  return 'REF_' + Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
+}
+
+/** Constant-time string comparison to prevent timing attacks */
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false
+  let diff = 0
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i)
+  return diff === 0
+}
+
+
+const PRICE_TO_TIER: Record<string, { tier: TokenData['tier']; rate: number }> = {
+  'price_founder_none':             { tier: 'founder',      rate: 0.25 },
+  'price_1TL7pJQBIOqsWwkhi7JXwKEG': { tier: 'early_access', rate: 0.15 },
+  'price_1TL7pYQBIOqsWwkhrnrwpgBL': { tier: 'standard',     rate: 0.10 },
+}
+
+const TIER_INFO: Record<string, { label: string }> = {
+  founder:      { label: 'Founder — Free forever' },
+  early_access: { label: 'Early Access — Free for 6 months, then $49/mo' },
+  standard:     { label: 'Standard — $79/mo' },
+}
+
+function tierFromSession(session: any): { tier: TokenData['tier']; rate: number } {
+  const priceId = session.metadata?.price_id || session.line_items?.data?.[0]?.price?.id
+  return PRICE_TO_TIER[priceId] || { tier: 'standard', rate: 0.10 }
+}
+
+async function stripeApiCall(env: Env, method: string, path: string, body?: Record<string, any>): Promise<any> {
+  const headers: Record<string, string> = {
+    'Authorization': `Bearer ${env.STRIPE_API_KEY}`,
+  }
+  let reqBody: string | undefined
+  if (body) {
+    headers['Content-Type'] = 'application/x-www-form-urlencoded'
+    const params = new URLSearchParams()
+    function flatten(obj: any, prefix = '') {
+      for (const [k, v] of Object.entries(obj)) {
+        const key = prefix ? `${prefix}[${k}]` : k
+        if (typeof v === 'object' && v !== null) flatten(v, key)
+        else params.append(key, String(v))
+      }
+    }
+    flatten(body)
+    reqBody = params.toString()
+  }
+  const res = await fetch(`https://api.stripe.com/v1${path}`, { method, headers, body: reqBody })
+  return res.json()
 }
 
 // ── Per-token rate limiting ─────────────────────────────────────────────────
@@ -336,7 +397,7 @@ async function validateRequest(request: Request, env: Env): Promise<{ token: str
   if (!data.active) {
     return jsonResponse({ error: 'Token revoked — subscription cancelled' }, 403)
   }
-  if (data.expiresAt && new Date(data.expiresAt) < new Date()) {
+  if ((data as any).expiresAt && new Date((data as any).expiresAt) < new Date()) {
     return jsonResponse({ error: 'Token expired — your trial has ended. Visit coagent.ai to subscribe.' }, 403)
   }
 
@@ -603,7 +664,7 @@ async function verifyStripeSignature(payload: string, sigHeader: string, secret:
   const mac = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(signedPayload))
   const expected = Array.from(new Uint8Array(mac), b => b.toString(16).padStart(2, '0')).join('')
 
-  return expected === signature
+  return timingSafeEqual(expected, signature)
 }
 
 // --- Standard Webhooks (Composio) signature verification ---
@@ -642,7 +703,7 @@ async function verifyStandardWebhookSignature(
   const signatures = sigHeader.split(' ')
   return signatures.some(sig => {
     const [version, value] = sig.split(',')
-    return version === 'v1' && value === expectedB64
+    return version === 'v1' && timingSafeEqual(value, expectedB64)
   })
 }
 
@@ -664,27 +725,44 @@ async function handleStripeWebhook(request: Request, env: Env): Promise<Response
     case 'checkout.session.completed': {
       const session = event.data.object
       const token = generateToken()
+      const referralCode = generateReferralCode()
 
       // Assign a numeric user ID (atomic increment via KV)
       const prevId = parseInt(await env.TOKENS.get('_next_user_id') || '0')
       const userId = prevId + 1
       await env.TOKENS.put('_next_user_id', String(userId))
 
+      // Determine tier from the Price ID
+      const { tier, rate } = tierFromSession(session)
+
+      // Referral attribution
+      const referredBy = session.client_reference_id || undefined
+
       const tokenData: TokenData = {
         userId,
         stripeCustomerId: session.customer,
         model: 'claude-sonnet-4-6',
-        supportAmount: 0,
         usage: freshUsage(),
         createdAt: new Date().toISOString(),
         active: true,
+        tier,
+        referralCode,
+        referredBy,
+        commissionRate: rate,
       }
       await saveToken(env, token, tokenData)
 
-      // Store reverse lookup: stripeCustomerId → token
+      // Reverse lookups
       await env.TOKENS.put(`stripe:${session.customer}`, token)
+      await env.TOKENS.put(`ref:${referralCode}`, token)
 
-      console.log(`New user #${userId} for ${session.customer}: ${token.slice(0, 8)}...`)
+      // Email → token mapping for account recovery
+      const customerEmail = (session.customer_details?.email || '').toLowerCase()
+      if (customerEmail) {
+        await env.TOKENS.put(`email:${customerEmail}`, token)
+      }
+
+      console.log(`New ${tier} user #${userId} (ref: ${referredBy || 'organic'}): ${token.slice(0, 8)}...`)
 
       return jsonResponse({ ok: true })
     }
@@ -709,6 +787,129 @@ async function handleStripeWebhook(request: Request, env: Env): Promise<Response
           }
         }
       }
+      return jsonResponse({ ok: true })
+    }
+
+    // Subscription renewed → calculate and pay affiliate commission
+    case 'invoice.payment_succeeded': {
+      const invoice = event.data.object
+      if (invoice.billing_reason === 'subscription_create') {
+        // First invoice — may be $0 for trials. Skip if zero.
+        if (invoice.amount_paid === 0) return jsonResponse({ ok: true })
+      }
+
+      // Find the paying user's token
+      const payerToken = await env.TOKENS.get(`stripe:${invoice.customer}`)
+      if (!payerToken) return jsonResponse({ ok: true })
+      const payerData = await getToken(env, payerToken)
+      if (!payerData?.referredBy) return jsonResponse({ ok: true }) // organic user, no commission
+
+      // Find the referrer
+      const referrerToken = await env.TOKENS.get(`ref:${payerData.referredBy}`)
+      if (!referrerToken) return jsonResponse({ ok: true })
+      const referrerData = await getToken(env, referrerToken)
+      if (!referrerData) return jsonResponse({ ok: true })
+
+      // Block self-referrals
+      if (referrerData.stripeCustomerId === payerData.stripeCustomerId) {
+        console.log('[Commission] Self-referral blocked for user #' + payerData.userId)
+        return jsonResponse({ ok: true })
+      }
+
+      // Calculate commission in cents
+      const commissionCents = Math.round(invoice.amount_paid * referrerData.commissionRate)
+      if (commissionCents <= 0) return jsonResponse({ ok: true })
+
+      if (referrerData.stripeConnectId) {
+        // Partner has Connect account — transfer immediately
+        try {
+          await stripeApiCall(env, 'POST', '/transfers', {
+            amount: String(commissionCents),
+            currency: 'usd',
+            destination: referrerData.stripeConnectId,
+            description: `CoAgent affiliate commission — user #${payerData.userId}`,
+          })
+          console.log(`[Commission] Paid ${commissionCents}c to ${referrerData.referralCode} (user #${referrerData.userId})`)
+        } catch (e) {
+          console.error(`[Commission] Transfer failed:`, (e as Error).message)
+        }
+      } else {
+        // Partner hasn't onboarded Connect yet — accrue
+        referrerData.accruedCommission = (referrerData.accruedCommission || 0) + commissionCents
+        await saveToken(env, referrerToken, referrerData)
+        console.log(`[Commission] Accrued ${commissionCents}c for ${referrerData.referralCode} (no Connect account yet)`)
+      }
+
+      return jsonResponse({ ok: true })
+    }
+
+    // Refund → reverse affiliate commission
+    case 'charge.refunded': {
+      const charge = event.data.object
+      const payerToken = await env.TOKENS.get(`stripe:${charge.customer}`)
+      if (!payerToken) return jsonResponse({ ok: true })
+      const payerData = await getToken(env, payerToken)
+      if (!payerData?.referredBy) return jsonResponse({ ok: true })
+
+      const referrerToken = await env.TOKENS.get(`ref:${payerData.referredBy}`)
+      if (!referrerToken) return jsonResponse({ ok: true })
+      const referrerData = await getToken(env, referrerToken)
+      if (!referrerData?.stripeConnectId) return jsonResponse({ ok: true })
+
+      const reversalCents = Math.round(charge.amount_refunded * referrerData.commissionRate)
+      if (reversalCents <= 0) return jsonResponse({ ok: true })
+
+      try {
+        // Find the original transfer and reverse it
+        const transfers = await stripeApiCall(env, 'GET',
+          `/transfers?destination=${referrerData.stripeConnectId}&limit=10`)
+        const original = transfers.data?.find((t: any) =>
+          t.description?.includes(`user #${payerData.userId}`))
+        if (original) {
+          await stripeApiCall(env, 'POST', `/transfers/${original.id}/reversals`, {
+            amount: String(reversalCents),
+          })
+          console.log(`[Commission] Reversed ${reversalCents}c from ${referrerData.referralCode}`)
+        }
+      } catch (e) {
+        console.error(`[Commission] Reversal failed:`, (e as Error).message)
+      }
+
+      return jsonResponse({ ok: true })
+    }
+
+    // Connect account onboarding completed
+    case 'account.updated': {
+      const account = event.data.object
+      if (!account.charges_enabled) return jsonResponse({ ok: true }) // not fully onboarded yet
+
+      // Find which partner this Connect account belongs to
+      const partnerToken = await env.TOKENS.get(`connect:${account.id}`)
+      if (!partnerToken) return jsonResponse({ ok: true })
+      const partnerData = await getToken(env, partnerToken)
+      if (!partnerData) return jsonResponse({ ok: true })
+
+      partnerData.stripeConnectId = account.id
+      await saveToken(env, partnerToken, partnerData)
+
+      // Pay out any accrued commission
+      if (partnerData.accruedCommission && partnerData.accruedCommission > 0) {
+        try {
+          await stripeApiCall(env, 'POST', '/transfers', {
+            amount: String(partnerData.accruedCommission),
+            currency: 'usd',
+            destination: account.id,
+            description: `CoAgent affiliate commission — accrued backpay`,
+          })
+          console.log(`[Connect] Paid accrued ${partnerData.accruedCommission}c to ${partnerData.referralCode}`)
+          partnerData.accruedCommission = 0
+          await saveToken(env, partnerToken, partnerData)
+        } catch (e) {
+          console.error(`[Connect] Accrued payout failed:`, (e as Error).message)
+        }
+      }
+
+      console.log(`[Connect] Account ${account.id} onboarded for user #${partnerData.userId}`)
       return jsonResponse({ ok: true })
     }
 
@@ -1493,12 +1694,9 @@ export default {
 
         const doId = env.TEAM_CHANNEL.idFromName(teamId)
         const stub = env.TEAM_CHANNEL.get(doId)
-        // Forward with the client-supplied userId (RELAY_USER_ID) so the DO
-        // tags the socket with the same id used in message from.userId.
-        // This ensures the echo-exclusion check (uid !== msg.from.userId) works.
+        // Always use the server-resolved userId from the validated token
         const doUrl = new URL(request.url)
-        const clientUserId = url.searchParams.get('userId') || userId
-        doUrl.searchParams.set('userId', clientUserId)
+        doUrl.searchParams.set('userId', String(tokenData.userId))
         return stub.fetch(new Request(doUrl.toString(), request))
       }
 
@@ -1756,7 +1954,7 @@ export default {
       return jsonResponse({
         userId: data.userId,
         model: data.model,
-        supportAmount: data.supportAmount,
+        tier: data.tier,
         usage: data.usage,
         createdAt: data.createdAt,
         admin: data.admin || false,
@@ -1810,27 +2008,30 @@ export default {
       const adminData = result.data
       if (!adminData.admin) return jsonResponse({ error: 'Admin access required' }, 403)
 
-      const body = await request.json() as { label?: string; days?: number }
+      const body = await request.json() as { label?: string; days?: number; tier?: TokenData['tier'] }
       const token = generateToken()
+      const referralCode = generateReferralCode()
       const prevId = parseInt(await env.TOKENS.get('_next_user_id') || '0')
       const userId = prevId + 1
       await env.TOKENS.put('_next_user_id', String(userId))
 
-      const trialDays = body.days ?? 30
-      const expiresAt = new Date(Date.now() + trialDays * 24 * 60 * 60 * 1000).toISOString()
+      const tier = body.tier || 'standard'
+      const rateMap: Record<TokenData['tier'], number> = { founder: 0.25, early_access: 0.15, standard: 0.10 }
 
       const tokenData: TokenData = {
         userId,
         stripeCustomerId: body.label || `beta-user-${userId}`,
         model: 'kimi-k2.5',
-        supportAmount: 0,
         usage: freshUsage(),
         createdAt: new Date().toISOString(),
-        expiresAt,
         active: true,
+        tier,
+        referralCode,
+        commissionRate: rateMap[tier],
       }
       await saveToken(env, token, tokenData)
-      return jsonResponse({ ok: true, token, userId, expiresAt })
+      await env.TOKENS.put(`ref:${referralCode}`, token)
+      return jsonResponse({ ok: true, token, userId, referralCode, tier })
     }
 
     if (url.pathname === '/admin/list-tokens' && request.method === 'GET') {
@@ -1850,7 +2051,7 @@ export default {
       } while (cursor)
       const users: any[] = []
       for (const key of allKeys) {
-        if (key.name.startsWith('_') || key.name.startsWith('stripe:')) continue
+        if (key.name.startsWith('_') || key.name.startsWith('stripe:') || key.name.startsWith('ref:') || key.name.startsWith('connect:')) continue
         try {
           const data = await getToken(env, key.name)
           if (data) {
@@ -1861,10 +2062,17 @@ export default {
               active: data.active,
               admin: data.admin || false,
               createdAt: data.createdAt,
-              expiresAt: data.expiresAt || null,
-              expired: data.expiresAt ? new Date(data.expiresAt) < new Date() : false,
+              expiresAt: (data as any).expiresAt || null,
+              expired: (data as any).expiresAt ? new Date((data as any).expiresAt) < new Date() : false,
               label: data.stripeCustomerId,
               totalCostUsd: data.usage?.totalCostUsd ?? 0,
+              // Partners program
+              tier: data.tier || 'standard',
+              referralCode: data.referralCode || null,
+              commissionRate: data.commissionRate ?? 0,
+              referredBy: data.referredBy || null,
+              stripeConnectId: data.stripeConnectId || null,
+              accruedCommission: data.accruedCommission || 0,
             })
           }
         } catch (e) {
@@ -1889,6 +2097,390 @@ export default {
       await saveToken(env, body.token, data)
       return jsonResponse({ ok: true, active: data.active })
     }
+
+    // --- Admin referral stats ---
+    if (url.pathname === '/admin/referral-stats' && request.method === 'GET') {
+      const result = await validateRequest(request, env)
+      if (result instanceof Response) return result
+      const rateCheck = checkRateLimit(result.token, 'admin')
+      if (rateCheck) return rateCheck
+      if (!result.data.admin) return jsonResponse({ error: 'Admin access required' }, 403)
+
+      // Scan all tokens
+      let cursor: string | undefined
+      let allKeys: any[] = []
+      do {
+        const listResult = await env.TOKENS.list({ cursor, limit: 1000 })
+        allKeys.push(...listResult.keys)
+        cursor = listResult.list_complete ? undefined : listResult.cursor
+      } while (cursor)
+
+      // Load all real token data (skip KV helper keys)
+      const allTokens: { key: string; data: TokenData }[] = []
+      for (const key of allKeys) {
+        if (key.name.startsWith('_') || key.name.startsWith('stripe:') || key.name.startsWith('ref:') || key.name.startsWith('connect:')) continue
+        const data = await getToken(env, key.name)
+        if (data) allTokens.push({ key: key.name, data })
+      }
+
+      // Group by referral code
+      const partners = allTokens.filter(t => t.data.referralCode)
+      const stats = partners.map(p => {
+        const referred = allTokens.filter(t => t.data.referredBy === p.data.referralCode)
+        return {
+          userId: p.data.userId,
+          tier: p.data.tier,
+          referralCode: p.data.referralCode,
+          commissionRate: p.data.commissionRate,
+          connectStatus: p.data.stripeConnectId ? 'active' : 'pending',
+          accruedCommission: p.data.accruedCommission || 0,
+          referredCount: referred.length,
+          referredUsers: referred.map(r => ({
+            userId: r.data.userId,
+            tier: r.data.tier,
+            active: r.data.active,
+          })),
+        }
+      }).filter(s => s.referredCount > 0 || s.tier === 'founder' || s.tier === 'early_access')
+
+      return jsonResponse({ partners: stats })
+    }
+
+    // --- Partner Connect onboarding ---
+    if (url.pathname === '/partner/connect-onboard' && request.method === 'POST') {
+      const result = await validateRequest(request, env)
+      if (result instanceof Response) return result
+
+      const data = result.data
+
+      // Create a Stripe Connect Express account
+      const account = await stripeApiCall(env, 'POST', '/accounts', {
+        type: 'express',
+        capabilities: { transfers: { requested: 'true' } },
+        metadata: { coagent_user_id: String(data.userId), referral_code: data.referralCode },
+      })
+
+      // Store reverse lookup
+      await env.TOKENS.put(`connect:${account.id}`, result.token)
+
+      // Create the onboarding link
+      const link = await stripeApiCall(env, 'POST', '/account_links', {
+        account: account.id,
+        refresh_url: 'https://coagent.ai/connect/retry',
+        return_url: 'https://coagent.ai/connect/done',
+        type: 'account_onboarding',
+      })
+
+      return jsonResponse({ url: link.url })
+    }
+
+    // --- Invite code system (no auth, rate limited) ---
+
+    if (request.method === 'GET' && url.pathname === '/invite/validate') {
+      const ipKey = (request.headers.get('cf-connecting-ip') || 'unknown').slice(0, 16)
+      const rateCheck = checkRateLimit(ipKey, 'general')
+      if (rateCheck) return rateCheck
+
+      const ref = url.searchParams.get('ref')
+      if (!ref) return jsonResponse({ error: 'Missing ref parameter' }, 400)
+
+      const ownerToken = await env.TOKENS.get(`ref:${ref}`)
+      if (!ownerToken) return jsonResponse({ valid: false })
+
+      const ownerData = await getToken(env, ownerToken)
+      // Show the tier the NEW user will get, not the referrer's tier
+      const REFERRAL_TIER: Record<string, TokenData['tier']> = {
+        founder: 'early_access',
+        early_access: 'standard',
+        standard: 'standard',
+      }
+      const tier = REFERRAL_TIER[ownerData?.tier || 'standard'] || 'standard'
+      const info = TIER_INFO[tier] || TIER_INFO.standard
+
+      return jsonResponse({ valid: true, tier, ...info })
+    }
+
+    if (request.method === 'POST' && url.pathname === '/invite/redeem') {
+      const ipKey = (request.headers.get('cf-connecting-ip') || 'unknown').slice(0, 16)
+      const rateCheck = checkRateLimit(ipKey, 'general')
+      if (rateCheck) return rateCheck
+
+      const body = await request.json() as { referralCode?: string }
+      if (!body.referralCode) return jsonResponse({ error: 'Missing referralCode' }, 400)
+
+      // Validate referral code exists
+      const ownerToken = await env.TOKENS.get(`ref:${body.referralCode}`)
+      if (!ownerToken) return jsonResponse({ error: 'Invalid referral code' }, 404)
+
+      // Determine tier and price for the new user based on referrer's tier
+      const ownerData = await getToken(env, ownerToken)
+      const REFERRAL_TIER: Record<string, TokenData['tier']> = {
+        founder: 'early_access',
+        early_access: 'standard',
+        standard: 'standard',
+      }
+      const newTier = REFERRAL_TIER[ownerData?.tier || 'standard'] || 'standard'
+
+      const tierToPriceMap: Record<string, string> = {}
+      for (const [pid, info] of Object.entries(PRICE_TO_TIER)) {
+        tierToPriceMap[info.tier] = pid
+      }
+      const priceId = tierToPriceMap[newTier] || 'price_standard_placeholder'
+
+      // Build checkout session params
+      const checkoutParams: Record<string, string> = {
+        mode: 'subscription',
+        'line_items[0][price]': priceId,
+        'line_items[0][quantity]': '1',
+        client_reference_id: body.referralCode,
+        'metadata[price_id]': priceId,
+        success_url: 'coagent://activate?session_id={CHECKOUT_SESSION_ID}',
+        cancel_url: 'https://coagent-ai.com',
+      }
+
+      // Early Access: 6-month free trial
+      if (newTier === 'early_access') {
+        checkoutParams['subscription_data[trial_period_days]'] = '183'
+      }
+
+      const session = await stripeApiCall(env, 'POST', '/checkout/sessions', checkoutParams)
+
+      if (session.error) {
+        return jsonResponse({ error: 'Failed to create checkout session', details: session.error.message }, 500)
+      }
+
+      return jsonResponse({ checkoutUrl: session.url })
+    }
+
+    if (request.method === 'POST' && url.pathname === '/subscribe') {
+      const ipKey = (request.headers.get('cf-connecting-ip') || 'unknown').slice(0, 16)
+      const rateCheck = checkRateLimit(ipKey, 'general')
+      if (rateCheck) return rateCheck
+
+      const body = await request.json() as { referralCode?: string }
+      if (!body.referralCode) return jsonResponse({ error: 'Missing referralCode' }, 400)
+
+      // Validate referral code
+      const ownerToken = await env.TOKENS.get(`ref:${body.referralCode}`)
+      if (!ownerToken) return jsonResponse({ error: 'Invalid referral code' }, 404)
+
+      const ownerData = await getToken(env, ownerToken)
+      // Referral tier mapping: founder→early_access, early_access→standard, standard→standard
+      const REFERRAL_TIER: Record<string, TokenData['tier']> = {
+        founder: 'early_access',
+        early_access: 'standard',
+        standard: 'standard',
+      }
+      const tier = REFERRAL_TIER[ownerData?.tier || 'standard'] || 'standard'
+      const info = TIER_INFO[tier] || TIER_INFO.standard
+
+      // Generate token + referral code for new user
+      const token = generateToken()
+      const referralCode = generateReferralCode()
+      const prevId = parseInt(await env.TOKENS.get('_next_user_id') || '0')
+      const userId = prevId + 1
+      await env.TOKENS.put('_next_user_id', String(userId))
+
+      const commissionRate = (() => {
+        for (const [, pInfo] of Object.entries(PRICE_TO_TIER)) {
+          if (pInfo.tier === tier) return pInfo.rate
+        }
+        return 0.10
+      })()
+
+      const tokenData: TokenData = {
+        userId,
+        stripeCustomerId: '',
+        model: 'claude-sonnet-4-6',
+        usage: freshUsage(),
+        createdAt: new Date().toISOString(),
+        active: true,
+        tier,
+        referralCode,
+        referredBy: body.referralCode,
+        commissionRate,
+      }
+      await saveToken(env, token, tokenData)
+      await env.TOKENS.put(`ref:${referralCode}`, token)
+
+      console.log(`[Subscribe] New ${tier} user #${userId} (ref: ${body.referralCode}): ${token.slice(0, 8)}...`)
+
+      return jsonResponse({ token, tier, referralCode, ...info })
+    }
+
+    // --- Exchange Stripe Checkout session for token ---
+
+    if (request.method === 'POST' && url.pathname === '/subscribe/checkout') {
+      const ipKey = (request.headers.get('cf-connecting-ip') || 'unknown').slice(0, 16)
+      const rateCheck = checkRateLimit(ipKey, 'general')
+      if (rateCheck) return rateCheck
+
+      const body = await request.json() as { sessionId?: string }
+      if (!body.sessionId) return jsonResponse({ error: 'Missing sessionId' }, 400)
+
+      // Check if already exchanged (idempotent)
+      const existingToken = await env.TOKENS.get(`checkout:${body.sessionId}`)
+      if (existingToken) {
+        const tokenData = await getToken(env, existingToken)
+        const info = TIER_INFO[tokenData?.tier || 'standard'] || TIER_INFO.standard
+        return jsonResponse({ token: existingToken, tier: tokenData?.tier, referralCode: tokenData?.referralCode, ...info })
+      }
+
+      // Verify session with Stripe
+      const session = await stripeApiCall(env, 'GET', `/checkout/sessions/${body.sessionId}`)
+      if (session.error) return jsonResponse({ error: 'Invalid checkout session' }, 404)
+      if (session.payment_status !== 'paid' && session.payment_status !== 'no_payment_required') {
+        return jsonResponse({ error: 'Payment not completed' }, 402)
+      }
+
+      // Get tier from the session
+      const { tier, rate: commissionRate } = tierFromSession(session)
+      const info = TIER_INFO[tier] || TIER_INFO.standard
+      const referralCodeUsed = session.client_reference_id || ''
+
+      // Create token
+      const token = generateToken()
+      const referralCode = generateReferralCode()
+      const prevId = parseInt(await env.TOKENS.get('_next_user_id') || '0')
+      const userId = prevId + 1
+      await env.TOKENS.put('_next_user_id', String(userId))
+
+      const tokenData: TokenData = {
+        userId,
+        stripeCustomerId: session.customer || '',
+        model: 'claude-sonnet-4-6',
+        usage: freshUsage(),
+        createdAt: new Date().toISOString(),
+        active: true,
+        tier,
+        referralCode,
+        referredBy: referralCodeUsed,
+        commissionRate,
+      }
+      await saveToken(env, token, tokenData)
+      await env.TOKENS.put(`ref:${referralCode}`, token)
+      await env.TOKENS.put(`checkout:${body.sessionId}`, token)
+      if (session.customer) await env.TOKENS.put(`stripe:${session.customer}`, token)
+
+      console.log(`[Subscribe/Checkout] New ${tier} user #${userId} (session: ${body.sessionId.slice(0, 12)}...): ${token.slice(0, 8)}...`)
+
+      return jsonResponse({ token, tier, referralCode, ...info })
+    }
+
+    // --- Partner Connect & Stats (auth required) ---
+
+    if (request.method === 'POST' && url.pathname === '/partner/connect') {
+      const result = await validateRequest(request, env)
+      if (result instanceof Response) return result
+      const rateCheck = checkRateLimit(result.token, 'general')
+      if (rateCheck) return rateCheck
+
+      // Create Stripe Connect Express onboarding link
+      const account = await stripeApiCall(env, 'POST', '/accounts', {
+        type: 'express',
+        'metadata[coagent_user_id]': String(result.data.userId),
+        'metadata[coagent_ref]': result.data.referralCode,
+      })
+      if (account.error) {
+        return jsonResponse({ error: 'Failed to create Connect account', details: account.error.message }, 500)
+      }
+
+      // Save Connect account ID on the user's token
+      result.data.stripeConnectId = account.id
+      await saveToken(env, result.token, result.data)
+
+      // Create onboarding link
+      const link = await stripeApiCall(env, 'POST', '/account_links', {
+        account: account.id,
+        refresh_url: 'https://coagent-ai.com',
+        return_url: 'coagent://partner-connected',
+        type: 'account_onboarding',
+      })
+      if (link.error) {
+        return jsonResponse({ error: 'Failed to create onboarding link', details: link.error.message }, 500)
+      }
+
+      // If partner has accrued commission, transfer it now
+      if (result.data.accruedCommission && result.data.accruedCommission > 0) {
+        try {
+          await stripeApiCall(env, 'POST', '/transfers', {
+            amount: String(result.data.accruedCommission),
+            currency: 'usd',
+            destination: account.id,
+            description: 'CoAgent accrued affiliate commission',
+          })
+          result.data.accruedCommission = 0
+          await saveToken(env, result.token, result.data)
+          console.log(`[Partner] Transferred accrued commission to ${account.id}`)
+        } catch (e) {
+          console.log(`[Partner] Accrued transfer deferred:`, (e as Error).message)
+        }
+      }
+
+      console.log(`[Partner] Connect account ${account.id} created for user #${result.data.userId}`)
+      return jsonResponse({ url: link.url, accountId: account.id })
+    }
+
+    if (request.method === 'GET' && url.pathname === '/partner/stats') {
+      const result = await validateRequest(request, env)
+      if (result instanceof Response) return result
+      const rateCheck = checkRateLimit(result.token, 'general')
+      if (rateCheck) return rateCheck
+
+      const data = result.data
+
+      // Count referrals by scanning tokens with referredBy matching this user's referral code
+      // For efficiency, we store a counter — but for now, return what we have on the token
+      return jsonResponse({
+        referralCode: data.referralCode,
+        tier: data.tier,
+        commissionRate: data.commissionRate,
+        stripeConnectId: data.stripeConnectId || null,
+        accruedCommission: data.accruedCommission || 0,
+        connected: !!data.stripeConnectId,
+      })
+    }
+
+    // --- R2 backup/restore (auth required) ---
+
+    if (request.method === 'POST' && url.pathname === '/backup') {
+      const result = await validateRequest(request, env)
+      if (result instanceof Response) return result
+      const rateCheck = checkRateLimit(result.token, 'general')
+      if (rateCheck) return rateCheck
+
+      const body = await request.arrayBuffer()
+      if (body.byteLength > 50 * 1024 * 1024) {
+        return jsonResponse({ error: 'Backup too large (max 50MB)' }, 413)
+      }
+      const key = `${result.data.userId}/backup.zip`
+      await env.BACKUPS.put(key, body)
+
+      return jsonResponse({ ok: true, size: body.byteLength })
+    }
+
+    if (request.method === 'GET' && url.pathname === '/backup') {
+      const result = await validateRequest(request, env)
+      if (result instanceof Response) return result
+      const rateCheck = checkRateLimit(result.token, 'general')
+      if (rateCheck) return rateCheck
+
+      const key = `${result.data.userId}/backup.zip`
+      const object = await env.BACKUPS.get(key)
+      if (!object) {
+        return jsonResponse({ error: 'No backup found' }, 404)
+      }
+
+      return new Response(object.body, {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/zip',
+          'Content-Length': String(object.size),
+          ...corsHeaders(),
+        },
+      })
+    }
+
 
     // --- Composio proxy (all methods) ---
     if (url.pathname.startsWith('/v1/composio/')) {

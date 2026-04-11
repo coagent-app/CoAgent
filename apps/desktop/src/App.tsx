@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import { Sidebar } from '@/components/Sidebar'
 import type { View } from '@/components/Sidebar'
 import { QueuePane } from '@/components/QueuePane'
@@ -12,6 +12,9 @@ import { SkillsPane } from '@/components/SkillsPane'
 import { TeamPane } from '@/components/TeamPane'
 import { CanvasPane } from '@/components/CanvasPane'
 import { OnboardingTour } from '@/components/OnboardingTour'
+import { OnboardingActivation } from '@/components/OnboardingActivation'
+import { QueueToast } from '@/components/QueueToast'
+import { QueueDrawer } from '@/components/QueueDrawer'
 import { useAgent } from '@/hooks/useAgent'
 import { useUpdater } from '@/hooks/useUpdater'
 import { useTheme } from '@/hooks/useTheme'
@@ -19,10 +22,11 @@ import { registerVoiceHotkey, unregisterVoiceHotkey, cancelVoice, setTtsVolume }
 import { setVoiceActive } from '@/hooks/useAgent'
 import { primeKernelPool, sweepIdleWorkers } from '@/python/python-kernel'
 import { emit } from '@tauri-apps/api/event'
+import { open } from '@tauri-apps/plugin-shell'
 import type { ApprovalItem } from '@coagent/shared'
 
 export default function App() {
-  const { queue, done, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, error, chat, approve, reject, editQueueItem, connectIntegration, disconnectIntegration, settings, updateSettings, authStatus, updateAuth, verifyAuth, files, folders, searchResults, transcribingFiles, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, relayActive, relayModel, setRelayModel, relayUsage, activateRelay, refreshRelayStatus, pendingFields, setPendingFields, setModel, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, triggerPrompt, setTriggerPrompt, canvas, canvasVisible, canvasStreaming, canvasStreamingCode, openCanvas, closeCanvas, canvasesList, getCanvases, codeCells, codeCellOrder, cancelCodeCell, exportPdf } = useAgent()
+  const { queue, done, newQueueIds, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, error, chat, approve, reject, editQueueItem, dismissQueueToast, connectIntegration, disconnectIntegration, settings, updateSettings, authStatus, updateAuth, verifyAuth, files, folders, searchResults, transcribingFiles, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, relayActive, relayModel, setRelayModel, relayUsage, activateRelay, refreshRelayStatus, pendingFields, setPendingFields, setModel, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, triggerPrompt, setTriggerPrompt, canvas, canvasVisible, canvasStreaming, canvasStreamingCode, openCanvas, closeCanvas, canvasesList, getCanvases, codeCells, codeCellOrder, cancelCodeCell, exportPdf } = useAgent()
   const { dark, toggle: toggleTheme } = useTheme()
   const updater = useUpdater()
   const [view, setView] = useState<View>('chat')
@@ -30,8 +34,56 @@ export default function App() {
   const selectedItem = selectedItemId ? queue.find(i => i.id === selectedItemId) ?? null : null
   const setSelectedItem = useCallback((item: ApprovalItem | null) => setSelectedItemId(item?.id ?? null), [])
   const [modalOpen, setModalOpen] = useState(false)
+  const [drawerOpen, setDrawerOpen] = useState(false)
+  const [activated, setActivated] = useState(() => !!localStorage.getItem('coagent-token'))
   const [tourDone, setTourDone] = useState(() => localStorage.getItem('tourDone') === '1')
   const markTourDone = useCallback((done: boolean) => { setTourDone(done); if (done) localStorage.setItem('tourDone', '1') }, [])
+  const newQueueItems = useMemo(() => queue.filter(i => newQueueIds.has(i.id) && i.status === 'pending'), [queue, newQueueIds])
+
+  // Partner state
+  const RELAY_URL = (import.meta.env.VITE_RELAY_URL as string).replace(/\/$/, '')
+  const [partnerStats, setPartnerStats] = useState<{ referralCode?: string; tier?: string; commissionRate?: number; stripeConnectId?: string; accruedCommission?: number } | null>(null)
+
+  useEffect(() => {
+    const token = localStorage.getItem('coagent-token')
+    if (!token || token === 'existing') return
+    fetch(`${RELAY_URL}/partner/stats`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (data) setPartnerStats(data) })
+      .catch(() => {})
+  }, [activated])
+
+  const handleSetupPayouts = useCallback(async () => {
+    const token = localStorage.getItem('coagent-token')
+    if (!token) return
+    try {
+      const res = await fetch(`${RELAY_URL}/partner/connect`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      })
+      const data = await res.json() as any
+      if (data.url) {
+        await open(data.url)
+        // Refresh stats after a delay to pick up the Connect ID
+        setTimeout(() => {
+          fetch(`${RELAY_URL}/partner/stats`, { headers: { Authorization: `Bearer ${token}` } })
+            .then(r => r.ok ? r.json() : null)
+            .then(d => { if (d) setPartnerStats(d) })
+            .catch(() => {})
+        }, 5000)
+      }
+    } catch (e) {
+      console.error('[Partner] Connect failed:', e)
+    }
+  }, [])
+
+  // Mark as activated if relay credentials are already present (existing users)
+  useEffect(() => {
+    if (relayCredentials && !activated) {
+      localStorage.setItem('coagent-token', 'existing')
+      setActivated(true)
+    }
+  }, [relayCredentials, activated])
 
   // ESC to cancel voice/stop agent — always fire both regardless of state
   useEffect(() => {
@@ -89,6 +141,29 @@ export default function App() {
     setSelectedItemId(null)
   }
 
+  function handleApproveAll() {
+    queue.filter(i => i.status === 'pending').forEach(i => approve(i.id))
+    setDrawerOpen(false)
+  }
+
+  function handleRejectAll() {
+    queue.filter(i => i.status === 'pending').forEach(i => reject(i.id))
+    setDrawerOpen(false)
+  }
+
+  // Show onboarding activation if user hasn't activated yet
+  if (!activated) {
+    return (
+      <OnboardingActivation
+        onActivated={(token) => {
+          setActivated(true)
+          // Also activate relay so the backend knows about this token
+          activateRelay(token, import.meta.env.VITE_RELAY_URL as string)
+        }}
+      />
+    )
+  }
+
   return (
     <>
       {error && (
@@ -124,11 +199,19 @@ export default function App() {
           dark={dark}
           toggleTheme={toggleTheme}
           hasTeam={!!teamInfo}
+          onQueueBadgeClick={() => { setDrawerOpen(true); dismissQueueToast() }}
         />
 
         {view === 'chat' && (
           <div className="relative flex-1 flex overflow-hidden">
             <ChatPane messages={messages} streamingText={streamingText} thinking={thinking} processing={processing} toolLabel={toolLabel} researchAgents={researchAgents} connected={connected} onChat={chat} onSteer={steer} onStop={stopAgent} onIngestFile={ingestFile} files={files} onNavigateToSettings={() => setView('settings')} lastHeartbeat={lastHeartbeat} heartbeatLog={heartbeatLog} onTriggerHeartbeat={triggerHeartbeat} statusLine={statusLine} skills={skills} capabilityCard={capabilityCard} onConfirmCapabilities={confirmCapabilities} userName={settings?.name} userRole={settings?.role} onboarded={settings?.onboarded} agentName={settings?.agent_name} codeCells={codeCells} codeCellOrder={codeCellOrder} onCancelCodeCell={cancelCodeCell} className="flex-1" />
+            {newQueueItems.length > 0 && !drawerOpen && (
+              <QueueToast
+                items={newQueueItems}
+                onReview={() => { setDrawerOpen(true); dismissQueueToast() }}
+                onDismiss={dismissQueueToast}
+              />
+            )}
             {canvas && canvasVisible && (
               <CanvasPane
                 canvas={canvas}
@@ -143,6 +226,16 @@ export default function App() {
                 onExportPdf={exportPdf}
               />
             )}
+            <QueueDrawer
+              open={drawerOpen}
+              queue={queue}
+              onClose={() => setDrawerOpen(false)}
+              onApprove={handleApprove}
+              onReject={handleReject}
+              onApproveAll={handleApproveAll}
+              onRejectAll={handleRejectAll}
+              onEdit={editQueueItem}
+            />
           </div>
         )}
 
@@ -191,6 +284,11 @@ export default function App() {
             onAdminListTokens={adminListTokens}
             onAdminRevokeToken={adminRevokeToken}
             onClearAdminNewToken={clearAdminNewToken}
+            referralCode={partnerStats?.referralCode}
+            commissionRate={partnerStats?.commissionRate ? partnerStats.commissionRate * 100 : undefined}
+            tier={partnerStats?.tier === 'founder' ? 'Founder' : partnerStats?.tier === 'early_access' ? 'Early Access' : partnerStats?.tier === 'standard' ? 'Standard' : undefined}
+            stripeConnectId={partnerStats?.stripeConnectId}
+            onSetupPayouts={handleSetupPayouts}
           />
         )}
 
@@ -235,7 +333,6 @@ export default function App() {
           />
         )}
       </div>
-
 
       <IntegrationsModal
         open={modalOpen}

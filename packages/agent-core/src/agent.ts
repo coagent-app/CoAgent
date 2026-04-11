@@ -264,7 +264,7 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
         timezone: { type: 'string' }, role: { type: 'string' },
         what_you_do: { type: 'string', description: 'Their work description for system prompt' },
         agent_name: { type: 'string', description: 'What the user wants to call their agent (e.g. "Jarvis", "Friday")' },
-        custom_instructions: { type: 'string', description: 'Custom instructions injected into every system prompt — use this to store user preferences, lead criteria, workflow rules, etc.' },
+        // custom_instructions is user-only — edited in Settings UI, not by the agent. Use memory/preferences.md for agent-learned workflow rules.
         onboarded: { type: 'boolean', description: 'True after onboarding done' },
         active_hours: { type: 'object', properties: { start: { type: 'number' }, end: { type: 'number' } } },
         active_days: { type: 'array', items: { type: 'string', enum: ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] } },
@@ -744,8 +744,22 @@ function listMemoryFiles(dataDir: string): string[] {
   } catch { return [] }
 }
 
-export function buildSystemPrompt(connectedServices: string[], agentProfilePath: string, settings: AgentSettings, dataDir: string, teamRoster?: any[], teamName?: string, googleCalendarConnected = false, composioSlugs: string[] = []): string {
+function readPreferences(dataDir: string): string {
+  try {
+    const content = require('fs').readFileSync(join(dataDir, 'memory', 'preferences.md'), 'utf-8').trim()
+    // Strip the "# Preferences" header and empty section headers to keep it lean
+    const lines = content.split('\n').filter((l: string) => {
+      const t = l.trim()
+      return t && t !== '# Preferences' && !/^##\s+\S+$/.test(t) || (t.startsWith('- ') || t.startsWith('* ') || (!t.startsWith('#') && t.length > 0))
+    })
+    const cleaned = lines.slice(0, 30).join('\n').trim()
+    return cleaned.length > 0 ? cleaned : ''
+  } catch { return '' }
+}
+
+export function buildSystemPrompt(connectedServices: string[], agentProfilePath: string, settings: AgentSettings, dataDir: string, teamRoster?: any[], teamName?: string, googleCalendarConnected = false, composioSlugs: string[] = [], imessageConnected = false): string {
   const memoryFiles = listMemoryFiles(dataDir)
+  const preferences = readPreferences(dataDir)
 
   // Auto-humanize slugs: "googledocs" → "Google Docs", "google_maps" → "Google Maps"
   const humanizeSlug = (s: string): string => {
@@ -795,7 +809,9 @@ You have web search — use search_tools with query "composio_search web" to fin
 Every tool listed here is real and operational. Use them rather than saying you cannot.
 For anything outside these built-in tools, use search_tools to discover and call external integration tools.
 </tools>
-${customInstructions ? `\n${customInstructions}\n` : ''}
+${customInstructions ? `\n${customInstructions}\n` : ''}${preferences ? `\n<preferences>\n${preferences}\n</preferences>\n` : ''}
+When the user states a workflow rule or convention, save it to memory/preferences.md in parallel with your main task. One bullet per rule, keep each under 8 words. At 20 rules, consolidate before adding more. Not for tool IDs or API parameters — those go in integration_notes.
+
 This system prompt is your source of truth. If earlier messages in this conversation reference different settings or modes, they are outdated — follow what is here now.
 
 <autonomy>
@@ -810,7 +826,7 @@ Active: ${formatHour(settings.active_hours.start)}–${formatHour(settings.activ
 
 ${serviceSection}
 ${settings.heartbeat_interval > 0 ? `\n<heartbeat>\nEvery ${settings.heartbeat_interval}min. Read heartbeat.md in memory for what to check. After each run, call set_status_line with a 3-8 word summary.\n</heartbeat>` : ''}
-${googleCalendarConnected ? '\nGoogle Calendar is synced into schedule(list). To modify Google events, use GOOGLECALENDAR_UPDATE_EVENT or GOOGLECALENDAR_DELETE_EVENT through call_external_tool.' : ''}
+${googleCalendarConnected ? '\nGoogle Calendar is synced into schedule(list). To modify Google events, use GOOGLECALENDAR_UPDATE_EVENT or GOOGLECALENDAR_DELETE_EVENT through call_external_tool.' : ''}${imessageConnected ? '\nYou have direct access to iMessage. Use the built-in iMessage tools to list conversations (with unread counts), search messages by keyword/date/contact, read full conversation threads, and send texts by phone number, email, or contact name. These are built-in tools — call them directly, no need for search_tools.' : ''}
 
 Keep responses short and direct. No emojis. Use plain text inside emails and messages — markdown renders literally in Gmail.
 Before sending, replying, or modifying anything external, make sure you have the correct information — don't guess.
@@ -1299,14 +1315,15 @@ export class Agent {
     // Memoize system prompt — only rebuild when services or settings actually change
     const memFileCount = listMemoryFiles(this.dataDir).length
     const teamRosterKey = this.teamClient ? `${this.teamClient.teamId}|${this.teamClient.getRoster().length}` : ''
-    const promptKey = connectedServices.join(',') + '|' + JSON.stringify(settings) + '|' + memFileCount + '|' + teamRosterKey + '|' + this.googleCalendarConnected + '|' + this.composioConnectedSlugs.join(',')
+    const prefsMtime = (() => { try { return require('fs').statSync(join(this.dataDir, 'memory', 'preferences.md')).mtimeMs } catch { return 0 } })()
+    const promptKey = connectedServices.join(',') + '|' + JSON.stringify(settings) + '|' + memFileCount + '|' + teamRosterKey + '|' + this.googleCalendarConnected + '|' + this.imessageConnected + '|' + this.composioConnectedSlugs.join(',') + '|' + prefsMtime
     let systemPrompt: string
     if (this.cachedSystemPrompt && this.cachedPromptKey === promptKey) {
       systemPrompt = this.cachedSystemPrompt
     } else {
       const teamRoster = this.teamClient?.getRoster()
       const teamName = this.teamClient?.teamName ?? undefined
-      systemPrompt = buildSystemPrompt(connectedServices, this.agentProfilePath, settings, this.dataDir, teamRoster, teamName, this.googleCalendarConnected, this.composioConnectedSlugs)
+      systemPrompt = buildSystemPrompt(connectedServices, this.agentProfilePath, settings, this.dataDir, teamRoster, teamName, this.googleCalendarConnected, this.composioConnectedSlugs, this.imessageConnected)
       this.cachedSystemPrompt = systemPrompt
       this.cachedPromptKey = promptKey
       console.log('[Agent] System prompt rebuilt (settings or services changed)')

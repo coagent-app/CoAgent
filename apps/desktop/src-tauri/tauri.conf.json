@@ -73,6 +73,11 @@
       "endpoints": [
         "https://github.com/coagent-app/CoAgent/releases/latest/download/latest.json"
       ]
+    },
+    "deep-link": {
+      "desktop": {
+        "schemes": ["coagent"]
+      }
     }
   }
 }

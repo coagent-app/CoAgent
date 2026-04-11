@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils'
 import { hexToRgba } from '@/lib/colors'
 import type { AgentSettings, DayName, Autonomy, RelayUsage, UsageSummary, AdminUser } from '@coagent/shared'
 
-type SettingsTab = 'general' | 'model' | 'brand' | 'usage' | 'admin'
+type SettingsTab = 'general' | 'model' | 'brand' | 'usage' | 'account' | 'admin'
 
 /** Controlled input that syncs with server value and auto-saves on change with debounce */
 function useDebouncedField(serverValue: string, onSave: (val: string) => void, delay = 600) {
@@ -56,6 +56,15 @@ interface SettingsPaneProps {
   onAdminListTokens?: () => void
   onAdminRevokeToken?: (token: string) => void
   onClearAdminNewToken?: () => void
+  // Account tab props
+  onSetupPayouts?: () => void
+  onBackup?: () => void
+  onRestore?: () => void
+  referralCode?: string
+  commissionRate?: number
+  tier?: string
+  stripeConnectId?: string
+  lastBackupDate?: string
 }
 
 // --- Shared UI ---
@@ -944,6 +953,133 @@ function BrandTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate: (
   )
 }
 
+// --- Tab: Account ---
+
+const TIER_STYLES: Record<string, string> = {
+  Founder: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400',
+  'Early Access': 'bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-400',
+  Standard: 'bg-neutral-100 text-neutral-600 dark:bg-neutral-800 dark:text-neutral-400',
+}
+
+function AccountTab({
+  referralCode,
+  commissionRate,
+  tier,
+  stripeConnectId,
+  lastBackupDate,
+  onSetupPayouts,
+  onBackup,
+  onRestore,
+}: {
+  referralCode?: string
+  commissionRate?: number
+  tier?: string
+  stripeConnectId?: string
+  lastBackupDate?: string
+  onSetupPayouts?: () => void
+  onBackup?: () => void
+  onRestore?: () => void
+}) {
+  const [copied, setCopied] = useState(false)
+  const displayCode = referralCode || 'your-code'
+  const referralUrl = displayCode
+  const displayTier = tier || 'Standard'
+  const displayRate = commissionRate ?? 20
+
+  function handleCopyReferral() {
+    navigator.clipboard.writeText(referralUrl).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
+
+  return (
+    <>
+      {/* Referrals */}
+      <SectionHeader eyebrow="Referrals" title="Earn by referring" />
+      <div className="flex items-center gap-2 mb-3">
+        <span className={cn(
+          'text-[10px] font-semibold px-1.5 py-0.5 rounded-full',
+          TIER_STYLES[displayTier] || TIER_STYLES.Standard
+        )}>
+          {displayTier}
+        </span>
+        <span className="text-[12.5px] text-neutral-500 dark:text-neutral-400">
+          You earn {displayRate}% on every user you refer
+        </span>
+      </div>
+      <FieldRow label="Your referral code">
+        <div className="flex items-center gap-2">
+          <div className="flex-1 font-mono text-[12px] px-3 py-2 rounded-lg bg-neutral-100 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 truncate select-all border border-neutral-200 dark:border-neutral-700">
+            {referralUrl}
+          </div>
+          <button
+            type="button"
+            onClick={handleCopyReferral}
+            className="px-3 py-2 rounded-lg text-[12px] font-semibold border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-neutral-700 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-neutral-700 transition-colors flex-shrink-0"
+          >
+            {copied ? 'Copied!' : 'Copy'}
+          </button>
+        </div>
+      </FieldRow>
+
+      <Separator className="my-6 dark:bg-neutral-800" />
+
+      {/* Payouts */}
+      <SectionHeader eyebrow="Payouts" title="Referral payouts" />
+      {stripeConnectId ? (
+        <div className="flex items-center gap-2 mb-4">
+          <span className="text-[12.5px] font-semibold px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+            Payouts active
+          </span>
+        </div>
+      ) : (
+        <div className="mb-4">
+          <p className="text-[12.5px] text-neutral-500 dark:text-neutral-400 mb-3">
+            Connect your Stripe account to receive referral payouts.
+          </p>
+          <button
+            type="button"
+            onClick={onSetupPayouts}
+            className="px-4 py-2 rounded-lg text-[13px] font-semibold bg-neutral-900 text-white dark:bg-neutral-100 dark:text-neutral-900 hover:opacity-90 transition-opacity"
+          >
+            Set up payouts
+          </button>
+        </div>
+      )}
+
+      <Separator className="my-6 dark:bg-neutral-800" />
+
+      {/* Backup */}
+      <SectionHeader eyebrow="Data" title="Back up your data" />
+      <p className="text-[12.5px] text-neutral-500 dark:text-neutral-400 mb-4">
+        Backs up your memory, files, preferences, and skills.
+      </p>
+      {lastBackupDate && (
+        <p className="text-[11.5px] text-neutral-400 dark:text-neutral-500 mb-3">
+          Last backup: {new Date(lastBackupDate).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+        </p>
+      )}
+      <div className="flex gap-2">
+        <button
+          type="button"
+          onClick={onBackup}
+          className="px-4 py-2 rounded-lg text-[13px] font-semibold bg-neutral-900 text-white dark:bg-neutral-100 dark:text-neutral-900 hover:opacity-90 transition-opacity"
+        >
+          Create Backup
+        </button>
+        <button
+          type="button"
+          onClick={onRestore}
+          className="px-4 py-2 rounded-lg text-[13px] font-semibold border border-neutral-200 dark:border-neutral-700 text-neutral-700 dark:text-neutral-200 bg-white dark:bg-neutral-800 hover:bg-neutral-50 dark:hover:bg-neutral-700 transition-colors"
+        >
+          Restore from Backup
+        </button>
+      </div>
+    </>
+  )
+}
+
 // --- Main ---
 
 const BASE_TABS: { id: SettingsTab; label: string }[] = [
@@ -951,9 +1087,10 @@ const BASE_TABS: { id: SettingsTab; label: string }[] = [
   { id: 'model', label: 'Model' },
   { id: 'brand', label: 'Brand' },
   { id: 'usage', label: 'Usage' },
+  { id: 'account', label: 'Account' },
 ]
 
-export function SettingsPane({ settings, onUpdate, onSetModel, usage, onRefreshUsage, isAdmin, adminUsers, adminNewToken, onAdminCreateToken, onAdminListTokens, onAdminRevokeToken, onClearAdminNewToken, relayActive, onActivateRelay }: SettingsPaneProps) {
+export function SettingsPane({ settings, onUpdate, onSetModel, usage, onRefreshUsage, isAdmin, adminUsers, adminNewToken, onAdminCreateToken, onAdminListTokens, onAdminRevokeToken, onClearAdminNewToken, relayActive, onActivateRelay, onSetupPayouts, onBackup, onRestore, referralCode, commissionRate, tier, stripeConnectId, lastBackupDate }: SettingsPaneProps) {
   const [tab, setTab] = useState<SettingsTab>('general')
   const TABS = isAdmin ? [...BASE_TABS, { id: 'admin' as SettingsTab, label: 'Admin' }] : BASE_TABS
 
@@ -995,6 +1132,18 @@ export function SettingsPane({ settings, onUpdate, onSetModel, usage, onRefreshU
           {tab === 'model' && <ModelTab settings={settings} onSetModel={onSetModel} />}
           {tab === 'brand' && <BrandTab settings={settings} onUpdate={onUpdate} />}
           {tab === 'usage' && <UsageTab usage={usage ?? null} onRefresh={onRefreshUsage} />}
+          {tab === 'account' && (
+            <AccountTab
+              referralCode={referralCode}
+              commissionRate={commissionRate}
+              tier={tier}
+              stripeConnectId={stripeConnectId}
+              lastBackupDate={lastBackupDate}
+              onSetupPayouts={onSetupPayouts}
+              onBackup={onBackup}
+              onRestore={onRestore}
+            />
+          )}
           {tab === 'admin' && isAdmin && (
             <AdminTab
               users={adminUsers ?? []}

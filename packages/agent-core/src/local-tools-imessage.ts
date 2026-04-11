@@ -19,11 +19,14 @@
  * happy while still getting the real implementation at runtime.
  */
 
-import { execSync } from 'child_process'
+import { execFile } from 'child_process'
+import { promisify } from 'util'
 import { readdirSync, statSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import Anthropic from '@anthropic-ai/sdk'
+
+const execFileAsync = promisify(execFile)
 
 // Lazy-load bun:sqlite — only available in the compiled Bun sidecar, not Node dev mode
 let _Database: any = null
@@ -141,9 +144,83 @@ function lookupContactName(identifier: string): string | null {
   return null
 }
 
+interface ContactMatch {
+  name: string
+  /** All phone numbers and emails associated with this contact */
+  identifiers: string[]
+}
+
+/**
+ * Reverse lookup: find contacts whose display name fuzzy-matches the given
+ * string. Queries the AddressBook SQLite databases directly (same sources as
+ * buildContactCache). Returns one entry per unique display name, each with all
+ * their phone numbers and emails.
+ */
+function lookupIdentifiersByName(contactName: string): ContactMatch[] {
+  const dbPaths = findAddressBookDbs()
+  const needle = contactName.toLowerCase()
+
+  // name → identifiers — deduplicate across sources
+  const byName = new Map<string, Set<string>>()
+
+  for (const dbPath of dbPaths) {
+    try {
+      const db = new (getDatabase())(dbPath, { readonly: true })
+      try {
+        const rows = db.query(`
+          SELECT r.Z_PK, r.ZFIRSTNAME, r.ZLASTNAME, r.ZORGANIZATION
+          FROM ZABCDRECORD r
+          WHERE LOWER(COALESCE(r.ZFIRSTNAME, '') || ' ' || COALESCE(r.ZLASTNAME, '')) LIKE ?
+             OR LOWER(COALESCE(r.ZFIRSTNAME, ''))    LIKE ?
+             OR LOWER(COALESCE(r.ZLASTNAME, ''))     LIKE ?
+             OR LOWER(COALESCE(r.ZORGANIZATION, '')) LIKE ?
+        `).all(`%${needle}%`, `%${needle}%`, `%${needle}%`, `%${needle}%`) as Array<{
+          Z_PK: number
+          ZFIRSTNAME: string | null
+          ZLASTNAME: string | null
+          ZORGANIZATION: string | null
+        }>
+
+        for (const row of rows) {
+          const name = [row.ZFIRSTNAME, row.ZLASTNAME].filter(Boolean).join(' ') || row.ZORGANIZATION
+          if (!name) continue
+
+          const key = name.toLowerCase()
+          if (!byName.has(key)) byName.set(key, new Set())
+          const ids = byName.get(key)!
+
+          const phones = db.query(
+            'SELECT ZFULLNUMBER FROM ZABCDPHONENUMBER WHERE ZOWNER = ? AND ZFULLNUMBER IS NOT NULL'
+          ).all(row.Z_PK) as Array<{ ZFULLNUMBER: string }>
+          for (const p of phones) ids.add(p.ZFULLNUMBER)
+
+          const emails = db.query(
+            'SELECT ZADDRESS FROM ZABCDEMAILADDRESS WHERE ZOWNER = ? AND ZADDRESS IS NOT NULL'
+          ).all(row.Z_PK) as Array<{ ZADDRESS: string }>
+          for (const e of emails) ids.add(e.ZADDRESS.toLowerCase())
+        }
+      } finally {
+        db.close()
+      }
+    } catch (e: any) {
+      console.log(`[iMessage] Skipping ${dbPath} for name lookup: ${e.message}`)
+    }
+  }
+
+  return Array.from(byName.entries()).map(([name, ids]) => ({
+    name,
+    identifiers: Array.from(ids),
+  }))
+}
+
 function coreDataToISO(ts: number | null): string | null {
   if (!ts) return null
   return new Date((ts / 1000000000 + 978307200) * 1000).toISOString()
+}
+
+/** Reverse of coreDataToISO — converts an ISO date string to a CoreData nanosecond timestamp. */
+function isoToCoreData(iso: string): number {
+  return (Date.parse(iso) / 1000 - 978307200) * 1000000000
 }
 
 /**
@@ -215,7 +292,7 @@ function openDb(): any {
 export const IMESSAGE_TOOLS: Anthropic.Tool[] = [
   {
     name: 'IMESSAGE_LIST_CONVERSATIONS',
-    description: 'List recent iMessage conversations with last message preview.',
+    description: 'List recent iMessage conversations with last message preview, sender, and unread count. Set unread_only=true to see only unread conversations.',
     input_schema: {
       type: 'object',
       properties: {
@@ -223,13 +300,17 @@ export const IMESSAGE_TOOLS: Anthropic.Tool[] = [
           type: 'number',
           description: 'Maximum number of conversations to return (default 20)',
         },
+        unread_only: {
+          type: 'boolean',
+          description: 'When true, only return conversations where the last message is unread (received, not yet read)',
+        },
       },
       required: [],
     },
   },
   {
     name: 'IMESSAGE_GET_CONVERSATION',
-    description: 'Get recent messages from a specific conversation by phone number or email address.',
+    description: "Get message history from a specific contact by phone number or email. Returns messages in chronological order. Use 'since'/'before' with ISO dates to filter by date range (e.g. since='2026-04-01').",
     input_schema: {
       type: 'object',
       properties: {
@@ -241,13 +322,21 @@ export const IMESSAGE_TOOLS: Anthropic.Tool[] = [
           type: 'number',
           description: 'Maximum number of messages to return (default 50)',
         },
+        since: {
+          type: 'string',
+          description: 'Return only messages on or after this ISO date string (e.g. "2024-01-01T00:00:00Z")',
+        },
+        before: {
+          type: 'string',
+          description: 'Return only messages before this ISO date string (e.g. "2024-12-31T23:59:59Z")',
+        },
       },
       required: ['identifier'],
     },
   },
   {
     name: 'IMESSAGE_SEARCH',
-    description: 'Search messages by keyword, optionally filtered by contact.',
+    description: 'Search all iMessage conversations by keyword. Optionally filter by contact and/or date range. Returns matching messages with sender names and timestamps.',
     input_schema: {
       type: 'object',
       properties: {
@@ -263,26 +352,38 @@ export const IMESSAGE_TOOLS: Anthropic.Tool[] = [
           type: 'number',
           description: 'Maximum number of results to return (default 30)',
         },
+        since: {
+          type: 'string',
+          description: 'Return only messages on or after this ISO date string (e.g. "2024-01-01T00:00:00Z")',
+        },
+        before: {
+          type: 'string',
+          description: 'Return only messages before this ISO date string (e.g. "2024-12-31T23:59:59Z")',
+        },
       },
       required: ['query'],
     },
   },
   {
     name: 'IMESSAGE_SEND',
-    description: 'Send an iMessage to a phone number or email address via AppleScript.',
+    description: "Send an iMessage. Provide either 'to' (phone/email) or 'contact_name' (will auto-resolve from Contacts). Message is sent via the Messages app.",
     input_schema: {
       type: 'object',
       properties: {
         to: {
           type: 'string',
-          description: 'Recipient phone number or email address',
+          description: 'Recipient phone number or email address. Required if contact_name is not provided.',
+        },
+        contact_name: {
+          type: 'string',
+          description: "Recipient's name as it appears in Contacts. The tool will look up their phone number or email automatically. Use this instead of 'to' when you know the person's name but not their number.",
         },
         text: {
           type: 'string',
           description: 'Message text to send',
         },
       },
-      required: ['to', 'text'],
+      required: ['text'],
     },
   },
 ]
@@ -291,6 +392,7 @@ export async function handleImessageTool(name: string, args: Record<string, unkn
   try {
     if (name === 'IMESSAGE_LIST_CONVERSATIONS') {
       const limit = (args?.limit as number) ?? 20
+      const unreadOnly = (args?.unread_only as boolean) ?? false
       const db = openDb()
       try {
         const rows = db.query(`
@@ -302,7 +404,16 @@ export async function handleImessageTool(name: string, args: Record<string, unkn
             m.text           AS last_text,
             m.attributedBody AS last_attributed_body,
             m.date           AS last_date,
-            m.is_from_me
+            m.is_from_me,
+            m.is_read,
+            (
+              SELECT COUNT(*)
+              FROM chat_message_join cmj3
+              JOIN message m3 ON m3.ROWID = cmj3.message_id
+              WHERE cmj3.chat_id = c.ROWID
+                AND m3.is_from_me = 0
+                AND m3.is_read = 0
+            ) AS unread_count
           FROM chat c
           LEFT JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
           LEFT JOIN message m ON m.ROWID = cmj.message_id
@@ -313,6 +424,7 @@ export async function handleImessageTool(name: string, args: Record<string, unkn
             JOIN message m2 ON m2.ROWID = cmj2.message_id
             WHERE cmj2.chat_id = c.ROWID
           )
+          ${unreadOnly ? 'AND m.is_from_me = 0 AND m.is_read = 0' : ''}
           ORDER BY m.date DESC
           LIMIT ?
         `).all(limit) as Array<{
@@ -324,6 +436,8 @@ export async function handleImessageTool(name: string, args: Record<string, unkn
           last_attributed_body: Uint8Array | null
           last_date: number | null
           is_from_me: number
+          is_read: number
+          unread_count: number
         }>
 
         const conversations = rows.map((row) => {
@@ -333,7 +447,9 @@ export async function handleImessageTool(name: string, args: Record<string, unkn
             chat_identifier: row.chat_identifier,
             display_name: contactName,
             last_message: row.last_text ?? parseAttributedBody(row.last_attributed_body),
+            last_message_sender: row.is_from_me === 1 ? 'me' : contactName,
             last_message_date: coreDataToISO(row.last_date),
+            unread_count: row.unread_count,
             is_from_me: row.is_from_me === 1,
           }
         })
@@ -347,8 +463,22 @@ export async function handleImessageTool(name: string, args: Record<string, unkn
     if (name === 'IMESSAGE_GET_CONVERSATION') {
       const identifier = args?.identifier as string
       const limit = (args?.limit as number) ?? 50
+      const since = args?.since as string | undefined
+      const before = args?.before as string | undefined
       const db = openDb()
       try {
+        const dateConditions: string[] = []
+        const dateParams: number[] = []
+        if (since) {
+          dateConditions.push('m.date >= ?')
+          dateParams.push(isoToCoreData(since))
+        }
+        if (before) {
+          dateConditions.push('m.date < ?')
+          dateParams.push(isoToCoreData(before))
+        }
+        const dateWhere = dateConditions.length > 0 ? ' AND ' + dateConditions.join(' AND ') : ''
+
         const rows = db.query(`
           SELECT
             m.ROWID,
@@ -361,10 +491,10 @@ export async function handleImessageTool(name: string, args: Record<string, unkn
           JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
           JOIN chat c ON c.ROWID = cmj.chat_id
           LEFT JOIN handle h ON h.ROWID = m.handle_id
-          WHERE c.chat_identifier LIKE ?
+          WHERE c.chat_identifier LIKE ?${dateWhere}
           ORDER BY m.date DESC
           LIMIT ?
-        `).all(`%${identifier}%`, limit) as Array<{
+        `).all(`%${identifier}%`, ...dateParams, limit) as Array<{
           ROWID: number
           text: string | null
           attributedBody: Uint8Array | null
@@ -465,10 +595,39 @@ export async function handleImessageTool(name: string, args: Record<string, unkn
     }
 
     if (name === 'IMESSAGE_SEND') {
-      const to = args?.to as string
+      const contactName = args?.contact_name as string | undefined
+      let to = args?.to as string | undefined
       const text = args?.text as string
 
-      // Validate recipient format to prevent AppleScript/shell injection
+      // Resolve contact_name → phone/email if to is not provided directly
+      if (!to && contactName) {
+        const matches = lookupIdentifiersByName(contactName)
+
+        if (matches.length === 0) {
+          return `No contact found matching "${contactName}". Please check the name or provide the phone number/email directly using the 'to' parameter.`
+        }
+
+        if (matches.length > 1) {
+          const names = matches.map(m => `"${m.name}"`).join(', ')
+          return `Multiple contacts match "${contactName}": ${names}. Please be more specific or provide the phone number/email directly using the 'to' parameter.`
+        }
+
+        const match = matches[0]
+        if (match.identifiers.length === 0) {
+          return `Contact "${match.name}" was found but has no phone number or email address on record.`
+        }
+
+        // Prefer a phone number over email for iMessage; fall back to first identifier
+        const phone = match.identifiers.find(id => !id.includes('@'))
+        to = phone ?? match.identifiers[0]
+        console.log(`[iMessage] Resolved "${contactName}" → ${to}`)
+      }
+
+      if (!to) {
+        return "Missing recipient. Provide either 'to' (phone number or email) or 'contact_name'."
+      }
+
+      // Validate recipient format to prevent AppleScript injection
       if (!/^[\d+\-() ]+$|^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) {
         return `Invalid recipient format: "${to}". Must be a phone number or email address.`
       }
@@ -484,9 +643,10 @@ export async function handleImessageTool(name: string, args: Record<string, unkn
         'end tell',
       ].join('\n')
 
-      execSync(`osascript -e '${appleScript.replace(/'/g, "'\"'\"'")}'`)
+      await execFileAsync('osascript', ['-e', appleScript])
 
-      return `Message sent to ${to}`
+      const recipient = contactName ? `${contactName} (${to})` : to
+      return `Message sent to ${recipient}`
     }
 
     throw new Error(`Unknown iMessage tool: ${name}`)

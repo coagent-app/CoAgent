@@ -23,6 +23,7 @@ interface SidebarProps {
   dark: boolean
   toggleTheme: () => void
   hasTeam?: boolean
+  onQueueBadgeClick?: () => void
 }
 
 const MAX_SIDEBAR_INTEGRATIONS = 8
@@ -128,7 +129,7 @@ function IntegrationItem({
   )
 }
 
-export function Sidebar({ view, onViewChange, queueCount, integrations, onConnect, onDisconnect, onOpenModal, userName, dark, toggleTheme, hasTeam }: SidebarProps) {
+export function Sidebar({ view, onViewChange, queueCount, integrations, onConnect, onDisconnect, onOpenModal, userName, dark, toggleTheme, hasTeam, onQueueBadgeClick }: SidebarProps) {
 
   return (
     <div className="w-52 bg-[#FAFAFA] dark:bg-neutral-900 border-r border-neutral-200 dark:border-neutral-800 flex flex-col py-4 px-3 flex-shrink-0">
@@ -143,7 +144,13 @@ export function Sidebar({ view, onViewChange, queueCount, integrations, onConnec
         {hasTeam && <NavItem icon={Users} label="Team" active={view === 'team'} onClick={() => onViewChange('team')} />}
         <NavItem icon={Zap} label="Skills" active={view === 'skills'} onClick={() => onViewChange('skills')} />
         <NavItem icon={CalendarIcon} label="Schedule" active={view === 'calendar'} onClick={() => onViewChange('calendar')} />
-        <NavItem icon={Inbox} label="Queue" active={view === 'queue'} onClick={() => onViewChange('queue')} badge={queueCount} />
+        <NavItem icon={Inbox} label="Queue" active={view === 'queue'} onClick={() => {
+          if (onQueueBadgeClick && view === 'chat') {
+            onQueueBadgeClick()
+          } else {
+            onViewChange('queue')
+          }
+        }} badge={queueCount} />
         <NavItem icon={FolderOpen} label="Files" active={view === 'files'} onClick={() => onViewChange('files')} />
       </div>
 

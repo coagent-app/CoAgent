@@ -403,19 +403,19 @@
     <!-- SOCIAL PROOF BAR -->
     <section class="py-10 border-t border-b border-brand-100 dark:border-brand-900">
       <div class="max-w-4xl mx-auto px-6">
-        <div class="flex flex-col sm:flex-row items-center justify-center gap-8 sm:gap-16 text-[13px] text-brand-400 dark:text-brand-500">
+        <div id="stats-bar" class="flex flex-col sm:flex-row items-center justify-center gap-8 sm:gap-16 text-[13px] text-brand-400 dark:text-brand-500">
           <div class="flex items-center gap-3">
-            <span class="text-[24px] font-bold text-brand-900 dark:text-brand-100">30+</span>
+            <span class="text-[24px] font-bold text-brand-900 dark:text-brand-100"><span class="stat-number" data-target="30" data-suffix="+">0</span></span>
             <span>integrations<br/>supported</span>
           </div>
           <div class="hidden sm:block w-px h-8 bg-brand-200 dark:bg-brand-800"></div>
           <div class="flex items-center gap-3">
-            <span class="text-[24px] font-bold text-brand-900 dark:text-brand-100">24/7</span>
+            <span class="text-[24px] font-bold text-brand-900 dark:text-brand-100"><span class="stat-number" data-target="24" data-suffix="/7">0</span></span>
             <span>autonomous<br/>operation</span>
           </div>
           <div class="hidden sm:block w-px h-8 bg-brand-200 dark:bg-brand-800"></div>
           <div class="flex items-center gap-3">
-            <span class="text-[24px] font-bold text-brand-900 dark:text-brand-100">10x</span>
+            <span class="text-[24px] font-bold text-brand-900 dark:text-brand-100"><span class="stat-number" data-target="10" data-suffix="x">0</span></span>
             <span>faster than<br/>manual workflows</span>
           </div>
         </div>
@@ -804,6 +804,33 @@
     }, { threshold: 0.1 });
 
     document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+
+    // ---- Stats count-up animation ----
+    const statsBar = document.getElementById('stats-bar');
+    if (statsBar) {
+      const statsObserver = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+          if (entry.isIntersecting) {
+            entry.target.querySelectorAll('.stat-number').forEach(el => {
+              const target = parseInt(el.dataset.target);
+              const suffix = el.dataset.suffix || '';
+              const duration = 2000;
+              const start = performance.now();
+              function tick(now) {
+                const progress = Math.min((now - start) / duration, 1);
+                const eased = 1 - Math.pow(1 - progress, 3); // ease-out cubic
+                const current = Math.round(eased * target);
+                el.textContent = current + suffix;
+                if (progress < 1) requestAnimationFrame(tick);
+              }
+              requestAnimationFrame(tick);
+            });
+            statsObserver.unobserve(entry.target);
+          }
+        });
+      }, { threshold: 0.3 });
+      statsObserver.observe(statsBar);
+    }
 
     // ---- Routing ----
     function route() {

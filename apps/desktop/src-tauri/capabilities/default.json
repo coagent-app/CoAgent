@@ -12,6 +12,7 @@
     "process:default",
     "dialog:allow-save",
     "shell:allow-open",
+    "deep-link:default",
     {
       "identifier": "shell:allow-execute",
       "allow": [

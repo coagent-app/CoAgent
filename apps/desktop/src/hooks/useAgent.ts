@@ -104,6 +104,7 @@ export function useAgent() {
   const codeCellsRef = useRef<Record<string, CodeCell>>({})
   const [queue, setQueue] = useState<ApprovalItem[]>([])
   const [done, setDone] = useState<DoneItem[]>([])
+  const [newQueueIds, setNewQueueIds] = useState<Set<string>>(new Set())
   const [messages, setMessages] = useState<AgentMessage[]>(_cached.messages ?? [])
   const [streamingText, setStreamingText] = useState<string | null>(null)
   const [thinking, setThinking] = useState(false)
@@ -237,7 +238,20 @@ export function useAgent() {
           socket.send(JSON.stringify({ type: 'team_history', limit: 50 }))
           socket.send(JSON.stringify({ type: 'get_google_calendar_status' }))
         }
-        if (msg.type === 'queue_update') setQueue(msg.items)
+        if (msg.type === 'queue_update') {
+          setQueue(prev => {
+            const prevIds = new Set(prev.map(i => i.id))
+            const fresh = msg.items.filter(i => i.status === 'pending' && !prevIds.has(i.id))
+            if (fresh.length > 0) {
+              setNewQueueIds(old => {
+                const next = new Set(old)
+                fresh.forEach(i => next.add(i.id))
+                return next
+              })
+            }
+            return msg.items
+          })
+        }
         if (msg.type === 'done_update') setDone(msg.items)
         if (msg.type === 'agent_thinking') {
           wasStreamingRef.current = false
@@ -808,6 +822,7 @@ export function useAgent() {
   const approve = useCallback((id: string) => send({ type: 'approve', id }), [send])
   const reject = useCallback((id: string) => send({ type: 'reject', id }), [send])
   const editQueueItem = useCallback((id: string, detail: string) => send({ type: 'edit_queue_item', id, detail }), [send])
+  const dismissQueueToast = useCallback(() => setNewQueueIds(new Set()), [])
   const connectIntegration = useCallback((slug: string, params?: Record<string, string>) => {
     send({ type: 'integration_connect', slug, params })
   }, [send])
@@ -1039,7 +1054,7 @@ export function useAgent() {
     googleCalendarSync, confirmCapabilities, deleteCustomIntegration, toggleTrigger,
     getRelayCredentials, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken,
     sendTeamMessage, getTeamInfo, getTeamHistory, setTriggerPrompt, openCanvas, closeCanvas,
-    getCanvases, cancelCodeCell, exportPdf,
+    getCanvases, cancelCodeCell, exportPdf, dismissQueueToast,
   }), [
     triggerHeartbeat, updateSkill, deleteSkill, steer, stopAgent,
     handleSetRelayModel, setPendingFields, setModel, chat, approve, reject,
@@ -1051,14 +1066,14 @@ export function useAgent() {
     googleCalendarSync, confirmCapabilities, deleteCustomIntegration, toggleTrigger,
     getRelayCredentials, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken,
     sendTeamMessage, getTeamInfo, getTeamHistory, setTriggerPrompt, openCanvas, closeCanvas,
-    getCanvases, cancelCodeCell, exportPdf,
+    getCanvases, cancelCodeCell, exportPdf, dismissQueueToast,
   ])
 
   return {
     // Volatile state (changes on every streaming chunk)
     streamingText, thinking, processing, toolLabel, researchAgents,
     // Less-frequent state
-    queue, done, messages, connected, lastHeartbeat, heartbeatLog, statusLine, skills,
+    queue, done, newQueueIds, messages, connected, lastHeartbeat, heartbeatLog, statusLine, skills,
     integrations, settings, authStatus, files, folders, searchResults, transcribingFiles,
     error, relayActive, relayModel, relayUsage, pendingFields, voiceSummary, usage,
     organizing, calendarEntries, googleCalendarStatus, capabilityCard, whatsappQr,
