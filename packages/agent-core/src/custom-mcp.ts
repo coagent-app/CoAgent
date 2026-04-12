@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir, rm } from 'fs/promises'
+import { readFile, writeFile, mkdir, rm, chmod } from 'fs/promises'
 import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { parse as dotenvParse } from 'dotenv'
@@ -66,7 +66,9 @@ export async function writeCustomMcpCredentials(name: string, credentials: Recor
   const envContent = Object.entries(credentials)
     .map(([k, v]) => `${k}="${v.replace(/"/g, '\\"')}"`)
     .join('\n')
-  await writeFile(join(dir, '.env'), envContent, 'utf-8')
+  const envPath = join(dir, '.env')
+  await writeFile(envPath, envContent, 'utf-8')
+  await chmod(envPath, 0o600)
 
   // Mark as connected in registry
   const registry = await readRegistry()

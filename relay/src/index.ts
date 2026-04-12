@@ -137,11 +137,25 @@ function calcAnthropicCost(
 
 // --- Helpers ---
 
+const ALLOWED_ORIGINS = new Set([
+  'tauri://localhost',        // production Tauri app
+  'https://tauri.localhost',  // Tauri v2 on some platforms
+  'http://tauri.localhost',
+  'http://localhost:1420',    // dev Vite
+  'https://coagent-ai.com',
+  'https://www.coagent-ai.com',
+])
+
+// requestOrigin is set at the top of each fetch() call
+let _requestOrigin: string | null = null
+
 function corsHeaders(): Record<string, string> {
+  const origin = _requestOrigin && ALLOWED_ORIGINS.has(_requestOrigin) ? _requestOrigin : 'tauri://localhost'
   return {
-    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, anthropic-version, anthropic-beta, x-api-key',
+    'Vary': 'Origin',
   }
 }
 
@@ -175,8 +189,8 @@ function timingSafeEqual(a: string, b: string): boolean {
 
 const PRICE_TO_TIER: Record<string, { tier: TokenData['tier']; rate: number }> = {
   'price_founder_none':             { tier: 'founder',      rate: 0.25 },
-  'price_1TL7pJQBIOqsWwkhi7JXwKEG': { tier: 'early_access', rate: 0.15 },
-  'price_1TL7pYQBIOqsWwkhrnrwpgBL': { tier: 'standard',     rate: 0.10 },
+  'price_1TLBd4G3cQKPdIVeODxKnisP': { tier: 'early_access', rate: 0.15 },
+  'price_1TLBcaG3cQKPdIVenRDAsKbt': { tier: 'standard',     rate: 0.10 },
 }
 
 const TIER_INFO: Record<string, { label: string }> = {
@@ -1575,6 +1589,7 @@ export class TeamChannel {
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url)
+    _requestOrigin = request.headers.get('Origin')
 
     // Prune stale rate-limit buckets once per minute (memory hygiene)
     pruneRateBuckets()
@@ -2184,6 +2199,17 @@ export default {
       const ref = url.searchParams.get('ref')
       if (!ref) return jsonResponse({ error: 'Missing ref parameter' }, 400)
 
+      // Check if it's an invite code (INVITE_xxx)
+      if (ref.startsWith('INVITE_')) {
+        const invite = await env.TOKENS.get(`invite:${ref}`)
+        if (!invite) return jsonResponse({ valid: false })
+        const inviteData = JSON.parse(invite) as { tier: TokenData['tier']; used: boolean }
+        if (inviteData.used) return jsonResponse({ valid: false, error: 'Code already used' })
+        const info = TIER_INFO[inviteData.tier] || TIER_INFO.standard
+        return jsonResponse({ valid: true, tier: inviteData.tier, ...info })
+      }
+
+      // Otherwise it's a referral code (REF_xxx)
       const ownerToken = await env.TOKENS.get(`ref:${ref}`)
       if (!ownerToken) return jsonResponse({ valid: false })
 
@@ -2208,18 +2234,28 @@ export default {
       const body = await request.json() as { referralCode?: string }
       if (!body.referralCode) return jsonResponse({ error: 'Missing referralCode' }, 400)
 
-      // Validate referral code exists
-      const ownerToken = await env.TOKENS.get(`ref:${body.referralCode}`)
-      if (!ownerToken) return jsonResponse({ error: 'Invalid referral code' }, 404)
+      let newTier: TokenData['tier']
 
-      // Determine tier and price for the new user based on referrer's tier
-      const ownerData = await getToken(env, ownerToken)
-      const REFERRAL_TIER: Record<string, TokenData['tier']> = {
-        founder: 'early_access',
-        early_access: 'standard',
-        standard: 'standard',
+      if (body.referralCode.startsWith('INVITE_')) {
+        // Invite code — use the tier directly
+        const invite = await env.TOKENS.get(`invite:${body.referralCode}`)
+        if (!invite) return jsonResponse({ error: 'Invalid invite code' }, 404)
+        const inviteData = JSON.parse(invite) as { tier: TokenData['tier']; used: boolean }
+        if (inviteData.used) return jsonResponse({ error: 'Invite code already used' }, 410)
+        newTier = inviteData.tier
+      } else {
+        // Referral code — validate and apply tier mapping
+        const ownerToken = await env.TOKENS.get(`ref:${body.referralCode}`)
+        if (!ownerToken) return jsonResponse({ error: 'Invalid referral code' }, 404)
+
+        const ownerData = await getToken(env, ownerToken)
+        const REFERRAL_TIER: Record<string, TokenData['tier']> = {
+          founder: 'early_access',
+          early_access: 'standard',
+          standard: 'standard',
+        }
+        newTier = REFERRAL_TIER[ownerData?.tier || 'standard'] || 'standard'
       }
-      const newTier = REFERRAL_TIER[ownerData?.tier || 'standard'] || 'standard'
 
       const tierToPriceMap: Record<string, string> = {}
       for (const [pid, info] of Object.entries(PRICE_TO_TIER)) {
@@ -2260,18 +2296,29 @@ export default {
       const body = await request.json() as { referralCode?: string }
       if (!body.referralCode) return jsonResponse({ error: 'Missing referralCode' }, 400)
 
-      // Validate referral code
-      const ownerToken = await env.TOKENS.get(`ref:${body.referralCode}`)
-      if (!ownerToken) return jsonResponse({ error: 'Invalid referral code' }, 404)
-
-      const ownerData = await getToken(env, ownerToken)
-      // Referral tier mapping: founder→early_access, early_access→standard, standard→standard
-      const REFERRAL_TIER: Record<string, TokenData['tier']> = {
-        founder: 'early_access',
-        early_access: 'standard',
-        standard: 'standard',
+      // /subscribe is for FREE activation only (invite codes for founder tier).
+      // Paid tiers must go through /invite/redeem → Stripe Checkout → /subscribe/checkout.
+      if (!body.referralCode.startsWith('INVITE_')) {
+        return jsonResponse({ error: 'Use an invite code to activate' }, 400)
       }
-      const tier = REFERRAL_TIER[ownerData?.tier || 'standard'] || 'standard'
+
+      const invite = await env.TOKENS.get(`invite:${body.referralCode}`)
+      if (!invite) return jsonResponse({ error: 'Invalid invite code' }, 404)
+      const inviteData = JSON.parse(invite) as { tier: TokenData['tier']; used: boolean }
+      if (inviteData.used) return jsonResponse({ error: 'Invite code already used' }, 410)
+
+      // Only founder tier gets free activation — paid tiers must go through Stripe
+      if (inviteData.tier !== 'founder') {
+        return jsonResponse({ error: 'This code requires payment — use the activation screen' }, 400)
+      }
+
+      const tier = inviteData.tier
+      const referredBy = body.referralCode
+
+      // Mark invite as used
+      inviteData.used = true
+      await env.TOKENS.put(`invite:${body.referralCode}`, JSON.stringify(inviteData))
+
       const info = TIER_INFO[tier] || TIER_INFO.standard
 
       // Generate token + referral code for new user
@@ -2297,7 +2344,7 @@ export default {
         active: true,
         tier,
         referralCode,
-        referredBy: body.referralCode,
+        referredBy,
         commissionRate,
       }
       await saveToken(env, token, tokenData)
@@ -2361,6 +2408,16 @@ export default {
       await env.TOKENS.put(`ref:${referralCode}`, token)
       await env.TOKENS.put(`checkout:${body.sessionId}`, token)
       if (session.customer) await env.TOKENS.put(`stripe:${session.customer}`, token)
+
+      // Mark invite code as used if applicable
+      if (referralCodeUsed.startsWith('INVITE_')) {
+        const invite = await env.TOKENS.get(`invite:${referralCodeUsed}`)
+        if (invite) {
+          const inviteData = JSON.parse(invite)
+          inviteData.used = true
+          await env.TOKENS.put(`invite:${referralCodeUsed}`, JSON.stringify(inviteData))
+        }
+      }
 
       console.log(`[Subscribe/Checkout] New ${tier} user #${userId} (session: ${body.sessionId.slice(0, 12)}...): ${token.slice(0, 8)}...`)
 

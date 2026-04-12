@@ -36,6 +36,8 @@ export default function App() {
   const [modalOpen, setModalOpen] = useState(false)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [activated, setActivated] = useState(() => !!localStorage.getItem('coagent-token'))
+  const [hydrated, setHydrated] = useState(false)
+  useEffect(() => { setHydrated(true) }, [])
   const [tourDone, setTourDone] = useState(() => localStorage.getItem('tourDone') === '1')
   const markTourDone = useCallback((done: boolean) => { setTourDone(done); if (done) localStorage.setItem('tourDone', '1') }, [])
   const newQueueItems = useMemo(() => queue.filter(i => newQueueIds.has(i.id) && i.status === 'pending'), [queue, newQueueIds])
@@ -152,7 +154,8 @@ export default function App() {
   }
 
   // Show onboarding activation if user hasn't activated yet
-  if (!activated) {
+  // Skip if backend is already connected (existing user with relay credentials)
+  if (hydrated && !activated && !connected && !relayCredentials) {
     return (
       <OnboardingActivation
         onActivated={(token) => {
