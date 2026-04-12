@@ -16,6 +16,9 @@ let recordingReady: Promise<void> | null = null // resolves when startRecording 
 const HOLD_THRESHOLD_MS = 400 // hold longer than this = hold-to-release mode
 let volumeEmitInterval: ReturnType<typeof setInterval> | null = null
 let cachedStream: MediaStream | null = null
+let streamCreatedAt = 0
+let streamIdleTimer: ReturnType<typeof setTimeout> | null = null
+const STREAM_IDLE_TIMEOUT_MS = 30_000
 
 // State callback — tells the UI what's happening
 let onStateChange: ((state: 'listening' | 'thinking' | 'hidden', summary?: string) => void) | null = null
@@ -47,9 +50,30 @@ function hidePill() {
   updatePill('hidden') // VoicePill treats 'hidden' as 'idle' — stays visible as small mic
 }
 
+function releaseStream() {
+  if (streamIdleTimer) { clearTimeout(streamIdleTimer); streamIdleTimer = null }
+  if (cachedStream) { cachedStream.getTracks().forEach(t => t.stop()); cachedStream = null }
+  streamCreatedAt = 0
+}
+
 async function getStream(): Promise<MediaStream> {
-  if (cachedStream && cachedStream.active) return cachedStream
+  // Validate cached stream: must be active and all tracks must be live
+  if (cachedStream && cachedStream.active && cachedStream.getTracks().every(t => t.readyState === 'live')) {
+    return cachedStream
+  }
+  // Release stale stream before acquiring a new one
+  releaseStream()
   cachedStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+  streamCreatedAt = Date.now()
+  // Auto-release after 30s of idle (no recording started)
+  if (streamIdleTimer) clearTimeout(streamIdleTimer)
+  streamIdleTimer = setTimeout(() => {
+    // Only release if not currently recording
+    if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+      console.log('[Voice] Stream idle timeout — releasing mic')
+      releaseStream()
+    }
+  }, STREAM_IDLE_TIMEOUT_MS)
   return cachedStream
 }
 
@@ -57,6 +81,8 @@ async function startRecording() {
   try {
     onStateChange?.('listening')
     updatePill('listening')
+    // Cancel idle timeout — recording is starting
+    if (streamIdleTimer) { clearTimeout(streamIdleTimer); streamIdleTimer = null }
     const stream = await getStream()
     audioChunks = []
     speechDetected = false
@@ -111,6 +137,14 @@ async function stopRecordingAndSend(
   // Clean up speech check, keep stream + audioCtx alive for next press
   stopVolumeEmit()
   if (speechCheckInterval) { clearInterval(speechCheckInterval); speechCheckInterval = null }
+  // Restart idle timer — release stream if no recording starts within 30s
+  if (streamIdleTimer) clearTimeout(streamIdleTimer)
+  streamIdleTimer = setTimeout(() => {
+    if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+      console.log('[Voice] Stream idle timeout after recording — releasing mic')
+      releaseStream()
+    }
+  }, STREAM_IDLE_TIMEOUT_MS)
 
   const duration = Date.now() - recordingStartTime
   if (blob.size < 1000 || duration < 600 || !speechDetected) {
@@ -290,7 +324,7 @@ export function cancelVoice() {
   }
   stopVolumeEmit()
   if (speechCheckInterval) { clearInterval(speechCheckInterval); speechCheckInterval = null }
-  if (cachedStream) { cachedStream.getTracks().forEach(t => t.stop()); cachedStream = null }
+  releaseStream()
   if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; analyser = null }
   onStateChange?.('hidden')
   setVoiceActive(false)
@@ -421,7 +455,7 @@ export async function registerVoiceHotkey(
 export async function unregisterVoiceHotkey() {
   onStateChange = null
   locked = false
-  if (cachedStream) { cachedStream.getTracks().forEach(t => t.stop()); cachedStream = null }
+  releaseStream()
   if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; analyser = null }
   if (fnUnlisteners.length > 0) {
     fnUnlisteners.forEach(fn => fn())

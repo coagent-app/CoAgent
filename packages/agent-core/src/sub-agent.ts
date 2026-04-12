@@ -14,7 +14,6 @@ const MAX_TOOL_LOOPS = 20
 const BLOCKED_TOOLS = new Set([
   'queue_approval',
   'notify_user',
-  'call_external_tool',
   'send_team_message',
   'update_settings',
   'add_done_item',
@@ -23,6 +22,12 @@ const BLOCKED_TOOLS = new Set([
   'spawn_agents',   // no recursion
   'message_agent',  // sub-agents cannot message other sub-agents
 ])
+
+// External tool actions that imply write/mutation — sub-agents can only read
+const WRITE_ACTION_PATTERNS = [
+  'send', 'create', 'delete', 'remove', 'update', 'modify', 'post', 'put', 'patch',
+  'archive', 'trash', 'draft', 'reply', 'forward', 'schedule', 'cancel', 'invite',
+]
 
 // Memory actions sub-agents CAN use (read + write to memory, but not delete)
 const ALLOWED_MEMORY_ACTIONS = new Set(['search', 'read', 'write', 'append', 'edit', 'list'])

@@ -233,6 +233,7 @@ export interface SchedulerCallbacks {
 export interface SchedulerHandle {
   rescheduleHeartbeat: () => void
   rescheduleBrief: () => void
+  rescheduleRecap: () => void
 }
 
 // ── 3 AM job tracking ─────────────────────────────────────────────────────
@@ -527,6 +528,97 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
     }).catch(() => {})
   }
 
+  // ── Meeting recap timer: fires N minutes after calendar events end ──────────
+
+  let recapTimer: ReturnType<typeof setTimeout> | null = null
+  const recappedEvents = new Set<string>()
+
+  async function fireMeetingRecap(): Promise<void> {
+    const settings = await readSettings(dataDir)
+    if (!settings.auto_recap_meetings) { scheduleRecapTimer(); return }
+
+    const minutesAfter = settings.auto_recap_minutes || 5
+    const now = Date.now()
+
+    const events = agent.calendar.getAll().filter(e =>
+      e.type === 'event' && e.end && !recappedEvents.has(e.id)
+    )
+
+    for (const event of events) {
+      const endTime = new Date(event.end!).getTime()
+      const recapTime = endTime + minutesAfter * 60 * 1000
+      // Fire if we're within 2 minutes of the recap time (tolerance for sleep/wake drift)
+      if (now >= recapTime && (now - recapTime) < 2 * 60 * 1000) {
+        recappedEvents.add(event.id)
+        const minsAgo = Math.round((now - endTime) / 60000)
+        console.log(`[Scheduler] Meeting recap firing: "${event.label}" ended ${minsAgo}min ago`)
+        callbacks?.onTodoStream?.('start', { task: `Meeting recap: ${event.label}`, due: event.end })
+        try {
+          let streamed = ''
+          await keepAwakeDuring(
+            agent.handleTrigger(
+              {
+                source: 'meeting_recap',
+                payload: {
+                  eventId: event.id,
+                  title: event.label,
+                  start: event.start,
+                  end: event.end,
+                  location: event.location,
+                  notes: event.notes,
+                  minutesSinceEnd: minsAgo,
+                }
+              },
+              (chunk) => {
+                streamed += chunk
+                callbacks?.onTodoStream?.('chunk', { text: chunk })
+              },
+              (tool, label) => {
+                callbacks?.onTodoStream?.('tool', { tool, label })
+              }
+            )
+          )
+          callbacks?.onTodoStream?.('done', { response: streamed })
+        } catch (err: any) {
+          console.error(`[Scheduler] Meeting recap error (${event.id}):`, err.message)
+        }
+      }
+    }
+    scheduleRecapTimer()
+  }
+
+  function scheduleRecapTimer(): void {
+    if (recapTimer) clearTimeout(recapTimer)
+    recapTimer = null
+
+    readSettings(dataDir).then(settings => {
+      if (!settings.auto_recap_meetings) return
+
+      const minutesAfter = settings.auto_recap_minutes || 5
+      const now = Date.now()
+      const events = agent.calendar.getAll().filter(e =>
+        e.type === 'event' && e.end && !recappedEvents.has(e.id)
+      )
+
+      let nextRecapTime: number | null = null
+      for (const event of events) {
+        const endTime = new Date(event.end!).getTime()
+        const recapTime = endTime + minutesAfter * 60 * 1000
+        if (recapTime > now && (nextRecapTime === null || recapTime < nextRecapTime)) {
+          nextRecapTime = recapTime
+        }
+      }
+
+      if (nextRecapTime) {
+        const delay = nextRecapTime - now
+        const recapAt = new Date(nextRecapTime)
+        console.log(`[Scheduler] Next meeting recap in ${Math.round(delay / 60000)}min at ${recapAt.toLocaleString()}`)
+        recapTimer = setTimeout(() => fireMeetingRecap(), delay)
+        scheduleWake(recapAt)
+      }
+    }).catch(() => {})
+  }
+
   // ── Heartbeat timer: fires at exact interval, no polling ───────────────────
 
   let heartbeatTimer: ReturnType<typeof setTimeout> | null = null
@@ -643,6 +735,7 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
     scheduleTaskTimer()
     syncRoutineTimers()
     scheduleBriefTimer()
+    scheduleRecapTimer()
   }
 
   // ── Startup: fire any overdue tasks, register routines, then schedule timers ─
@@ -655,8 +748,9 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
     await agent.mcpManager.ready()
     await fireDueTasks()
     scheduleBriefTimer()
+    scheduleRecapTimer()
     scheduleHeartbeatTimer()
   })().catch(err => console.error('[Scheduler] Startup error:', (err as Error).message))
 
-  return { rescheduleHeartbeat: scheduleHeartbeatTimer, rescheduleBrief: scheduleBriefTimer }
+  return { rescheduleHeartbeat: scheduleHeartbeatTimer, rescheduleBrief: scheduleBriefTimer, rescheduleRecap: scheduleRecapTimer }
 }

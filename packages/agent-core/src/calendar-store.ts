@@ -1,8 +1,20 @@
 import { v4 as uuidv4 } from 'uuid'
 import { readFileSync, mkdirSync, existsSync } from 'fs'
-import { writeFile } from 'fs/promises'
+import { writeFile, rename } from 'fs/promises'
 import { join } from 'path'
 import type { CalendarEntry, TodoItem } from '@coagent/shared'
+
+// ---------------------------------------------------------------------------
+// In-process async mutex — serialises all write operations so that two
+// simultaneous triggers cannot corrupt calendar.json.
+// ---------------------------------------------------------------------------
+let writeLock: Promise<void> = Promise.resolve()
+function withLock<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = writeLock
+  let resolve!: () => void
+  writeLock = new Promise(r => { resolve = r })
+  return prev.then(fn).finally(() => resolve())
+}
 
 type NewCalendarEntry = Omit<CalendarEntry, 'id' | 'createdAt'>
 
@@ -44,7 +56,14 @@ export class CalendarStore {
     if (this.saveDebounceTimer) clearTimeout(this.saveDebounceTimer)
     this.saveDebounceTimer = setTimeout(() => {
       this.saveDebounceTimer = null
-      writeFile(this.filePath, JSON.stringify(this.entries, null, 2)).catch(console.error)
+      const data = JSON.stringify(this.entries, null, 2)
+      const tmp = this.filePath + '.tmp'
+      // Acquire the lock so concurrent debounced saves are serialised and
+      // the atomic write (tmp → rename) is never interleaved with another.
+      withLock(async () => {
+        await writeFile(tmp, data)
+        await rename(tmp, this.filePath)
+      }).catch(console.error)
     }, 200)
   }
 

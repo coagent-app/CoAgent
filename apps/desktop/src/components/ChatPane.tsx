@@ -42,6 +42,7 @@ interface ChatPaneProps {
   codeCells?: Record<string, CodeCellType>
   codeCellOrder?: string[]
   onCancelCodeCell?: (id: string) => void
+  onOpenCanvas?: (canvasId: string) => void
   className?: string
 }
 
@@ -108,8 +109,8 @@ function HeartbeatIndicator({ lastHeartbeat, heartbeatLog, connected, onTrigger 
           </span>
         )}
         <div
-          title={connected ? 'Connected' : 'Disconnected'}
-          className={cn('w-2 h-2 rounded-full', connected ? 'bg-emerald-400 animate-pulse' : 'bg-red-400')}
+          title={connected ? 'Connected' : 'Connecting...'}
+          className={cn('w-2 h-2 rounded-full', connected ? 'bg-emerald-400 animate-pulse' : 'bg-neutral-300 dark:bg-neutral-600')}
         />
       </button>
 
@@ -487,7 +488,7 @@ function FileDeck({ files }: { files: FileEntry[] }) {
 const FILE_LINK_RE = /\[([^\]]*)\]\(coagent-file:([^)]+)\)/g
 
 
-const AgentBubble = React.memo(function AgentBubble({ content, files, docs }: { content: string; files: FileEntry[]; docs?: { id: string; title: string }[] }) {
+const AgentBubble = React.memo(function AgentBubble({ content, files, docs, onOpenCanvas }: { content: string; files: FileEntry[]; docs?: { id: string; title: string }[]; onOpenCanvas?: (id: string) => void }) {
   const filesMap = React.useMemo(() => {
     const map = new Map<string, FileEntry>()
     for (const f of files) map.set(f.id, f)
@@ -544,7 +545,7 @@ const AgentBubble = React.memo(function AgentBubble({ content, files, docs }: { 
               }
               return <code className="bg-neutral-200 dark:bg-neutral-700 rounded px-1 py-0.5 text-[12px] font-mono break-all">{children}</code>
             },
-            a: ({ children }) => <span className="text-blue-600 dark:text-blue-400 underline break-all">{children}</span>,
+            a: ({ href, children }) => <a href={href} target="_blank" rel="noopener noreferrer" onClick={e => { e.preventDefault(); if (href) (window as any).__TAURI__?.shell?.open?.(href) ?? window.open(href, '_blank') }} className="text-blue-600 dark:text-blue-400 underline break-all cursor-pointer hover:opacity-80">{children}</a>,
           }}
         >
           {cleanContent}
@@ -552,6 +553,23 @@ const AgentBubble = React.memo(function AgentBubble({ content, files, docs }: { 
       )}
       {referencedFiles.length > 0 && (
         <FileDeck files={referencedFiles} />
+      )}
+      {docs && docs.length > 0 && (
+        <div className="mt-2 flex flex-col gap-1.5">
+          {docs.map(doc => (
+            <button
+              key={doc.id}
+              onClick={() => onOpenCanvas?.(doc.id)}
+              className="flex items-center gap-2 px-3 py-2 rounded-lg bg-white/60 dark:bg-neutral-700/60 hover:bg-white dark:hover:bg-neutral-700 border border-neutral-200 dark:border-neutral-600 transition-colors text-left group"
+            >
+              <svg className="w-4 h-4 text-neutral-400 group-hover:text-neutral-600 dark:group-hover:text-neutral-300 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+              </svg>
+              <span className="text-[12.5px] font-medium text-neutral-700 dark:text-neutral-200 truncate">{doc.title}</span>
+              <span className="text-[10.5px] text-neutral-400 dark:text-neutral-500 ml-auto flex-shrink-0">Open</span>
+            </button>
+          ))}
+        </div>
       )}
     </div>
   )
@@ -572,14 +590,30 @@ const HistoricalMessageList = React.memo(function HistoricalMessageList({
   files,
   cellsByAnchor,
   onCancelCodeCell,
+  onOpenCanvas,
   welcomeContent,
 }: {
   messages: AgentMessage[]
   files: FileEntry[]
   cellsByAnchor: Record<number, CodeCellType[]>
   onCancelCodeCell?: (id: string) => void
+  onOpenCanvas?: (id: string) => void
   welcomeContent: string | null
 }) {
+  // Deduplicate doc cards: only show each canvas ID on the LAST message that references it.
+  // Build a set of canvas IDs that appear in a later message, then filter them out of earlier ones.
+  const dedupedDocs = useMemo(() => {
+    const lastSeen = new Map<string, number>() // canvasId → last message index
+    messages.forEach((msg, i) => {
+      msg.docs?.forEach(doc => lastSeen.set(doc.id, i))
+    })
+    return messages.map((msg, i) => {
+      if (!msg.docs?.length) return undefined
+      const filtered = msg.docs.filter(doc => lastSeen.get(doc.id) === i)
+      return filtered.length > 0 ? filtered : undefined
+    })
+  }, [messages])
+
   return (
     <>
       {welcomeContent !== null && (
@@ -600,7 +634,7 @@ const HistoricalMessageList = React.memo(function HistoricalMessageList({
             {msg.role === 'user' ? (
               <UserBubble content={msg.content} />
             ) : (
-              <AgentBubble content={msg.content} files={files} docs={msg.docs} />
+              <AgentBubble content={msg.content} files={files} docs={dedupedDocs[i]} onOpenCanvas={onOpenCanvas} />
             )}
           </div>
           {cellsByAnchor[i + 1]?.map(cell => (
@@ -661,7 +695,7 @@ function useDictation(onResult: (text: string) => void) {
   return { recording, transcribing, start, stop }
 }
 
-export function ChatPane({ messages, streamingText, thinking, processing, toolLabel, researchAgents = [], connected, onChat, onSteer, onStop, onIngestFile, files, onNavigateToSettings, lastHeartbeat, heartbeatLog = [], onTriggerHeartbeat, statusLine, skills = [], capabilityCard, onConfirmCapabilities, userName, userRole, onboarded, agentName, codeCells = {}, codeCellOrder = [], onCancelCodeCell, className }: ChatPaneProps) {
+export function ChatPane({ messages, streamingText, thinking, processing, toolLabel, researchAgents = [], connected, onChat, onSteer, onStop, onIngestFile, files, onNavigateToSettings, lastHeartbeat, heartbeatLog = [], onTriggerHeartbeat, statusLine, skills = [], capabilityCard, onConfirmCapabilities, userName, userRole, onboarded, agentName, codeCells = {}, codeCellOrder = [], onCancelCodeCell, onOpenCanvas, className }: ChatPaneProps) {
   // Group cells by anchor index for interleaved rendering between messages.
   // Cells with anchorIndex = N appear after the message at index N-1 (i.e.
   // between message N-1 and message N).
@@ -670,12 +704,13 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
     for (const id of codeCellOrder) {
       const cell = codeCells[id]
       if (!cell) continue
-      const idx = cell.anchorIndex
+      // Clamp anchor to valid range so cells never render past the last message
+      const idx = Math.min(cell.anchorIndex, messages.length)
       if (!map[idx]) map[idx] = []
       map[idx].push(cell)
     }
     return map
-  }, [codeCells, codeCellOrder])
+  }, [codeCells, codeCellOrder, messages.length])
   const [input, setInput] = useState('')
   const [skillQuery, setSkillQuery] = useState<string | null>(null)
   const [selectedSkillIdx, setSelectedSkillIdx] = useState(0)
@@ -685,6 +720,19 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
   const inputRef = useRef<HTMLInputElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  // Listen for injected text (e.g. workflow chips from IntegrationsModal)
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const text = (e as CustomEvent).detail as string
+      if (text) {
+        setInput(text)
+        inputRef.current?.focus()
+      }
+    }
+    window.addEventListener('coagent-inject-text', handler)
+    return () => window.removeEventListener('coagent-inject-text', handler)
+  }, [])
 
   // Dictation: append Whisper result to input
   const handleDictation = useCallback((text: string) => {
@@ -955,6 +1003,7 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
             files={files}
             cellsByAnchor={cellsByAnchor}
             onCancelCodeCell={onCancelCodeCell}
+            onOpenCanvas={onOpenCanvas}
             welcomeContent={messages.length === 0 && !isActive ? getWelcomeMessage(userName, userRole) : null}
           />
 

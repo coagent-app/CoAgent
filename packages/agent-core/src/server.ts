@@ -6,7 +6,7 @@ import { Agent } from './agent.js'
 import { GoogleCalendarService } from './google-calendar.js'
 import { MCPServerConfig } from './mcp-manager.js'
 import { setupComposioMcp } from './composio-setup.js'
-import { INTEGRATIONS, getIntegrationStatuses, generateAuthUrl, disconnectIntegration, getConnectedSlugs, subscribeSingleTrigger, purgeExpiredAccounts, getAvailableTriggersForSlug, getSubscribedTriggers, setTriggerEnabled, loadPersistedTriggers, markLocalConnected, seedLocalConnectionsIfNeeded, ensureWebhookSubscription, invalidateAccountsCache } from './composio-integrations.js'
+import { INTEGRATIONS, WORKFLOW_EXAMPLES, getIntegrationStatuses, generateAuthUrl, disconnectIntegration, getConnectedSlugs, subscribeSingleTrigger, purgeExpiredAccounts, getAvailableTriggersForSlug, getSubscribedTriggers, setTriggerEnabled, loadPersistedTriggers, markLocalConnected, seedLocalConnectionsIfNeeded, ensureWebhookSubscription, invalidateAccountsCache } from './composio-integrations.js'
 import { startScheduler } from './scheduler.js'
 import { readSettings, writeSettings } from './settings.js'
 
@@ -629,7 +629,7 @@ Silently set: update_settings({ heartbeat_interval: 30, onboarded: true })
 
 Quick tips:
 - Upload a contract and I can fill it out or review the terms
-- Say @lead-generation to research a prospect
+- Say @showcase to see everything I can help with
 - I have long-term memory — the more we work together, the better I get at anticipating what you need
 
 What can I help you with first?"
@@ -911,6 +911,36 @@ function loadDocDesignSkillInstructions(): string {
   return ''
 }
 
+DEFAULT_SKILLS['showcase'] = {
+  name: 'showcase',
+  description: 'See what you can do with your connected integrations — @showcase to explore',
+  placeholder: 'show me what I can do…',
+  instructions: `The user wants to see what they can do with their connected integrations.
+
+## Step 1: Get connected integrations
+
+Call list_integrations to see which integrations the user has connected.
+
+## Step 2: Present a personalized overview
+
+For each connected integration, share 2-3 specific things you can help with — phrased naturally, like you're a helpful assistant suggesting ideas. Group them by what the user might care about:
+
+- **Stay on top of things** — catching up on email, Slack, tasks, calendar
+- **Get things done faster** — drafting messages, creating docs, updating records
+- **Stay organized** — tracking deals, managing contacts, filing notes
+- **Grow your business** — outreach, campaigns, lead research, analytics
+
+Only include categories that apply to their actual connected integrations. Skip anything that isn't connected.
+
+## Step 3: Offer to go deeper
+
+End with something like: "Want me to try any of these right now? Or tell me what you're working on and I'll figure out how to help."
+
+## Tone
+
+Conversational and brief. Don't list every single capability — pick the most useful ones. This should feel like a quick tour, not a manual.`,
+}
+
 // Extend DEFAULT_SKILLS with the document-design skill loaded from disk
 DEFAULT_SKILLS['document-design'] = {
   name: 'document-design',
@@ -951,6 +981,8 @@ let chatInProgress = false
 let agentBusy = false
 let nextHeartbeatAt: string | undefined
 const pendingChatMessages: { message: string; fileIds?: string[] }[] = []
+// Listeners that track canvas operations during a chat turn
+const chatTurnDocListeners = new Set<(msg: any) => void>()
 
 const scheduler = startScheduler(agent, DATA_DIR, {
   onHeartbeat: (status, summary, nextAt) => {
@@ -1045,6 +1077,14 @@ agent.onSubAgentComplete = (agentId, label, result) => {
   deliverSubAgentResults([{ label, result: cappedResult }])
 }
 
+/** Drain any sub-agent results that queued while the agent was busy */
+function drainPendingSubAgentResults() {
+  if (pendingSubAgentResults.length > 0 && !agentBusy) {
+    const queued = pendingSubAgentResults.splice(0)
+    deliverSubAgentResults(queued)
+  }
+}
+
 function deliverSubAgentResults(results: { label: string; result: string }[]) {
   if (results.length === 0) return
   agentBusy = true
@@ -1072,11 +1112,7 @@ function deliverSubAgentResults(results: { label: string; result: string }[]) {
     broadcast({ type: 'agent_stopped' } as any)
   }).finally(() => {
     agentBusy = false
-    // Drain any results that queued while we were delivering
-    if (pendingSubAgentResults.length > 0) {
-      const queued = pendingSubAgentResults.splice(0)
-      deliverSubAgentResults(queued)
-    }
+    drainPendingSubAgentResults()
   })
 }
 
@@ -1900,6 +1936,8 @@ function send(ws: WebSocket, msg: WSServerMessage): void {
 
 function broadcast(msg: WSServerMessage): void {
   if (!wss) return
+  // Notify chat-turn doc listeners so they can track canvas operations
+  for (const listener of chatTurnDocListeners) listener(msg)
   const json = JSON.stringify(msg)
   for (const client of wss.clients) {
     if (client.readyState === WebSocket.OPEN) client.send(json)
@@ -1922,15 +1960,20 @@ async function sendIntegrations(ws: WebSocket): Promise<void> {
   const subscribedSet = getSubscribedTriggers()
   integrations = integrations.map(integration => {
     const suggested = suggestedSlugs.has(integration.slug.toLowerCase())
+    const workflows = WORKFLOW_EXAMPLES[integration.slug]
     const availableTriggers = getAvailableTriggersForSlug(integration.slug)
-    if (availableTriggers.length === 0) return suggested ? { ...integration, suggested } : integration
-    const triggers = availableTriggers.map(t => ({
-      slug: t.slug,
-      label: t.label,
-      appSlug: integration.slug,
-      enabled: subscribedSet.has(t.slug),
-    }))
-    return { ...integration, triggers, ...(suggested ? { suggested } : {}) }
+    const extra: Record<string, any> = {}
+    if (suggested) extra.suggested = true
+    if (workflows) extra.workflows = workflows
+    if (availableTriggers.length > 0) {
+      extra.triggers = availableTriggers.map(t => ({
+        slug: t.slug,
+        label: t.label,
+        appSlug: integration.slug,
+        enabled: subscribedSet.has(t.slug),
+      }))
+    }
+    return Object.keys(extra).length > 0 ? { ...integration, ...extra } : integration
   })
 
   const custom = await getCustomIntegrations()
@@ -2054,6 +2097,11 @@ async function sendFullState(ws: WebSocket): Promise<void> {
   sendFilesAndFolders(ws).catch(console.error)
   readSettings(DATA_DIR).then(settings => send(ws, { type: 'settings_update', settings })).catch(console.error)
   sendRelayStatus(ws).catch(console.error)
+  // Tell frontend that relay credentials exist on disk so it can auto-activate
+  // existing users without showing the activation screen.
+  if (getRelayConfig()) {
+    send(ws, { type: 'relay_credentials_ready' })
+  }
   agent.getSkills().then(skills => send(ws, { type: 'skills_update', skills })).catch(console.error)
 }
 
@@ -2200,6 +2248,7 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
       chatInProgress = false
       agentBusy = false
       broadcast({ type: 'voice_tts_cancel' } as any)
+      drainPendingSubAgentResults()
       return
     }
 
@@ -2225,6 +2274,15 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
       }
       chatInProgress = true
       agentBusy = true
+      // Track canvases created/updated during this chat turn
+      const turnDocs: Array<{ id: string; title: string }> = []
+      const turnDocListener = (bmsg: any) => {
+        if (bmsg.type === 'canvas_opened' || bmsg.type === 'canvas_updated') {
+          const c = bmsg.canvas as { id: string; title: string }
+          if (!turnDocs.some(d => d.id === c.id)) turnDocs.push({ id: c.id, title: c.title })
+        }
+      }
+      chatTurnDocListeners.add(turnDocListener)
       broadcast({ type: 'agent_thinking' } as any)
       // Ensure relay model sync is complete before first chat
       await relaySyncReady
@@ -2248,12 +2306,17 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
           ),
           chatTimeout
         ])
+        chatTurnDocListeners.delete(turnDocListener)
         const fullResponse = streamed || response
+        // Persist canvas doc refs on the history message so they survive restarts
+        if (turnDocs.length > 0) {
+          agent.attachDocsToLastMessage(turnDocs)
+        }
         // Skip empty responses (e.g. spawn_agents ended turn with no text)
         if (fullResponse.trim()) {
           broadcast({
             type: 'chat_response',
-            message: { role: 'assistant', content: fullResponse, timestamp: new Date().toISOString() }
+            message: { role: 'assistant', content: fullResponse, timestamp: new Date().toISOString(), ...(turnDocs.length > 0 ? { docs: turnDocs } : {}) }
           } as any)
         } else {
           // Still signal end of processing to UI
@@ -2264,16 +2327,21 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
         send(ws, { type: 'calendar_update', entries: agent.calendar.getAll() })
         broadcastFilesDebounced()
       } catch (err: any) {
+        chatTurnDocListeners.delete(turnDocListener)
         console.error('[Server] chat error:', err.message)
         broadcast({ type: 'error', message: err.message ?? 'Something went wrong.' } as any)
         broadcast({ type: 'agent_stopped' } as any)
       } finally {
         chatInProgress = false
         agentBusy = false
+        // Drain sub-agent results that arrived while we were busy
+        drainPendingSubAgentResults()
         // Drain the next pending message, if any arrived while we were busy
-        const pending = pendingChatMessages.shift()
-        if (pending) {
-          setImmediate(() => ws.emit('message', JSON.stringify({ type: 'chat', message: pending.message, fileIds: pending.fileIds })))
+        if (!agentBusy) {
+          const pending = pendingChatMessages.shift()
+          if (pending) {
+            setImmediate(() => ws.emit('message', JSON.stringify({ type: 'chat', message: pending.message, fileIds: pending.fileIds })))
+          }
         }
       }
     }
@@ -2330,6 +2398,7 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
       if (!voiceProxy) {
         voiceProcessing = false
         agentBusy = false
+        drainPendingSubAgentResults()
         send(ws, { type: 'error', message: 'Relay not configured — voice input unavailable.' })
         return
       }
@@ -2367,6 +2436,7 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
           // Nothing transcribed — silently dismiss the pill
           voiceProcessing = false
           agentBusy = false
+          drainPendingSubAgentResults()
           send(ws, { type: 'voice_summary', summary: '' })
           return
         }
@@ -2377,6 +2447,7 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
         if (!getRelayConfig()) {
           voiceProcessing = false
           agentBusy = false
+          drainPendingSubAgentResults()
           send(ws, { type: 'chat_response', message: { role: 'assistant', content: 'Relay not configured — cannot respond.', timestamp: new Date().toISOString() } })
           return
         }
@@ -2430,16 +2501,20 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
         send(ws, { type: 'voice_summary', summary: fullResponse })
         voiceProcessing = false
         agentBusy = false
+        drainPendingSubAgentResults()
       } catch (err: any) {
         voiceProcessing = false
         agentBusy = false
+        drainPendingSubAgentResults()
         console.error('[Voice] Transcription/chat error:', err.message)
         send(ws, { type: 'error', message: `Voice failed: ${err.message}` })
         send(ws, { type: 'agent_stopped' })
       } finally {
-        const pending = pendingChatMessages.shift()
-        if (pending) {
-          setImmediate(() => ws.emit('message', JSON.stringify({ type: 'chat', message: pending.message, fileIds: pending.fileIds })))
+        if (!agentBusy) {
+          const pending = pendingChatMessages.shift()
+          if (pending) {
+            setImmediate(() => ws.emit('message', JSON.stringify({ type: 'chat', message: pending.message, fileIds: pending.fileIds })))
+          }
         }
       }
     }
@@ -2512,9 +2587,12 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
       } finally {
         chatInProgress = false
         agentBusy = false
-        const pending = pendingChatMessages.shift()
-        if (pending) {
-          setImmediate(() => ws.emit('message', JSON.stringify({ type: 'chat', message: pending.message, fileIds: pending.fileIds })))
+        drainPendingSubAgentResults()
+        if (!agentBusy) {
+          const pending = pendingChatMessages.shift()
+          if (pending) {
+            setImmediate(() => ws.emit('message', JSON.stringify({ type: 'chat', message: pending.message, fileIds: pending.fileIds })))
+          }
         }
       }
     }
@@ -2560,6 +2638,7 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
         } finally {
           chatInProgress = false
           agentBusy = false
+          drainPendingSubAgentResults()
         }
       }
     }
@@ -2990,6 +3069,7 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
       } finally {
         chatInProgress = false
         agentBusy = false
+        drainPendingSubAgentResults()
       }
     }
 
@@ -3013,6 +3093,10 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
         // If auto-brief settings changed, reschedule the brief timer
         if (msg.patch.auto_brief_meetings !== undefined || msg.patch.auto_brief_minutes !== undefined) {
           scheduler.rescheduleBrief()
+        }
+        // If auto-recap settings changed, reschedule the recap timer
+        if (msg.patch.auto_recap_meetings !== undefined || msg.patch.auto_recap_minutes !== undefined) {
+          scheduler.rescheduleRecap()
         }
       } catch (err: any) {
         send(ws, { type: 'error', message: err.message })
@@ -3057,9 +3141,13 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
         const entry = await ingestFile(DATA_DIR, msg.filename, buffer, msg.mimeType, msg.group, (status, fileId) => {
           broadcast({ type: 'transcription_status', fileId, status } as any)
           if (status === 'done') broadcastFilesDebounced()
-        })
+        }, !!msg.canvasId /* upsert when saving canvas PDFs — overwrite, don't duplicate */)
         send(ws, { type: 'file_ingested', id: entry.id, filename: entry.filename })
         await sendFilesAndFolders(ws)
+        // If this was a canvas PDF save, resolve the pending promise so the agent can attach it
+        if (msg.canvasId) {
+          agent.resolveCanvasPdf(msg.canvasId, entry.id)
+        }
       } catch (err: any) {
         send(ws, { type: 'error', message: `Failed to ingest file: ${err.message}` })
       }
@@ -3387,6 +3475,10 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
       } catch (err: any) {
         send(ws, { type: 'canvas_error', canvasId: msg.canvasId, message: err?.message || 'Failed to open canvas' })
       }
+    }
+
+    if (msg.type === 'canvas_close') {
+      agent.activeCanvasId = null
     }
 
     if (msg.type === 'get_canvases') {

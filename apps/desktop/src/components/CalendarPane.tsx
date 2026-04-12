@@ -27,6 +27,8 @@ interface CalendarPaneProps {
   onGoogleSync?: () => void
   autoBriefMeetings?: boolean
   autoBriefMinutes?: number
+  autoRecapMeetings?: boolean
+  autoRecapMinutes?: number
   onUpdateSettings?: (patch: Record<string, unknown>) => void
 }
 
@@ -105,6 +107,8 @@ export function CalendarPane({
   onGoogleSync,
   autoBriefMeetings,
   autoBriefMinutes,
+  autoRecapMeetings,
+  autoRecapMinutes,
   onUpdateSettings,
 }: CalendarPaneProps) {
   const [view, setView] = useState<CalendarView>('week')
@@ -248,6 +252,8 @@ export function CalendarPane({
           onClose={() => setShowGoogleModal(false)}
           autoBriefMeetings={autoBriefMeetings ?? false}
           autoBriefMinutes={autoBriefMinutes ?? 30}
+          autoRecapMeetings={autoRecapMeetings ?? false}
+          autoRecapMinutes={autoRecapMinutes ?? 5}
           onUpdateSettings={onUpdateSettings}
         />
       )}
@@ -452,6 +458,8 @@ function GoogleCalendarModal({
   onClose,
   autoBriefMeetings,
   autoBriefMinutes,
+  autoRecapMeetings,
+  autoRecapMinutes,
   onUpdateSettings,
 }: {
   status: { connected: boolean; calendars: GoogleCalendarInfo[]; lastSync: string | null }
@@ -462,6 +470,8 @@ function GoogleCalendarModal({
   onClose: () => void
   autoBriefMeetings: boolean
   autoBriefMinutes: number
+  autoRecapMeetings: boolean
+  autoRecapMinutes: number
   onUpdateSettings?: (patch: Record<string, unknown>) => void
 }) {
   const [colorPickerFor, setColorPickerFor] = useState<string | null>(null)
@@ -590,6 +600,37 @@ function GoogleCalendarModal({
                       <option value={60}>1 hour</option>
                     </select>
                     <span className="text-[12px] text-neutral-500 dark:text-neutral-400">before</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Auto-recap after meetings */}
+              <div className="flex flex-col gap-2">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={autoRecapMeetings}
+                    onChange={e => onUpdateSettings?.({ auto_recap_meetings: e.target.checked })}
+                    className="w-3.5 h-3.5 rounded accent-blue-600 cursor-pointer"
+                  />
+                  <span className="text-[13px] text-neutral-700 dark:text-neutral-300">Auto Recap After Meetings</span>
+                </label>
+                {autoRecapMeetings && (
+                  <div className="flex items-center gap-2 ml-5">
+                    <span className="text-[12px] text-neutral-500 dark:text-neutral-400">Recap</span>
+                    <select
+                      value={autoRecapMinutes}
+                      onChange={e => onUpdateSettings?.({ auto_recap_minutes: Number(e.target.value) })}
+                      className="text-[12px] bg-neutral-100 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 rounded px-1.5 py-0.5 border border-neutral-200 dark:border-neutral-700"
+                    >
+                      <option value={1}>1 min</option>
+                      <option value={2}>2 min</option>
+                      <option value={5}>5 min</option>
+                      <option value={10}>10 min</option>
+                      <option value={15}>15 min</option>
+                      <option value={30}>30 min</option>
+                    </select>
+                    <span className="text-[12px] text-neutral-500 dark:text-neutral-400">after</span>
                   </div>
                 )}
               </div>

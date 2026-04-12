@@ -110,6 +110,11 @@ export function useAgent() {
   const [thinking, setThinking] = useState(false)
   const [processing, setProcessing] = useState(false)
   const [connected, setConnected] = useState(false)
+  // hydrated = true once all critical initial data (settings + chat_history) has
+  // arrived after WS connect. Prevents the app shell from rendering before data
+  // is ready, avoiding empty states and red dot flashes.
+  const [hydrated, setHydrated] = useState(false)
+  const hydrateFlags = useRef({ settings: false, chatHistory: false })
   const [integrations, setIntegrations] = useState<Integration[]>(_cached.integrations ?? [])
   const [settings, setSettings] = useState<AgentSettings | null>(_cached.settings ?? null)
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null)
@@ -148,6 +153,9 @@ export function useAgent() {
   const [canvasVisible, setCanvasVisible] = useState(false)
   const [canvasStreamingCode, setCanvasStreamingCode] = useState<string | null>(null)
   const [canvasStreaming, setCanvasStreaming] = useState(false)
+  // Tracks which canvas ID has received its final content (canvas_opened/canvas_updated).
+  // Any canvas_streaming message for this ID will be ignored to prevent race conditions.
+  const canvasFinalized = useRef<string | null>(null)
   const [canvasesList, setCanvasesList] = useState<Array<{ id: string; title: string; kind?: string; createdAt: string; updatedAt: string }>>([])
   // Python code cells (Pyodide). Keyed by requestId from server. Hydrated from
   // localStorage so cells survive server restarts, HMR reloads, and webview
@@ -158,6 +166,13 @@ export function useAgent() {
   const [codeCellOrder, setCodeCellOrder] = useState<string[]>([])
   const settingsRef = useRef<AgentSettings | null>(_cached.settings ?? null)
   const prevConnectedSlugs = useRef<Set<string> | null>(null)
+
+  // Safety: force hydrated after 3s of being connected to prevent stuck loading
+  useEffect(() => {
+    if (hydrated || !connected) return
+    const t = setTimeout(() => setHydrated(true), 3000)
+    return () => clearTimeout(t)
+  }, [hydrated, connected])
 
   // Keep refs in sync so python_streaming/python_run handlers can read current
   // messages and streamingText without stale closures.
@@ -195,6 +210,9 @@ export function useAgent() {
 
       socket.onclose = () => {
         setConnected(false)
+        // Don't reset hydrated — once the app has shown the shell with data,
+        // we keep it visible during reconnection to avoid jarring transitions.
+        // The hydrated flag only gates the *first* load.
         if (wsRef.current === socket) wsRef.current = null
         // Reset all transient UI state so the user doesn't see stale indicators
         // (processing spinner, streaming text, tool labels, etc.) after disconnect.
@@ -234,6 +252,12 @@ export function useAgent() {
           authConfirmed = true
           setConnected(true)
           reconnectDelay.current = RECONNECT_BASE
+          // If we have cached settings, mark hydrated immediately so the app
+          // shell renders with cached data while fresh data loads in background.
+          if (_cached.settings) {
+            hydrateFlags.current = { settings: true, chatHistory: true }
+            setHydrated(true)
+          }
           socket.send(JSON.stringify({ type: 'get_team_info' }))
           socket.send(JSON.stringify({ type: 'team_history', limit: 50 }))
           socket.send(JSON.stringify({ type: 'get_google_calendar_status' }))
@@ -306,10 +330,24 @@ export function useAgent() {
         if (msg.type === 'chat_response') {
           const wasStreamed = wasStreamingRef.current
           wasStreamingRef.current = false
+          // Capture docs before the async setState updater so they are available in the closure
+          const responseDocs = msg.message.docs && msg.message.docs.length > 0 ? msg.message.docs : undefined
           // Snapshot any remaining streaming text as a final bubble
           setStreamingText(current => {
             if (current?.trim()) {
-              setMessages(prev => [...prev, makeMsg('assistant', current)].slice(-100))
+              const streamedMsg = makeMsg('assistant', current)
+              // Attach docs from the server's chat_response to the streamed message
+              if (responseDocs) streamedMsg.docs = responseDocs
+              setMessages(prev => [...prev, streamedMsg].slice(-100))
+            } else if (wasStreamed && responseDocs) {
+              // Streaming already flushed via chat_segment_end (e.g. last segment was a tool call).
+              // Patch the last assistant message in the array with the docs.
+              setMessages(prev => {
+                if (prev.length === 0) return prev
+                const last = prev[prev.length - 1]
+                if (last.role !== 'assistant') return prev
+                return [...prev.slice(0, -1), { ...last, docs: responseDocs }]
+              })
             }
             return null
           })
@@ -344,8 +382,12 @@ export function useAgent() {
         if (msg.type === 'chat_history') {
           wasStreamingRef.current = false
           setStreamingText(null)
-          const newMessages = msg.messages.slice(-100)
-          const oldMessageCount = messagesRef.current.length || newMessages.length
+          const serverMessages = msg.messages.slice(-100)
+          // If server has fewer messages than cache (e.g. backend restarted),
+          // keep the cached messages so the user doesn't see them vanish.
+          const cached = messagesRef.current
+          const newMessages = serverMessages.length >= cached.length ? serverMessages : cached
+          const oldMessageCount = cached.length || newMessages.length
           setMessages(newMessages)
           saveCache({ messages: newMessages.slice(-50) })
           // Re-anchor cached code cells against the fresh messages array.
@@ -385,6 +427,10 @@ export function useAgent() {
             }
             return next
           })
+          if (!hydrateFlags.current.chatHistory) {
+            hydrateFlags.current.chatHistory = true
+            if (hydrateFlags.current.settings) setHydrated(true)
+          }
         }
         if (msg.type === 'integrations_update') {
           // Detect newly connected integration with triggers → show prompt
@@ -411,7 +457,13 @@ export function useAgent() {
           const wa = msg.integrations.find((i: any) => i.slug === 'coagent:whatsapp')
           if (wa?.connected) setWhatsappQr(null)
         }
-        if (msg.type === 'settings_update') { setSettings(msg.settings); settingsRef.current = msg.settings; saveCache({ settings: msg.settings }) }
+        if (msg.type === 'settings_update') {
+          setSettings(msg.settings); settingsRef.current = msg.settings; saveCache({ settings: msg.settings })
+          if (!hydrateFlags.current.settings) {
+            hydrateFlags.current.settings = true
+            if (hydrateFlags.current.chatHistory) setHydrated(true)
+          }
+        }
         if (msg.type === 'auth_status') setAuthStatus(msg.status)
         if (msg.type === 'files_update') setFiles(msg.files)
         if (msg.type === 'transcription_status') {
@@ -521,6 +573,7 @@ export function useAgent() {
                       filename: `${m.title || 'document'}.pdf`,
                       mimeType: 'application/pdf',
                       data: base64,
+                      canvasId: m.canvasId,
                     }))
                   }
                 }
@@ -534,8 +587,15 @@ export function useAgent() {
           setCanvasVisible(true)
           setCanvasStreaming(false)
           setCanvasStreamingCode(null)
+          // Mark this canvas as finalized — ignore any late streaming messages
+          // for the same canvas ID that arrive after the final content.
+          canvasFinalized.current = msg.canvas.id
         }
         if (msg.type === 'canvas_streaming') {
+          // Ignore streaming messages for a canvas that already has its final
+          // content (race condition: late streaming messages arriving after
+          // canvas_updated due to React batching or WS ordering).
+          if (canvasFinalized.current === msg.canvasId) return
           // Show the pane immediately with a synthetic placeholder canvas so
           // the user sees the draft materialize in real time. When the tool
           // call finishes, canvas_opened will replace this with the persisted
@@ -1018,11 +1078,12 @@ export function useAgent() {
     setCanvasVisible(false)
     setCanvasStreaming(false)
     setCanvasStreamingCode(null)
-  }, [])
-
-  const exportPdf = useCallback((path: string, data: string) => {
-    send({ type: 'export_pdf', path, data })
+    send({ type: 'canvas_close' })
   }, [send])
+
+  const exportPdf = useCallback(async (path: string, base64: string) => {
+    await invoke('write_pdf_file', { path, base64 })
+  }, [])
 
   const triggerHeartbeat = useCallback(() => {
     send({ type: 'trigger_heartbeat' })
@@ -1073,7 +1134,7 @@ export function useAgent() {
     // Volatile state (changes on every streaming chunk)
     streamingText, thinking, processing, toolLabel, researchAgents,
     // Less-frequent state
-    queue, done, newQueueIds, messages, connected, lastHeartbeat, heartbeatLog, statusLine, skills,
+    queue, done, newQueueIds, messages, connected, hydrated, lastHeartbeat, heartbeatLog, statusLine, skills,
     integrations, settings, authStatus, files, folders, searchResults, transcribingFiles,
     error, relayActive, relayModel, relayUsage, pendingFields, voiceSummary, usage,
     organizing, calendarEntries, googleCalendarStatus, capabilityCard, whatsappQr,

@@ -588,7 +588,8 @@ export async function ingestFile(
   buffer: Buffer,
   mimeType: string,
   group?: string,
-  onTranscription?: (status: 'started' | 'done', fileId: string) => void
+  onTranscription?: (status: 'started' | 'done', fileId: string) => void,
+  upsert?: boolean
 ): Promise<FileEntry> {
   const sample = await sampleContent(filename, buffer, mimeType)
   // Skip Haiku summary for media files — use the sampleContent description directly
@@ -646,9 +647,22 @@ export async function ingestFile(
 
   return withIndexLock(async () => {
     const index = await readIndex(dataDir)
-    index.push(entry)
+    // Upsert: replace existing entry with same filename in same group
+    if (upsert) {
+      const existing = index.findIndex(e => e.filename === safeFilename && (e.group || '') === safeGroup)
+      if (existing !== -1) {
+        entry.id = index[existing].id // keep the same ID so doc cards stay stable
+        index[existing] = entry
+        console.log(`[FileStore] Upserted (replaced): ${safeFilename} (${buffer.length} bytes)`)
+      } else {
+        index.push(entry)
+        console.log(`[FileStore] Upserted (new): ${safeFilename} (${buffer.length} bytes)`)
+      }
+    } else {
+      index.push(entry)
+      console.log(`[FileStore] Ingested: ${safeFilename} (${buffer.length} bytes)`)
+    }
     await writeIndex(dataDir, index)
-    console.log(`[FileStore] Ingested: ${safeFilename} (${buffer.length} bytes)`)
     const { embedding: _, ...fileEntry } = entry
 
     // Fire-and-forget transcription for media files

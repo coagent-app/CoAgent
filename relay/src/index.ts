@@ -1,3 +1,9 @@
+// --- API version ---
+// Increment when making breaking changes to the relay protocol.
+// Clients send X-CoAgent-Version; relay echoes it back in every response.
+const RELAY_API_VERSION = '1'
+const RELAY_MIN_CLIENT_VERSION = '0.4.15'
+
 export interface Env {
   TUNNEL_SECRET: string
   ANTHROPIC_API_KEY: string
@@ -154,8 +160,9 @@ function corsHeaders(): Record<string, string> {
   return {
     'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, anthropic-version, anthropic-beta, x-api-key',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, anthropic-version, anthropic-beta, x-api-key, X-CoAgent-Version',
     'Vary': 'Origin',
+    'X-CoAgent-Version': RELAY_API_VERSION,
   }
 }
 
@@ -285,6 +292,54 @@ function pruneRateBuckets() {
       rateBuckets.delete(key)
     }
   }
+}
+
+// ── Per-IP rate limiting for sensitive unauthenticated endpoints ─────────────
+// Uses the same in-memory rateBuckets Map — key is `ip:<ip>:<endpoint>`.
+// Limits are intentionally tight to defend against brute-force / enumeration.
+
+const IP_RATE_LIMITS: Record<string, { windowMs: number; max: number }> = {
+  subscribe:         { windowMs: 60_000, max: 5  },  // 5/min — writes a token on success
+  subscribeCheckout: { windowMs: 60_000, max: 5  },  // 5/min — calls Stripe on every request
+  inviteValidate:    { windowMs: 60_000, max: 10 },  // 10/min — read-only but touches KV
+  inviteRedeem:      { windowMs: 60_000, max: 5  },  // 5/min — creates Stripe checkout session
+}
+
+/**
+ * IP-based rate limiter for public (unauthenticated) endpoints.
+ * Returns a 429 Response if the limit is exceeded, null otherwise.
+ */
+function checkIpRateLimit(ip: string, endpointKey: keyof typeof IP_RATE_LIMITS): Response | null {
+  const limit = IP_RATE_LIMITS[endpointKey]
+  const now = Date.now()
+  const bucketKey = `ip:${ip}:${endpointKey}`
+
+  let timestamps = rateBuckets.get(bucketKey)
+  if (!timestamps) {
+    timestamps = []
+    rateBuckets.set(bucketKey, timestamps)
+  }
+
+  // Slide the window
+  const cutoff = now - limit.windowMs
+  while (timestamps.length > 0 && timestamps[0] < cutoff) {
+    timestamps.shift()
+  }
+
+  if (timestamps.length >= limit.max) {
+    const retryAfter = Math.ceil((timestamps[0] + limit.windowMs - now) / 1000)
+    return new Response(JSON.stringify({ error: 'Rate limit exceeded. Try again later.' }), {
+      status: 429,
+      headers: {
+        ...corsHeaders(),
+        'Content-Type': 'application/json',
+        'Retry-After': String(retryAfter),
+      },
+    })
+  }
+
+  timestamps.push(now)
+  return null
 }
 
 // OpenAI embeddings pricing: $0.02 per 1M tokens (text-embedding-3-small)
@@ -1594,9 +1649,21 @@ export default {
     // Prune stale rate-limit buckets once per minute (memory hygiene)
     pruneRateBuckets()
 
-    // CORS preflight
+    // CORS preflight — demo endpoint uses open CORS
+    if (request.method === 'OPTIONS' && url.pathname === '/demo') {
+      return new Response(null, { status: 204, headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+      }})
+    }
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: corsHeaders() })
+    }
+
+    // --- API version endpoint (public, no auth) ---
+    if (request.method === 'GET' && url.pathname === '/version') {
+      return jsonResponse({ version: RELAY_API_VERSION, minClientVersion: RELAY_MIN_CLIENT_VERSION })
     }
 
     // --- Stripe webhook ---
@@ -1812,6 +1879,12 @@ export default {
       if (!token) return new Response('Missing token', { status: 401 })
       const data = await getToken(env, token)
       if (!data || !data.active) return new Response('Invalid token', { status: 401 })
+
+      // Version negotiation — warn on missing header, allow through for backward compat
+      const clientVersion = request.headers.get('X-CoAgent-Version') || url.searchParams.get('v')
+      if (!clientVersion) {
+        console.warn(`[WS] Client user #${data.userId} connected without X-CoAgent-Version header`)
+      }
       // Use the token's userId — the URL path userId is for backwards compat only
       const resolvedUserId = String(data.userId)
       const doId = env.USER_SESSION.idFromName(resolvedUserId)
@@ -2192,8 +2265,8 @@ export default {
     // --- Invite code system (no auth, rate limited) ---
 
     if (request.method === 'GET' && url.pathname === '/invite/validate') {
-      const ipKey = (request.headers.get('cf-connecting-ip') || 'unknown').slice(0, 16)
-      const rateCheck = checkRateLimit(ipKey, 'general')
+      const ipKey = (request.headers.get('cf-connecting-ip') || 'unknown').slice(0, 45)
+      const rateCheck = checkIpRateLimit(ipKey, 'inviteValidate')
       if (rateCheck) return rateCheck
 
       const ref = url.searchParams.get('ref')
@@ -2227,8 +2300,8 @@ export default {
     }
 
     if (request.method === 'POST' && url.pathname === '/invite/redeem') {
-      const ipKey = (request.headers.get('cf-connecting-ip') || 'unknown').slice(0, 16)
-      const rateCheck = checkRateLimit(ipKey, 'general')
+      const ipKey = (request.headers.get('cf-connecting-ip') || 'unknown').slice(0, 45)
+      const rateCheck = checkIpRateLimit(ipKey, 'inviteRedeem')
       if (rateCheck) return rateCheck
 
       const body = await request.json() as { referralCode?: string }
@@ -2289,8 +2362,8 @@ export default {
     }
 
     if (request.method === 'POST' && url.pathname === '/subscribe') {
-      const ipKey = (request.headers.get('cf-connecting-ip') || 'unknown').slice(0, 16)
-      const rateCheck = checkRateLimit(ipKey, 'general')
+      const ipKey = (request.headers.get('cf-connecting-ip') || 'unknown').slice(0, 45)
+      const rateCheck = checkIpRateLimit(ipKey, 'subscribe')
       if (rateCheck) return rateCheck
 
       const body = await request.json() as { referralCode?: string }
@@ -2358,8 +2431,8 @@ export default {
     // --- Exchange Stripe Checkout session for token ---
 
     if (request.method === 'POST' && url.pathname === '/subscribe/checkout') {
-      const ipKey = (request.headers.get('cf-connecting-ip') || 'unknown').slice(0, 16)
-      const rateCheck = checkRateLimit(ipKey, 'general')
+      const ipKey = (request.headers.get('cf-connecting-ip') || 'unknown').slice(0, 45)
+      const rateCheck = checkIpRateLimit(ipKey, 'subscribeCheckout')
       if (rateCheck) return rateCheck
 
       const body = await request.json() as { sessionId?: string }
@@ -2546,6 +2619,98 @@ export default {
       const rateCheck = checkRateLimit(result.token, 'api')
       if (rateCheck) return rateCheck
       return proxyComposio(request, env, result.token, result.data)
+    }
+
+    // --- Landing page demo chat (public, IP rate-limited, open CORS) ---
+    if (request.method === 'POST' && url.pathname === '/demo') {
+      const ip = request.headers.get('CF-Connecting-IP') || 'unknown'
+      const demoKey = `demo:${ip}`
+
+      // Rate limit: 15 messages per 10-minute window per IP
+      const demoLimit = { windowMs: 600_000, max: 15 }
+      let timestamps = rateBuckets.get(demoKey)
+      if (!timestamps) { timestamps = []; rateBuckets.set(demoKey, timestamps) }
+      const cutoff = Date.now() - demoLimit.windowMs
+      while (timestamps.length > 0 && timestamps[0] < cutoff) timestamps.shift()
+      if (timestamps.length >= demoLimit.max) {
+        return new Response(JSON.stringify({ error: 'Demo limit reached. Download Co-Agent to keep going!' }), {
+          status: 429, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+        })
+      }
+      timestamps.push(Date.now())
+
+      try {
+        const { messages } = (await request.json()) as { messages: { role: string; content: string }[] }
+        if (!messages || messages.length === 0) return new Response(JSON.stringify({ error: 'No messages' }), {
+          status: 400, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+        })
+
+        // Cap conversation length
+        const trimmed = messages.slice(-6)
+
+        const systemPrompt = `You are Co-Agent. This is a demo on the landing page — the user is checking out the product and you're giving them a feel for how it works.
+
+You're simulating what Co-Agent does when connected to real tools. Be upfront that this is a demo with simulated data, but make the responses feel real enough that they get the idea.
+
+When they ask you to do something, simulate it naturally:
+- Gmail: "You'd have 3 emails needing replies — one from a client about invoice #1042, one scheduling a call..."
+- HubSpot: "Your pipeline would show 2 deals going cold — I'd flag those and draft follow-ups."
+- Google Calendar: "Tomorrow you've got a 2pm with Sarah Chen — I can prep notes from your last call."
+- Slack: "12 unread, mostly noise — I'd surface the 2 that actually need you."
+- Stripe: "Last week you had 4 payments come through, one failed — I'd retry it and notify the customer."
+- Google Sheets: "I can pull your monthly numbers and flag anything off from last month."
+- Notion: "I'd keep your meeting notes, action items, and project docs organized."
+
+Keep responses short — 2-3 sentences. Be conversational, not salesy.
+
+If they ask something off-topic, redirect casually: "That's outside my wheelhouse — I'm built for the business stuff. Try asking about emails, calendar, or your pipeline."
+
+If they seem interested, mention: "This is simulated — in the real app you connect your actual tools and I work with your real data."
+
+Do not use emojis. Do not be overly enthusiastic.`
+
+        const res = await fetch('https://api.moonshot.ai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${env.MOONSHOT_API_KEY}`,
+          },
+          body: JSON.stringify({
+            model: 'kimi-k2.5',
+            messages: [
+              { role: 'system', content: systemPrompt },
+              ...trimmed,
+            ],
+            max_tokens: 512,
+            stream: true,
+            thinking: { type: 'disabled' },
+          }),
+        })
+
+        if (!res.ok) {
+          const errText = await res.text()
+          console.error('[Demo] Kimi error:', res.status, errText)
+          return new Response(JSON.stringify({ error: 'Demo temporarily unavailable' }), {
+            status: 502, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+          })
+        }
+
+        // Stream through to the client
+        return new Response(res.body, {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'Access-Control-Allow-Origin': '*',
+          },
+        })
+      } catch (err: any) {
+        console.error('[Demo] Error:', err.message)
+        return new Response(JSON.stringify({ error: 'Demo error' }), {
+          status: 500, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+        })
+      }
     }
 
     return new Response('Not found', { status: 404, headers: corsHeaders() })

@@ -9,7 +9,14 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
   </head>
-  <body>
+  <body style="margin:0;background:#fff">
+    <script>
+      // Detect dark mode synchronously before first paint to prevent white flash
+      (function(){
+        var d=localStorage.getItem('theme')==='dark'||(!localStorage.getItem('theme')&&matchMedia('(prefers-color-scheme:dark)').matches);
+        if(d){document.body.style.background='#0a0a0a';document.documentElement.style.background='#0a0a0a';document.documentElement.classList.add('dark')}
+      })();
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

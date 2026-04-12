@@ -404,7 +404,8 @@ export class RelayClient {
       this.backoffMs = MIN_BACKOFF_MS
     }
     this.connectedAt = null
-    const delay = this.backoffMs
+    // Add jitter (±50%) to prevent thundering herd when relay recovers from outage
+    const delay = this.backoffMs * (0.5 + Math.random())
     console.log(`[Relay] Reconnecting in ${Math.round(delay / 1000)}s`)
     setTimeout(() => {
       this.backoffMs = Math.min(this.backoffMs * 2, MAX_BACKOFF_MS)

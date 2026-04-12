@@ -148,8 +148,25 @@ export function buildBrandCSS(brand: BrandValues): string {
     }
     pre code { background: none; padding: 0; }
 
-    /* Mermaid */
-    .mermaid { margin: 1.5em 0; text-align: center; }
+    /* Mermaid — seamless, no box */
+    .mermaid {
+      margin: 1.2em auto;
+      text-align: center;
+      background: transparent;
+      padding: 0;
+      max-width: 560px;
+    }
+    .mermaid svg {
+      max-width: 100%;
+      max-height: 340px;
+      height: auto;
+      background: transparent !important;
+    }
+    .mermaid svg rect[class*="background"],
+    .mermaid svg .background {
+      fill: transparent !important;
+    }
+
 
     /* Print */
     @media print {

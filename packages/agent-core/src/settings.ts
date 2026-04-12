@@ -35,6 +35,8 @@ function getDefaultSettings(): AgentSettings {
     brand_logo: '',
     auto_brief_meetings: false,
     auto_brief_minutes: 30,
+    auto_recap_meetings: false,
+    auto_recap_minutes: 5,
     agent_name: '',
     autonomy_notes: '',
   }
@@ -76,6 +78,8 @@ export async function readSettings(dataDir: string): Promise<AgentSettings> {
       brand_logo: parsed.brand_logo ?? DEFAULT_SETTINGS.brand_logo,
       auto_brief_meetings: parsed.auto_brief_meetings ?? DEFAULT_SETTINGS.auto_brief_meetings,
       auto_brief_minutes: parsed.auto_brief_minutes ?? DEFAULT_SETTINGS.auto_brief_minutes,
+      auto_recap_meetings: parsed.auto_recap_meetings ?? DEFAULT_SETTINGS.auto_recap_meetings,
+      auto_recap_minutes: parsed.auto_recap_minutes ?? DEFAULT_SETTINGS.auto_recap_minutes,
       agent_name: parsed.agent_name ?? DEFAULT_SETTINGS.agent_name,
       autonomy_notes: parsed.autonomy_notes ?? DEFAULT_SETTINGS.autonomy_notes,
     }
@@ -135,6 +139,10 @@ export async function writeSettings(dataDir: string, patch: Partial<AgentSetting
     auto_brief_minutes: patch.auto_brief_minutes !== undefined
       ? Math.max(5, Math.min(120, Math.round(patch.auto_brief_minutes)))
       : current.auto_brief_minutes,
+    auto_recap_meetings: patch.auto_recap_meetings !== undefined ? patch.auto_recap_meetings : current.auto_recap_meetings,
+    auto_recap_minutes: patch.auto_recap_minutes !== undefined
+      ? Math.max(1, Math.min(60, Math.round(patch.auto_recap_minutes)))
+      : current.auto_recap_minutes,
     agent_name: patch.agent_name !== undefined ? patch.agent_name : current.agent_name,
     autonomy_notes: patch.autonomy_notes !== undefined ? patch.autonomy_notes : current.autonomy_notes,
   }

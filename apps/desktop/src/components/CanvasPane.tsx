@@ -9,14 +9,15 @@
 // iframe's #content div via contentDocument to avoid iframe reloads.
 
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
-import { X, Download, Save, Loader2, History } from 'lucide-react'
+import { X, Download, Save, Loader2, History, CheckCircle, AlertCircle } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { Canvas, AgentSettings } from '@coagent/shared'
 import { buildBrandCSS, brandFromSettings } from '@/lib/canvas-brand'
 import { renderCanvasPdf } from '@/lib/canvas-pdf'
-import { save } from '@tauri-apps/plugin-dialog'
+import { invoke } from '@tauri-apps/api/core'
+import { downloadDir } from '@tauri-apps/api/path'
 
 interface Props {
   canvas: Canvas
@@ -28,7 +29,6 @@ interface Props {
   canvasesList?: Array<{ id: string; title: string; kind?: string; updatedAt: string }>
   onOpenCanvas?: (canvasId: string) => void
   onLoadCanvases?: () => void
-  onExportPdf?: (path: string, base64Data: string) => void
 }
 
 // Debounce interval for streaming updates (ms)
@@ -45,11 +45,13 @@ function relativeDate(iso: string): string {
   return `${days}d ago`
 }
 
-export function CanvasPane({ canvas, streaming = false, streamingCode, settings, onClose, onSaveToFiles, canvasesList = [], onOpenCanvas, onLoadCanvases, onExportPdf }: Props) {
+export function CanvasPane({ canvas, streaming = false, streamingCode, settings, onClose, onSaveToFiles, canvasesList = [], onOpenCanvas, onLoadCanvases }: Props) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const iframeReadyRef = useRef(false)
   const [debouncedCode, setDebouncedCode] = useState<string>(canvas.code || '')
   const [saving, setSaving] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const [exportStatus, setExportStatus] = useState<'success' | 'error' | null>(null)
   const [historyOpen, setHistoryOpen] = useState(false)
   const historyRef = useRef<HTMLDivElement>(null)
 
@@ -97,6 +99,7 @@ export function CanvasPane({ canvas, streaming = false, streamingCode, settings,
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <style>${brandCSS}</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
 </head>
 <body>
 <div class="canvas-root">
@@ -104,11 +107,81 @@ export function CanvasPane({ canvas, streaming = false, streamingCode, settings,
 <div id="content"></div>
 </div>
 <script>
+// Initialize mermaid if loaded (graceful fallback if CDN fails)
+var mermaidReady = false;
+try {
+  if (typeof mermaid !== 'undefined') {
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: 'loose',
+      theme: 'base',
+      themeVariables: {
+        fontFamily: 'system-ui, -apple-system, sans-serif',
+        fontSize: '13px',
+        background: '#ffffff',
+        mainBkg: '#ffffff',
+        primaryColor: '#dbeafe',
+        primaryTextColor: '#1e3a5f',
+        primaryBorderColor: '#3b82f6',
+        secondaryColor: '#fce7f3',
+        secondaryBorderColor: '#ec4899',
+        tertiaryColor: '#d1fae5',
+        tertiaryBorderColor: '#10b981',
+        lineColor: '#374151',
+        pie1: '#3b82f6',
+        pie2: '#10b981',
+        pie3: '#f59e0b',
+        pie4: '#ef4444',
+        pie5: '#8b5cf6',
+        pie6: '#06b6d4',
+        pie7: '#ec4899',
+        pie8: '#f97316',
+        xyChart: {
+          backgroundColor: 'transparent',
+          plotColorPalette: '#3b82f6,#10b981,#ef4444,#f59e0b,#8b5cf6,#06b6d4,#ec4899,#f97316'
+        },
+      }
+    });
+    mermaidReady = true;
+  }
+} catch(e) { console.warn('[mermaid] init failed:', e); }
+
+// Render mermaid blocks after content is set. react-markdown renders
+// \`\`\`mermaid blocks as <pre><code class="language-mermaid">...</code></pre>.
+// We convert those into <div class="mermaid"> for mermaid.run().
+var mermaidCounter = 0;
+function renderMermaid() {
+  if (!mermaidReady) return;
+  var codes = document.querySelectorAll('code.language-mermaid');
+  if (!codes.length) return;
+  var nodes = [];
+  codes.forEach(function(code) {
+    var pre = code.parentElement;
+    if (!pre || pre.tagName !== 'PRE') return;
+    var div = document.createElement('div');
+    div.className = 'mermaid';
+    div.id = 'mermaid-' + (++mermaidCounter);
+    div.textContent = code.textContent || '';
+    pre.replaceWith(div);
+    nodes.push(div);
+  });
+  if (nodes.length) {
+    mermaid.run({ nodes: nodes }).catch(function(err) {
+      console.warn('[mermaid] render error:', err);
+    });
+  }
+}
+
 window.addEventListener('message', function(e) {
   if (!e.data || typeof e.data !== 'object') return;
   if (e.data.type === 'set_content') {
     var el = document.getElementById('content');
-    if (el) el.innerHTML = e.data.html;
+    if (el) {
+      el.innerHTML = e.data.html;
+      // Only render mermaid when streaming is done — partial mermaid
+      // syntax causes error icons and layout thrashing.
+      if (!e.data.streaming) renderMermaid();
+    }
   } else if (e.data.type === 'set_logo') {
     var el = document.getElementById('logo');
     if (el) el.innerHTML = e.data.html;
@@ -145,8 +218,8 @@ window.addEventListener('message', function(e) {
   }, [debouncedCode])
 
   // Write content into the iframe via postMessage (no allow-same-origin needed)
-  const updateIframeContent = useCallback((html: string) => {
-    iframeRef.current?.contentWindow?.postMessage({ type: 'set_content', html }, '*')
+  const updateIframeContent = useCallback((html: string, isStreaming: boolean) => {
+    iframeRef.current?.contentWindow?.postMessage({ type: 'set_content', html, streaming: isStreaming }, '*')
   }, [])
 
   // Populate logo once iframe is ready; update when brand changes
@@ -158,14 +231,14 @@ window.addEventListener('message', function(e) {
   const handleLoad = useCallback(() => {
     iframeReadyRef.current = true
     updateIframeLogo(logoHtml)
-    updateIframeContent(markdownHtml)
-  }, [logoHtml, markdownHtml, updateIframeLogo, updateIframeContent])
+    updateIframeContent(markdownHtml, streaming)
+  }, [logoHtml, markdownHtml, streaming, updateIframeLogo, updateIframeContent])
 
   // Push content updates into the live iframe DOM
   useEffect(() => {
     if (!iframeReadyRef.current) return
-    updateIframeContent(markdownHtml)
-  }, [markdownHtml, updateIframeContent])
+    updateIframeContent(markdownHtml, streaming)
+  }, [markdownHtml, streaming, updateIframeContent])
 
   // Push logo updates into the live iframe DOM
   useEffect(() => {
@@ -180,24 +253,31 @@ window.addEventListener('message', function(e) {
   }, [srcdoc])
 
   const handleExportPdf = useCallback(async () => {
-    if (!onExportPdf) return
+    if (exporting) return
+    setExporting(true)
+    setExportStatus(null)
     try {
-      const filePath = await save({
-        defaultPath: `${canvas.title || 'document'}.pdf`,
-        filters: [{ name: 'PDF', extensions: ['pdf'] }],
-      })
-      if (!filePath) return  // user cancelled
+      const downloads = await downloadDir()
+      const filename = `${(canvas.title || 'document').replace(/[/\\:*?"<>|]/g, '_')}.pdf`
+      const finalPath = `${downloads}/${filename}`
       const blob = await renderCanvasPdf(canvas.code, brand, canvas.title)
-      const reader = new FileReader()
-      reader.onload = () => {
-        const base64 = (reader.result as string).split(',')[1] ?? ''
-        onExportPdf(filePath, base64)
-      }
-      reader.readAsDataURL(blob)
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve((reader.result as string).split(',')[1] ?? '')
+        reader.onerror = () => reject(new Error('FileReader failed'))
+        reader.readAsDataURL(blob)
+      })
+      await invoke('write_pdf_file', { path: finalPath, base64 })
+      setExportStatus('success')
+      setTimeout(() => setExportStatus(null), 3000)
     } catch (err) {
       console.error('[CanvasPane] export PDF failed:', err)
+      setExportStatus('error')
+      setTimeout(() => setExportStatus(null), 4000)
+    } finally {
+      setExporting(false)
     }
-  }, [onExportPdf, canvas.code, canvas.title, brand])
+  }, [exporting, canvas.code, canvas.title, brand])
 
   const handleSaveToFiles = useCallback(async () => {
     if (!onSaveToFiles || saving) return
@@ -281,11 +361,20 @@ window.addEventListener('message', function(e) {
           )}
           <button
             onClick={handleExportPdf}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11.5px] font-medium text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
-            title="Print / Save as PDF"
+            disabled={exporting}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11.5px] font-medium text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors disabled:opacity-50"
+            title="Save as PDF"
           >
-            <Download size={12} />
-            Export PDF
+            {exporting ? (
+              <Loader2 size={12} className="animate-spin" />
+            ) : exportStatus === 'success' ? (
+              <CheckCircle size={12} className="text-green-500" />
+            ) : exportStatus === 'error' ? (
+              <AlertCircle size={12} className="text-red-500" />
+            ) : (
+              <Download size={12} />
+            )}
+            {exportStatus === 'success' ? 'Saved!' : exportStatus === 'error' ? 'Failed' : 'Export PDF'}
           </button>
           {onSaveToFiles && (
             <button

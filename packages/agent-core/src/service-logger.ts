@@ -209,37 +209,41 @@ export async function searchToolLogs(
 
 // ── 3 AM Extraction — Agentic Haiku with Memory Tools ───────────────────────
 
-const SYSTEM_PROMPT = `You are a background agent that processes tool usage logs. You have two jobs, in order:
+const SYSTEM_PROMPT = `You are a background maintenance agent. You run every night to keep the user's memory organized and up to date. You have three jobs, in order:
 
-1. UPDATE MEMORY: Search existing memories, then append new entries or edit existing ones.
-   - OFF-LIMITS files (never modify): heartbeat.md, nightly.md, setup.md, profile.md, preferences.md
+OFF-LIMITS files (never modify): heartbeat.md, nightly.md, setup.md, profile.md, preferences.md
+
+1. PROCESS TODAY'S LOGS: Review the tool usage logs below and extract anything worth remembering.
    - Use search_memory FIRST to check what already exists before writing anything.
-   - Use edit_memory to update existing entries (pass exact old_content from read/search results).
-   - Use append_memory to add NEW entries to existing files.
-   - Only use write_memory for genuinely significant new long-term topics that deserve their own file.
+   - New people (name, email, company, role) → contacts.md
+   - New projects or major milestones → projects.md
+   - Use edit_memory to update existing entries. Use append_memory to add to existing files.
+   - Only use write_memory for genuinely new long-term topics that deserve their own file.
+   - SKIP ephemeral stuff: individual emails, one-time file shares, meeting confirmations, status updates.
+   - TEST: "Will this matter in a month?" If no, skip it.
+   - Do NOT duplicate entries that already exist.
 
-   WHAT BELONGS IN MEMORY (durable facts):
-   - New people: name, email, company, role, relationship (→ contacts.md)
-   - Major ongoing client relationships or partnerships (→ projects.md)
-   - Recurring long-term commitments
+2. CONSOLIDATE AND ORGANIZE: Read through ALL memory files (use list_memory, then read each one).
+   - Merge duplicate entries (same person in contacts.md twice, same project described in two files).
+   - Merge small related files into larger topic files when it makes sense.
+   - Update project statuses — if a deadline has passed, mark it. If something was completed, note it.
+   - Remove one-off files that were clearly temporary (meeting prep for a past meeting, research that was already used, etc.).
+   - Move misplaced information to the right file (a contact buried in projects.md → contacts.md).
 
-   WHAT DOES NOT BELONG IN MEMORY (ephemeral):
-   - Individual emails, reports, or documents
-   - Single deployments, releases, or staging pushes
-   - File shares, attachments, one-time tasks
-   - Meeting confirmations, status updates, announcements
+3. PRUNE STALE ENTRIES: Clean up anything that's no longer relevant.
+   - Remove entries for people/projects with no activity in 30+ days AND no future relevance.
+   - Delete completed/resolved items that are just taking up space.
+   - Remove outreach logs older than 2 weeks.
+   - Clean up "status" fields that are clearly outdated (e.g. "Due: March 27" when it's now April).
+   - Do NOT delete anything that is still actively useful or might be referenced again.
+   - If everything looks clean, skip this step.
 
-   TEST: "Is this a PERSON or an ongoing RELATIONSHIP/PROJECT that will exist for months?" If no, skip it.
-   Do NOT duplicate entries that already exist.
-
-2. CLEAN UP MEMORY: While you already have the files open, prune stale or resolved entries.
-   - Delete entries for people/projects no longer relevant (no activity in weeks, deal closed, etc.)
-   - Consolidate duplicates (same person listed twice, etc.)
-   - Remove entries that were wrong or outdated
-   - Do NOT delete anything that is still actively useful
-   - Skip this step if everything looks clean — don't make changes for the sake of it.
-
-After you finish all memory tool calls, reply with a ONE-LINE summary of what you did (e.g. "Added Priya Shah to contacts.md, removed 2 stale entries from projects.md") or "Nothing to update." if you made no changes. No preamble, no explanation — just the summary line.`
+After you finish all memory tool calls, reply with a brief summary of what you did. Format:
+- Added: [what was added]
+- Updated: [what was changed]
+- Removed: [what was cleaned up]
+- Consolidated: [what was merged]
+Or "Nothing to update." if you made no changes.`
 
 /**
  * Process tool logs via an agentic Haiku loop with memory tools.
@@ -253,10 +257,10 @@ export async function extractInsights(
   apiKey?: string
 ): Promise<string | undefined> {
   const logFile = logPath(dataDir)
-  if (!existsSync(logFile)) return undefined
-
-  const log: ToolLogEntry[] = JSON.parse(readFileSync(logFile, 'utf-8'))
-  if (log.length === 0) return undefined
+  let log: ToolLogEntry[] = []
+  if (existsSync(logFile)) {
+    try { log = JSON.parse(readFileSync(logFile, 'utf-8')) } catch { log = [] }
+  }
 
   // Read user-editable nightly.md — additive instructions, not a replacement
   let nightlyInstructions = ''
@@ -308,11 +312,17 @@ export async function extractInsights(
     ? `\n\nUSER INSTRUCTIONS FROM nightly.md (follow these in addition to your default jobs):\n${nightlyInstructions}\n`
     : ''
 
-  const userMessage = `Here are today's tool usage logs grouped by integration:
+  const today = new Date().toISOString().slice(0, 10)
 
-${logSections}
+  const logSection = log.length > 0
+    ? `Tool usage logs from today:\n\n${logSections}`
+    : 'No tool usage logs from today.'
+
+  const userMessage = `Today's date: ${today}
+
+${logSection}
 ${nightlySection}
-Search memory for existing entries about the people and projects mentioned. Then update memory as needed (edit existing entries, append new ones). Clean up stale entries. When done, reply with a one-line summary of what changed.`
+Run all three jobs: (1) process these logs into memory, (2) read ALL memory files and consolidate/organize, (3) prune stale entries. Use list_memory first to see all files, then read and process each one.`
 
   // Cache system prompt + tool definitions (stable across runs)
   const cachedTools: Anthropic.Tool[] = memoryTools.map((t, i) =>
@@ -323,7 +333,7 @@ Search memory for existing entries about the people and projects mentioned. Then
 
   // Agentic loop — Kimi K2.5 calls memory tools, then outputs briefings
   const messages: Anthropic.MessageParam[] = [{ role: 'user', content: userMessage }]
-  const MAX_TURNS = 15
+  const MAX_TURNS = 30
   const useKimi = !!openaiClient
   const modelName = useKimi ? KIMI_MODEL : 'claude-haiku-4-5-20251001'
 
@@ -395,14 +405,18 @@ Search memory for existing entries about the people and projects mentioned. Then
     break
   }
 
-  // Clear processed logs and LanceDB log table
+  // Clear processed logs and LanceDB log table, then close the connection
   writeFileSync(logFile, '[]')
   try {
     const dbDir = join(dataDir, 'services', 'tool-log-db')
     const db = await connect(dbDir)
-    const tables = await db.tableNames()
-    if (tables.includes('logs')) await db.dropTable('logs')
-    logTable = null
+    try {
+      const tables = await db.tableNames()
+      if (tables.includes('logs')) await db.dropTable('logs')
+      logTable = null
+    } finally {
+      try { await (db as any).close?.() } catch {}
+    }
   } catch {}
   console.log(`[ServiceLogger] Cleared ${log.length} processed log entries`)
 

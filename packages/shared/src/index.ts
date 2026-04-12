@@ -41,11 +41,13 @@ export interface AgentSettings {
   brand_logo: string           // base64 data URI of logo PNG/JPEG for documents
   auto_brief_meetings: boolean // auto-brief before calendar meetings
   auto_brief_minutes: number   // minutes before meeting to fire brief (default 30)
+  auto_recap_meetings: boolean // auto-recap after calendar meetings
+  auto_recap_minutes: number   // minutes after meeting to fire recap (default 5)
   agent_name: string           // user-chosen name for their agent (e.g. "Jarvis")
   autonomy_notes: string       // freeform autonomy rules written during onboarding, injected into system prompt
 }
 
-export type TriggerSource = 'heartbeat' | 'webhook' | 'manual' | 'memory_cleanup' | 'todo_due' | 'routine' | 'task_due' | 'meeting_brief'
+export type TriggerSource = 'heartbeat' | 'webhook' | 'manual' | 'memory_cleanup' | 'todo_due' | 'routine' | 'task_due' | 'meeting_brief' | 'meeting_recap'
 
 export interface AgentTrigger {
   source: TriggerSource
@@ -137,6 +139,7 @@ export interface Integration {
   domain?: string      // website domain for favicon (e.g. "rentcast.io")
   triggers?: TriggerInfo[]
   suggested?: boolean  // true if this integration is recommended for the user's vertical
+  workflows?: string[] // example workflow prompts the user can try
 }
 
 export interface FileEntry {
@@ -170,7 +173,7 @@ export type WSClientMessage =
   | { type: 'get_settings' }
   | { type: 'update_settings'; patch: Partial<AgentSettings> }
   | { type: 'get_files' }
-  | { type: 'ingest_file'; filename: string; mimeType: string; data: string; group?: string }  // base64-encoded file content
+  | { type: 'ingest_file'; filename: string; mimeType: string; data: string; group?: string; canvasId?: string }  // base64-encoded file content
   | { type: 'export_pdf'; path: string; data: string }  // base64-encoded PDF, path from Tauri save dialog
   | { type: 'ingest_file_paths'; paths: string[]; group?: string }  // local file paths, server reads directly
   | { type: 'delete_file'; id: string }

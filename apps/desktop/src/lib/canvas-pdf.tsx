@@ -27,6 +27,7 @@ type BlockType =
   | 'blockquote'
   | 'code'
   | 'table'
+  | 'mermaid'
 
 interface TextSegment {
   text: string
@@ -39,8 +40,10 @@ interface Block {
   segments?: TextSegment[]
   // For ul/ol — each item parsed into segments
   items?: TextSegment[][]
-  // For code blocks
+  // For code blocks / mermaid
   code?: string
+  // For mermaid — pre-rendered PNG data URI
+  imageDataUri?: string
   // For tables
   headers?: string[]
   rows?: string[][]
@@ -90,8 +93,9 @@ function parseMarkdown(markdown: string): Block[] {
       }
       i++ // skip closing ```
       const lang = line.trim().slice(3).trim().toLowerCase()
-      // Skip mermaid blocks
-      if (lang !== 'mermaid') {
+      if (lang === 'mermaid') {
+        blocks.push({ type: 'mermaid', code: codeLines.join('\n') })
+      } else {
         blocks.push({ type: 'code', code: codeLines.join('\n') })
       }
       continue
@@ -225,8 +229,8 @@ function makeStyles(brand: BrandValues) {
   return StyleSheet.create({
     page: {
       backgroundColor: '#ffffff',
-      paddingTop: 48,
-      paddingBottom: 48,
+      paddingTop: 40,
+      paddingBottom: 40,
       paddingLeft: 48,
       paddingRight: 48,
       fontFamily: 'Helvetica',
@@ -248,27 +252,30 @@ function makeStyles(brand: BrandValues) {
       fontSize: 24,
       fontWeight: 'bold',
       color: brand.primary,
-      marginTop: 16,
-      marginBottom: 8,
+      marginTop: 14,
+      marginBottom: 6,
+      minPresenceAhead: 40,
     },
     h2: {
       fontSize: 18,
       fontWeight: 'bold',
       color: brand.primary,
-      marginTop: 14,
-      marginBottom: 6,
+      marginTop: 12,
+      marginBottom: 5,
+      minPresenceAhead: 36,
     },
     h3: {
       fontSize: 14,
       fontWeight: 'bold',
       color: brand.primary,
-      marginTop: 12,
+      marginTop: 10,
       marginBottom: 4,
+      minPresenceAhead: 30,
     },
     paragraph: {
       fontSize: 11,
-      marginBottom: 8,
-      lineHeight: 1.6,
+      marginBottom: 6,
+      lineHeight: 1.5,
       color: '#1a1a1a',
     },
     paragraphBold: {
@@ -287,9 +294,10 @@ function makeStyles(brand: BrandValues) {
       paddingLeft: 10,
       paddingTop: 4,
       paddingBottom: 4,
-      marginTop: 8,
-      marginBottom: 8,
+      marginTop: 6,
+      marginBottom: 6,
       backgroundColor: '#f9f9f9',
+      minPresenceAhead: 20,
     },
     blockquoteText: {
       fontSize: 11,
@@ -299,8 +307,9 @@ function makeStyles(brand: BrandValues) {
     codeBlock: {
       backgroundColor: '#f3f4f6',
       padding: 10,
-      marginTop: 8,
-      marginBottom: 8,
+      marginTop: 6,
+      marginBottom: 6,
+      minPresenceAhead: 20,
     },
     codeText: {
       fontSize: 10,
@@ -314,7 +323,7 @@ function makeStyles(brand: BrandValues) {
       marginBottom: 3,
     },
     listWrapper: {
-      marginBottom: 8,
+      marginBottom: 6,
     },
     listRow: {
       flexDirection: 'row',
@@ -332,8 +341,8 @@ function makeStyles(brand: BrandValues) {
       color: '#1a1a1a',
     },
     tableWrapper: {
-      marginTop: 8,
-      marginBottom: 8,
+      marginTop: 6,
+      marginBottom: 6,
     },
     tableHeaderRow: {
       flexDirection: 'row',
@@ -362,6 +371,16 @@ function makeStyles(brand: BrandValues) {
       padding: 6,
       fontSize: 10,
       color: '#1a1a1a',
+    },
+    mermaidWrapper: {
+      marginTop: 6,
+      marginBottom: 6,
+      alignItems: 'center' as const,
+      minPresenceAhead: 60,
+    },
+    mermaidImage: {
+      maxWidth: 480,
+      maxHeight: 320,
     },
   })
 }
@@ -490,7 +509,7 @@ function CanvasDocument({
               return (
                 <View key={idx} style={styles.listWrapper}>
                   {(block.items ?? []).map((item, j) => (
-                    <View key={j} style={styles.listRow}>
+                    <View key={j} style={styles.listRow} wrap={false}>
                       <Text style={styles.bullet}>{'•  '}</Text>
                       <InlineText
                         segments={item}
@@ -506,7 +525,7 @@ function CanvasDocument({
               return (
                 <View key={idx} style={styles.listWrapper}>
                   {(block.items ?? []).map((item, j) => (
-                    <View key={j} style={styles.listRow}>
+                    <View key={j} style={styles.listRow} wrap={false}>
                       <Text style={styles.bullet}>{`${j + 1}.  `}</Text>
                       <InlineText
                         segments={item}
@@ -515,6 +534,18 @@ function CanvasDocument({
                       />
                     </View>
                   ))}
+                </View>
+              )
+
+            case 'mermaid':
+              return block.imageDataUri ? (
+                <View key={idx} wrap={false} style={styles.mermaidWrapper}>
+                  <Image src={block.imageDataUri} style={{ maxWidth: 360, maxHeight: 240 }} />
+                </View>
+              ) : (
+                <View key={idx} style={styles.codeBlock}>
+                  <Text style={{ ...styles.codeText, color: '#666', fontSize: 9, marginBottom: 4 }}>[Diagram]</Text>
+                  <Text style={styles.codeText}>{block.code}</Text>
                 </View>
               )
 
@@ -558,6 +589,99 @@ function CanvasDocument({
 }
 
 // ---------------------------------------------------------------------------
+// Mermaid → PNG pre-renderer (uses the mermaid library in the browser)
+// ---------------------------------------------------------------------------
+
+async function renderMermaidBlocks(blocks: Block[]): Promise<void> {
+  const mermaidBlocks = blocks.filter(b => b.type === 'mermaid' && b.code)
+  if (mermaidBlocks.length === 0) return
+
+  try {
+    const mermaid = (await import('mermaid')).default
+    // Always re-initialize to ensure PDF gets the right theme (shared mermaid instance)
+    {
+      mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: 'loose',
+        theme: 'base',
+        themeVariables: {
+          fontFamily: 'Helvetica, Arial, sans-serif',
+          fontSize: '13px',
+          background: '#ffffff',
+          mainBkg: '#ffffff',
+          primaryColor: '#dbeafe',
+          primaryTextColor: '#1e3a5f',
+          primaryBorderColor: '#3b82f6',
+          secondaryColor: '#fce7f3',
+          secondaryBorderColor: '#ec4899',
+          tertiaryColor: '#d1fae5',
+          tertiaryBorderColor: '#10b981',
+          lineColor: '#374151',
+          pie1: '#3b82f6',
+          pie2: '#10b981',
+          pie3: '#f59e0b',
+          pie4: '#ef4444',
+          pie5: '#8b5cf6',
+          pie6: '#06b6d4',
+          pie7: '#ec4899',
+          pie8: '#f97316',
+        },
+        xyChart: {
+          backgroundColor: 'transparent',
+          plotColorPalette: '#3b82f6,#10b981,#ef4444,#f59e0b,#8b5cf6,#06b6d4,#ec4899,#f97316',
+        },
+      })
+    }
+
+    for (let i = 0; i < mermaidBlocks.length; i++) {
+      const block = mermaidBlocks[i]
+      try {
+        const id = `pdf-mermaid-${Date.now()}-${i}`
+        const { svg } = await mermaid.render(id, block.code!)
+        // Convert SVG to PNG data URI via canvas
+        const pngDataUri = await svgToPng(svg, 700, 400)
+        block.imageDataUri = pngDataUri
+      } catch (err) {
+        console.warn('[canvas-pdf] mermaid render failed for block:', err)
+        // Leave imageDataUri undefined — will fall back to showing code
+      }
+    }
+  } catch (err) {
+    console.warn('[canvas-pdf] mermaid import failed:', err)
+  }
+}
+
+function svgToPng(svgString: string, maxW: number, maxH: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new window.Image()
+    const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    img.onload = () => {
+      // Scale to fit within maxW × maxH while preserving aspect ratio
+      let w = img.naturalWidth || maxW
+      let h = img.naturalHeight || maxH
+      const scale = Math.min(maxW / w, maxH / h, 2) // cap at 2x
+      w = Math.round(w * scale)
+      h = Math.round(h * scale)
+      const canvas = document.createElement('canvas')
+      canvas.width = w
+      canvas.height = h
+      const ctx = canvas.getContext('2d')!
+      ctx.fillStyle = '#ffffff'
+      ctx.fillRect(0, 0, w, h)
+      ctx.drawImage(img, 0, 0, w, h)
+      URL.revokeObjectURL(url)
+      resolve(canvas.toDataURL('image/png'))
+    }
+    img.onerror = () => {
+      URL.revokeObjectURL(url)
+      reject(new Error('SVG to PNG conversion failed'))
+    }
+    img.src = url
+  })
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -567,6 +691,8 @@ export async function renderCanvasPdf(
   title?: string
 ): Promise<Blob> {
   const blocks = parseMarkdown(markdown)
+  // Pre-render mermaid diagrams to PNG before building the PDF
+  await renderMermaidBlocks(blocks)
   const instance = pdf(<CanvasDocument blocks={blocks} brand={brand} title={title} />)
   return instance.toBlob()
 }

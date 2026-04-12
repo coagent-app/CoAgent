@@ -26,7 +26,7 @@ import { open } from '@tauri-apps/plugin-shell'
 import type { ApprovalItem } from '@coagent/shared'
 
 export default function App() {
-  const { queue, done, newQueueIds, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, error, chat, approve, reject, editQueueItem, dismissQueueToast, connectIntegration, disconnectIntegration, settings, updateSettings, authStatus, updateAuth, verifyAuth, files, folders, searchResults, transcribingFiles, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, relayActive, relayModel, setRelayModel, relayUsage, activateRelay, refreshRelayStatus, pendingFields, setPendingFields, setModel, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, triggerPrompt, setTriggerPrompt, canvas, canvasVisible, canvasStreaming, canvasStreamingCode, openCanvas, closeCanvas, canvasesList, getCanvases, codeCells, codeCellOrder, cancelCodeCell, exportPdf } = useAgent()
+  const { queue, done, newQueueIds, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, hydrated, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, error, chat, approve, reject, editQueueItem, dismissQueueToast, connectIntegration, disconnectIntegration, settings, updateSettings, authStatus, updateAuth, verifyAuth, files, folders, searchResults, transcribingFiles, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, relayActive, relayModel, setRelayModel, relayUsage, activateRelay, refreshRelayStatus, pendingFields, setPendingFields, setModel, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, triggerPrompt, setTriggerPrompt, canvas, canvasVisible, canvasStreaming, canvasStreamingCode, openCanvas, closeCanvas, canvasesList, getCanvases, codeCells, codeCellOrder, cancelCodeCell, exportPdf } = useAgent()
   const { dark, toggle: toggleTheme } = useTheme()
   const updater = useUpdater()
   const [view, setView] = useState<View>('chat')
@@ -36,8 +36,9 @@ export default function App() {
   const [modalOpen, setModalOpen] = useState(false)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [activated, setActivated] = useState(() => !!localStorage.getItem('coagent-token'))
-  const [hydrated, setHydrated] = useState(false)
-  useEffect(() => { setHydrated(true) }, [])
+  // Wait for WebSocket to connect before showing activation gate.
+  // If already activated from localStorage, skip the wait entirely.
+  const [wsChecked, setWsChecked] = useState(() => !!localStorage.getItem('coagent-token'))
   const [tourDone, setTourDone] = useState(() => localStorage.getItem('tourDone') === '1')
   const markTourDone = useCallback((done: boolean) => { setTourDone(done); if (done) localStorage.setItem('tourDone', '1') }, [])
   const newQueueItems = useMemo(() => queue.filter(i => newQueueIds.has(i.id) && i.status === 'pending'), [queue, newQueueIds])
@@ -84,8 +85,18 @@ export default function App() {
     if (relayCredentials && !activated) {
       localStorage.setItem('coagent-token', 'existing')
       setActivated(true)
+      setWsChecked(true)
     }
   }, [relayCredentials, activated])
+
+  // Once WebSocket connects (or fails after timeout), mark as checked
+  useEffect(() => {
+    if (wsChecked) return
+    if (connected) { setWsChecked(true); return }
+    const t = setTimeout(() => setWsChecked(true), 2000)
+    return () => clearTimeout(t)
+  }, [connected, wsChecked])
+
 
   // ESC to cancel voice/stop agent — always fire both regardless of state
   useEffect(() => {
@@ -153,9 +164,25 @@ export default function App() {
     setDrawerOpen(false)
   }
 
-  // Show onboarding activation if user hasn't activated yet
-  // Skip if backend is already connected (existing user with relay credentials)
-  if (hydrated && !activated && !connected && !relayCredentials) {
+  // Show loading screen while waiting for WebSocket to establish AND initial
+  // data to arrive (settings + chat history). This prevents the app shell from
+  // rendering with empty states, red dots, or missing user names.
+  // Also wait for hydration before showing activation gate — relay credentials
+  // arrive after connection, so we can't decide "new user vs existing" until then.
+  if (!wsChecked || !hydrated) {
+    return (
+      <div className="flex flex-col items-center justify-center h-screen bg-white dark:bg-neutral-950 gap-4">
+        <img src="/coagent-logo.png" alt="Co-Agent" className="w-12 h-12 brightness-0 dark:brightness-100 opacity-40" />
+        <div className="w-6 h-6 border-2 border-neutral-200 dark:border-neutral-700 border-t-neutral-900 dark:border-t-neutral-100 rounded-full animate-spin" />
+        <p className="text-[12px] text-neutral-400 dark:text-neutral-600">Connecting...</p>
+      </div>
+    )
+  }
+
+  // Show onboarding activation if user hasn't activated yet.
+  // At this point hydrated=true, so relay credentials have had time to arrive.
+  // If relayCredentials exist, the useEffect above will auto-activate.
+  if (!activated && !relayCredentials) {
     return (
       <OnboardingActivation
         onActivated={(token) => {
@@ -207,7 +234,7 @@ export default function App() {
 
         {view === 'chat' && (
           <div className="relative flex-1 flex overflow-hidden">
-            <ChatPane messages={messages} streamingText={streamingText} thinking={thinking} processing={processing} toolLabel={toolLabel} researchAgents={researchAgents} connected={connected} onChat={chat} onSteer={steer} onStop={stopAgent} onIngestFile={ingestFile} files={files} onNavigateToSettings={() => setView('settings')} lastHeartbeat={lastHeartbeat} heartbeatLog={heartbeatLog} onTriggerHeartbeat={triggerHeartbeat} statusLine={statusLine} skills={skills} capabilityCard={capabilityCard} onConfirmCapabilities={confirmCapabilities} userName={settings?.name} userRole={settings?.role} onboarded={settings?.onboarded} agentName={settings?.agent_name} codeCells={codeCells} codeCellOrder={codeCellOrder} onCancelCodeCell={cancelCodeCell} className="flex-1" />
+            <ChatPane messages={messages} streamingText={streamingText} thinking={thinking} processing={processing} toolLabel={toolLabel} researchAgents={researchAgents} connected={connected} onChat={chat} onSteer={steer} onStop={stopAgent} onIngestFile={ingestFile} files={files} onNavigateToSettings={() => setView('settings')} lastHeartbeat={lastHeartbeat} heartbeatLog={heartbeatLog} onTriggerHeartbeat={triggerHeartbeat} statusLine={statusLine} skills={skills} capabilityCard={capabilityCard} onConfirmCapabilities={confirmCapabilities} userName={settings?.name} userRole={settings?.role} onboarded={settings?.onboarded} agentName={settings?.agent_name} codeCells={codeCells} codeCellOrder={codeCellOrder} onCancelCodeCell={cancelCodeCell} onOpenCanvas={openCanvas} className="flex-1" />
             {newQueueItems.length > 0 && !drawerOpen && (
               <QueueToast
                 items={newQueueItems}
@@ -226,7 +253,7 @@ export default function App() {
                 canvasesList={canvasesList}
                 onOpenCanvas={openCanvas}
                 onLoadCanvases={getCanvases}
-                onExportPdf={exportPdf}
+
               />
             )}
             <QueueDrawer
@@ -256,6 +283,8 @@ export default function App() {
             onGoogleSync={googleCalendarSync}
             autoBriefMeetings={settings?.auto_brief_meetings}
             autoBriefMinutes={settings?.auto_brief_minutes}
+            autoRecapMeetings={settings?.auto_recap_meetings}
+            autoRecapMinutes={settings?.auto_recap_minutes}
             onUpdateSettings={updateSettings}
           />
         )}

@@ -6,6 +6,18 @@ import type { ApprovalItem, DoneItem } from '@coagent/shared'
 
 type NewItem = Omit<ApprovalItem, 'id' | 'status' | 'createdAt'>
 
+// ---------------------------------------------------------------------------
+// In-process async mutex — serialises all read-modify-write cycles so that
+// two simultaneous triggers cannot corrupt queue.json or done.json.
+// ---------------------------------------------------------------------------
+let writeLock: Promise<void> = Promise.resolve()
+function withLock<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = writeLock
+  let resolve!: () => void
+  writeLock = new Promise(r => { resolve = r })
+  return prev.then(fn).finally(() => resolve())
+}
+
 export class ApprovalQueue {
   private items: ApprovalItem[] = []
   private done: DoneItem[] = []
@@ -65,8 +77,15 @@ export class ApprovalQueue {
     const done = JSON.stringify(this.done, null, 2)
     const tmpQ = this.queuePath + '.tmp'
     const tmpD = this.donePath + '.tmp'
-    writeFile(tmpQ, items).then(() => rename(tmpQ, this.queuePath)).catch(console.error)
-    writeFile(tmpD, done).then(() => rename(tmpD, this.donePath)).catch(console.error)
+    // Acquire the lock so concurrent flush calls are serialised. Using
+    // withLock ensures the two atomic writes (queue + done) complete as a
+    // unit before the next writer begins.
+    withLock(async () => {
+      await writeFile(tmpQ, items)
+      await rename(tmpQ, this.queuePath)
+      await writeFile(tmpD, done)
+      await rename(tmpD, this.donePath)
+    }).catch(console.error)
   }
 
   private save(): void {

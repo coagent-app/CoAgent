@@ -23,6 +23,7 @@ import { streamOpenAI } from './openai-provider.js'
 import {
   createCanvas,
   updateCanvas,
+  readCanvas,
 } from './canvas-store.js'
 
 /** Returns true if the model should use the Anthropic SDK */
@@ -36,7 +37,7 @@ const HISTORY_CAP = 200          // hard in-memory cap — trim from front when 
 
 
 // --- Skills ---
-const DEFAULT_SKILL_NAMES = new Set(['skill-creator', 'integration-builder', 'spreadsheet-pro', 'lead-generation', 'canvas-design'])
+const DEFAULT_SKILL_NAMES = new Set(['skill-creator', 'integration-builder', 'showcase'])
 interface Skill { name: string; description: string; instructions: string; placeholder?: string }
 
 async function skillsDir(dataDir: string): Promise<string> {
@@ -506,7 +507,9 @@ Rules:
 - Real content only — no {{placeholders}}, TBD, or "fill in later".
 - Do not reference colors or fonts — branding is applied automatically.
 - Use tables for structured data.
-- Use Mermaid fenced blocks for diagrams.
+- Use Mermaid fenced blocks for diagrams and charts. Prefer pie, flowchart, mindmap, quadrantChart, and sequence diagrams. Avoid gantt charts.
+- Charts are supplementary — keep them compact (3-6 data points max). Use surrounding text/tables for detail. Charts should support the narrative, not dominate the page.
+- The chart color palette in order is: 1=blue, 2=green, 3=red, 4=amber, 5=purple, 6=cyan, 7=pink, 8=orange. When referencing colors in legends or labels, use the correct color name for that series position.
 - No HTML tags.
 - No emojis.`,
     input_schema: {
@@ -515,23 +518,41 @@ Rules:
         title: { type: 'string', description: 'Canvas title shown in the pane header.' },
         code: { type: 'string', description: 'Full markdown document. GFM syntax with optional Mermaid fenced blocks.' },
         kind: { type: 'string', description: 'Document archetype — e.g. "proposal", "flyer", "report", "letter", "invoice", "dashboard". Agent picks based on intent.' },
-        save_to_files: { type: 'boolean', description: 'If true, also save the canvas as a PDF file in the user\'s files.' },
+        save_to_files: { type: 'boolean', description: 'Set to true when the user wants to email, share, or attach the document.' },
       },
       required: ['title', 'code'],
     },
   },
   {
     name: 'patch_canvas',
-    description: `Replace the content of an existing canvas. The canvas pane will re-render the new markdown immediately. Prefer patch_canvas for iterations, write full new content for structural rewrites.`,
+    description: `Update an existing canvas using search-and-replace operations. The current content is in your system prompt under ACTIVE CANVAS. Each operation finds exact text and replaces it.
+
+Rules:
+- "find" must match text in the document EXACTLY (including whitespace, newlines, punctuation).
+- To insert content, find the text before the insertion point and replace it with itself + the new content.
+- To delete content, set "replace" to empty string.
+- To append to the end, find the last paragraph and replace it with itself + new content.
+- Operations are applied in order. If a find fails, that operation is skipped with a warning.`,
     input_schema: {
       type: 'object' as const,
       properties: {
         canvas_id: { type: 'string', description: 'ID of the canvas to patch. Omit to patch the currently open canvas.' },
-        code: { type: 'string', description: 'Full new markdown content. Replaces existing content entirely.' },
+        operations: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              find: { type: 'string', description: 'Exact text to find in the current document.' },
+              replace: { type: 'string', description: 'Text to replace it with. Empty string to delete.' },
+            },
+            required: ['find', 'replace'],
+          },
+          description: 'Array of search-and-replace operations applied in order.',
+        },
         title: { type: 'string', description: 'Optional new title.' },
-        save_to_files: { type: 'boolean', description: 'If true, also save the canvas as a PDF file in the user\'s files.' },
+        save_to_files: { type: 'boolean', description: 'Always set to true. Saves the updated canvas as a PDF in the user\'s files so it can be attached to emails or shared.' },
       },
-      required: ['code'],
+      required: ['operations'],
     },
   },
 ]
@@ -884,6 +905,28 @@ export class Agent {
   public onResearchProgress?: (agents: { query: string; status: string; detail?: string }[]) => void
   public onCustomIntegration?: (action: string, data: any) => Promise<string>
   public onBroadcast?: (event: any) => void
+  private pendingCanvasPdf = new Map<string, { resolve: (fileId: string) => void; reject: (err: Error) => void }>()
+
+  /** Called by server when the frontend finishes rendering + ingesting the canvas PDF. */
+  resolveCanvasPdf(canvasId: string, fileId: string): void {
+    const p = this.pendingCanvasPdf.get(canvasId)
+    if (p) { this.pendingCanvasPdf.delete(canvasId); p.resolve(fileId) }
+  }
+
+  /** Broadcast save_to_files and wait for the frontend to render and ingest the PDF. */
+  private async saveCanvasToFiles(canvasId: string, title: string, code: string): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingCanvasPdf.delete(canvasId)
+        reject(new Error('Canvas PDF render timed out (15s)'))
+      }, 15000)
+      this.pendingCanvasPdf.set(canvasId, {
+        resolve: (fileId) => { clearTimeout(timeout); resolve(fileId) },
+        reject: (err) => { clearTimeout(timeout); reject(err) },
+      })
+      this.onBroadcast?.({ type: 'canvas_save_to_files', canvasId, title, code })
+    })
+  }
   /**
    * Execute Python in the desktop's Pyodide sandbox. Server installs this
    * callback to round-trip a `python_run` WS message to the desktop client.
@@ -991,6 +1034,8 @@ export class Agent {
     try {
       const raw = await readFile(this.historyPath, 'utf-8')
       this.conversationHistory = JSON.parse(raw)
+      // Cap on load in case the file grew before capping was enforced
+      this.capHistory(this.conversationHistory)
       // Sanitize on load — strip orphaned tool_use/tool_result blocks left by unclean stops.
       // preserveTail=true so the final assistant response (trailing non-user) is NOT dropped.
       // runLoop re-sanitizes WITHOUT preserveTail when preparing API messages.
@@ -1051,6 +1096,17 @@ export class Agent {
     }
   }
 
+  /** Attach canvas doc references to the last assistant message so they persist across restarts. */
+  attachDocsToLastMessage(docs: Array<{ id: string; title: string }>): void {
+    for (let i = this.conversationHistory.length - 1; i >= 0; i--) {
+      if (this.conversationHistory[i].role === 'assistant') {
+        ;(this.conversationHistory[i] as any)._docs = docs
+        this.saveHistory().catch(console.error)
+        return
+      }
+    }
+  }
+
   getChatHistory(): AgentMessage[] {
     const result: AgentMessage[] = []
     let inHeartbeat = false
@@ -1087,7 +1143,9 @@ export class Agent {
         }
       }
       if (m.role === 'user') inHeartbeat = false
-      result.push({ id: '', role: m.role as 'user' | 'assistant', content: text, timestamp: (m as any).timestamp ?? '' })
+      const msg: AgentMessage = { id: '', role: m.role as 'user' | 'assistant', content: text, timestamp: (m as any).timestamp ?? '' }
+      if ((m as any)._docs) msg.docs = (m as any)._docs
+      result.push(msg)
     }
     // Only return the most recent 100 messages to keep the UI fast
     const sliced = result.slice(-100)
@@ -1316,7 +1374,7 @@ export class Agent {
     const memFileCount = listMemoryFiles(this.dataDir).length
     const teamRosterKey = this.teamClient ? `${this.teamClient.teamId}|${this.teamClient.getRoster().length}` : ''
     const prefsMtime = (() => { try { return require('fs').statSync(join(this.dataDir, 'memory', 'preferences.md')).mtimeMs } catch { return 0 } })()
-    const promptKey = connectedServices.join(',') + '|' + JSON.stringify(settings) + '|' + memFileCount + '|' + teamRosterKey + '|' + this.googleCalendarConnected + '|' + this.imessageConnected + '|' + this.composioConnectedSlugs.join(',') + '|' + prefsMtime
+    const promptKey = connectedServices.join(',') + '|' + JSON.stringify(settings) + '|' + memFileCount + '|' + teamRosterKey + '|' + this.googleCalendarConnected + '|' + this.imessageConnected + '|' + this.composioConnectedSlugs.join(',') + '|' + prefsMtime + '|' + (this.activeCanvasId || '')
     let systemPrompt: string
     if (this.cachedSystemPrompt && this.cachedPromptKey === promptKey) {
       systemPrompt = this.cachedSystemPrompt
@@ -1327,6 +1385,24 @@ export class Agent {
       this.cachedSystemPrompt = systemPrompt
       this.cachedPromptKey = promptKey
       console.log('[Agent] System prompt rebuilt (settings or services changed)')
+    }
+
+    // Inject active canvas content so the agent can make targeted edits
+    if (this.activeCanvasId && context !== 'heartbeat') {
+      try {
+        const activeCanvas = await readCanvas(this.dataDir, this.activeCanvasId)
+        if (activeCanvas) {
+          systemPrompt += `\n\n## ACTIVE CANVAS
+Title: ${activeCanvas.title}
+Canvas ID: ${activeCanvas.id}
+
+<current_canvas_content>
+${activeCanvas.code}
+</current_canvas_content>
+
+Use patch_canvas with search-and-replace operations to modify specific parts. Each operation needs "find" (exact text from the document above) and "replace" (the replacement). Only use write_canvas if you need to completely rewrite the document from scratch.`
+        }
+      } catch {}
     }
 
     // Team privacy guard — appended to system prompt for team context only
@@ -1854,15 +1930,8 @@ Rules:
 
             }
 
-            // Auto-inject spreadsheet skill + tool log context — parallel
-            const hasSpreadsheetTools = matches.some(t => t.name.startsWith('GOOGLESHEETS_') || t.name.startsWith('EXCEL_'))
-            const [spreadsheetSkill, logResults] = await Promise.all([
-              hasSpreadsheetTools ? loadSkill(this.dataDir, 'spreadsheet-pro') : Promise.resolve(null),
-              input.context ? searchToolLogs(this.dataDir, input.context) : Promise.resolve(null),
-            ])
-            if (spreadsheetSkill) {
-              result += `\n\n[IMPORTANT — Spreadsheet Guide]\n${spreadsheetSkill.instructions}\n[/Guide]`
-            }
+            // Auto-inject tool log context
+            const logResults = input.context ? await searchToolLogs(this.dataDir, input.context) : null
             if (logResults && logResults.length > 0) {
               result += `\n\nTool log context for "${input.context}":\n` + logResults.map(l => `- ${l}`).join('\n')
               console.log(`[Agent] Context: ${logResults.length} tool logs`)
@@ -2328,11 +2397,16 @@ Rules:
                 })
                 this.activeCanvasId = canvas.id
                 this.onBroadcast?.({ type: 'canvas_opened', canvas })
+                let savedFileId = ''
                 if (input.save_to_files) {
-                  this.onBroadcast?.({ type: 'canvas_save_to_files', canvasId: canvas.id, title: canvas.title, code: canvas.code })
+                  try {
+                    savedFileId = await this.saveCanvasToFiles(canvas.id, canvas.title, canvas.code)
+                  } catch (err: any) {
+                    console.error('[Agent] save_to_files failed:', err.message)
+                  }
                 }
                 console.log(`[Agent] Created canvas: "${canvas.title}" (${canvas.id})`)
-                result = `Canvas created: "${canvas.title}"\ncanvas_id: ${canvas.id}\n\nUse patch_canvas with this canvas_id for iterations.`
+                result = `Canvas created: "${canvas.title}"\ncanvas_id: ${canvas.id}${savedFileId ? `\nSaved as PDF file: ${savedFileId}` : ''}\n\nUse patch_canvas with this canvas_id for iterations.`
               }
             } catch (err: any) {
               result = `Error creating canvas: ${err.message}`
@@ -2342,28 +2416,52 @@ Rules:
           } else if (block.name === 'patch_canvas') {
             const input = block.input as {
               canvas_id?: string
-              code: string
+              operations: Array<{ find: string; replace: string }>
               title?: string
               save_to_files?: boolean
             }
             const canvasId = input.canvas_id || this.activeCanvasId
             try {
-              if (!canvasId || !input.code) {
-                result = 'Error: patch_canvas requires canvas_id (or an active canvas) and code.'
+              if (!canvasId || !input.operations?.length) {
+                result = 'Error: patch_canvas requires canvas_id (or an active canvas) and at least one operation.'
               } else {
-                const updated = await updateCanvas(this.dataDir, canvasId, {
-                  code: input.code,
-                  ...(input.title !== undefined ? { title: input.title } : {}),
-                })
-                if (!updated) {
+                const current = await readCanvas(this.dataDir, canvasId)
+                if (!current) {
                   result = `Error: Canvas "${canvasId}" not found. Use write_canvas to create it first.`
                 } else {
-                  this.activeCanvasId = updated.id
-                  this.onBroadcast?.({ type: 'canvas_updated', canvas: updated })
-                  if (input.save_to_files) {
-                    this.onBroadcast?.({ type: 'canvas_save_to_files', canvasId: updated.id, title: updated.title, code: updated.code })
+                  let code = current.code
+                  const warnings: string[] = []
+                  for (let i = 0; i < input.operations.length; i++) {
+                    const op = input.operations[i]
+                    if (!code.includes(op.find)) {
+                      warnings.push(`Op ${i + 1}: text not found: "${op.find.slice(0, 80)}${op.find.length > 80 ? '…' : ''}"`)
+                    } else {
+                      code = code.replace(op.find, op.replace)
+                    }
                   }
-                  result = `Canvas updated: "${updated.title}"`
+                  const updated = await updateCanvas(this.dataDir, canvasId, {
+                    code,
+                    ...(input.title !== undefined ? { title: input.title } : {}),
+                  })
+                  if (!updated) {
+                    result = `Error: Canvas "${canvasId}" not found.`
+                  } else {
+                    this.activeCanvasId = updated.id
+                    this.onBroadcast?.({ type: 'canvas_updated', canvas: updated })
+                    let savedFileId = ''
+                    if (input.save_to_files) {
+                      try {
+                        savedFileId = await this.saveCanvasToFiles(updated.id, updated.title, updated.code)
+                      } catch (err: any) {
+                        console.error('[Agent] save_to_files failed:', err.message)
+                      }
+                    }
+                    if (warnings.length > 0) {
+                      result = `Canvas updated with warnings:\n${warnings.join('\n')}\n\nOther operations applied successfully.${savedFileId ? `\nSaved as PDF file: ${savedFileId}` : ''}`
+                    } else {
+                      result = `Canvas updated: "${updated.title}" — ${input.operations.length} operation(s) applied.${savedFileId ? `\nSaved as PDF file: ${savedFileId}` : ''}`
+                    }
+                  }
                 }
               }
             } catch (err: any) {
@@ -2501,6 +2599,20 @@ Rules:
                   // list (default)
                   const allSkills = await listSkills(this.dataDir)
                   return allSkills.length === 0 ? 'No skills saved yet.' : allSkills.map(s => `@${s.name} — ${s.description}`).join('\n')
+                }
+                if (name === 'call_external_tool') {
+                  const extToolName = (inp.tool_name as string) || ''
+                  const extParams = (inp.parameters as Record<string, unknown>) || {}
+                  // Block write actions — sub-agents are read-only for external integrations
+                  const WRITE_PATTERNS = ['send', 'create', 'delete', 'remove', 'update', 'modify', 'post', 'put', 'patch', 'archive', 'trash', 'draft', 'reply', 'forward', 'cancel', 'invite']
+                  const upper = extToolName.toUpperCase()
+                  if (WRITE_PATTERNS.some(p => upper.includes(p.toUpperCase()))) {
+                    return `Error: sub-agents cannot perform write actions. "${extToolName}" is a write operation. Only read/search/list/get operations are allowed.`
+                  }
+                  const { serverMap } = await this.mcpManager.getAllTools()
+                  const serverName = serverMap.get(extToolName)
+                  if (!serverName) return `Tool "${extToolName}" not found. Call search_tools first to discover available tools.`
+                  return await this.mcpManager.callTool(serverName, extToolName, extParams)
                 }
                 return `Unknown tool: ${name}`
               }
@@ -2672,11 +2784,27 @@ Rules:
                 const toolDef = toolSchemaMap.get(extToolName)
                 const schemaNote = toolDef ? `\n\n[${extToolName} schema]${formatSchemaForResult(toolDef)}` : ''
 
+                // One retry on transient errors (e.g. Composio 5xx) — 2s delay
                 let toolTimeout: ReturnType<typeof setTimeout>
-                const raw = await Promise.race([
+                const callWithTimeout = () => Promise.race([
                   this.mcpManager.callTool(serverName, extToolName, toolInput),
                   new Promise<string>((_, reject) => { toolTimeout = setTimeout(() => reject(new Error('Tool call timed out after 45s')), 45000) })
                 ]).finally(() => clearTimeout(toolTimeout!))
+                let raw: string
+                try {
+                  raw = await callWithTimeout()
+                } catch (firstErr: any) {
+                  console.warn(`[Agent] Tool ${extToolName} failed (${firstErr.message}), retrying in 2s...`)
+                  await new Promise(r => setTimeout(r, 2000))
+                  try {
+                    raw = await callWithTimeout()
+                  } catch (retryErr: any) {
+                    // Both attempts failed — surface the error to the user via chat
+                    const errMsg = `\n\n_Action failed after retry: ${retryErr.message}. Please try again._`
+                    onChunk?.(errMsg)
+                    throw retryErr
+                  }
+                }
                 const MAX_TOOL_RESULT = 32000
                 const trimmed = raw.length > MAX_TOOL_RESULT
                   ? raw.slice(0, MAX_TOOL_RESULT) + `\n\n[Truncated: ${raw.length - MAX_TOOL_RESULT} chars omitted. Call the tool again with narrower parameters or fetch individual items to get complete data.]`
@@ -2923,6 +3051,14 @@ Rules:
       const location = p?.location ? `\nLocation: ${p.location}` : ''
       const notes = p?.notes ? `\nNotes: ${p.notes}` : ''
       return `[Meeting Brief — ${time}] You have a meeting in ${minsUntil} minutes. Prepare a briefing.\n\nMeeting: ${title}\nStarts: ${start}${location}${notes}\n\nInstructions:\n1. Search memory for any context about the people or topic in this meeting.\n2. Search Gmail for recent emails with the attendees.\n3. If the person/company is unfamiliar, do a quick Exa search.\n4. Present a concise briefing: who they are, recent interactions, anything relevant to discuss, and any open action items.\n\nKeep it brief and actionable.`
+    }
+    if (trigger.source === 'meeting_recap') {
+      const p = trigger.payload as any
+      const title = p?.title ?? 'Unknown meeting'
+      const end = p?.end ?? ''
+      const location = p?.location ? `\nLocation: ${p.location}` : ''
+      const notes = p?.notes ? `\nNotes: ${p.notes}` : ''
+      return `[Meeting Recap — ${time}] A meeting just ended. Create a recap.\n\nMeeting: ${title}\nEnded: ${end}${location}${notes}\n\nInstructions:\n1. Check if a transcript is available — try Google Meet recordings/transcripts first, then check Fathom if it's connected.\n2. If a transcript is found, summarize the key points, decisions, and action items.\n3. If no transcript is found, search memory and recent emails for context about this meeting, and ask the user for a quick summary.\n4. Search memory for the attendees — note any relevant history.\n5. Draft follow-up action items and suggest next steps.\n6. Save any new contacts or important details to memory.\n\nKeep the recap concise and actionable.`
     }
     if (trigger.source === 'webhook') return `[Webhook — ${time}] Event received: ${JSON.stringify(trigger.payload)}. Search memory and handle it.`
     return `[Manual — ${time}] ${trigger.payload?.message ?? ''}`

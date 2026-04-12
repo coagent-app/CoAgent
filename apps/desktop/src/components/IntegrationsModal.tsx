@@ -124,6 +124,8 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
     const q = search.toLowerCase()
     return (
       i.name.toLowerCase().includes(q) ||
+      i.slug.toLowerCase().includes(q) ||
+      (i.category?.toLowerCase().includes(q) ?? false) ||
       (i.description?.toLowerCase().includes(q) ?? false) ||
       (i.capabilities?.toLowerCase().includes(q) ?? false)
     )
@@ -164,7 +166,7 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
         role="dialog"
         aria-modal="true"
         aria-label="Integrations"
-        className="bg-white dark:bg-neutral-900 rounded-2xl shadow-xl w-[820px] max-h-[700px] flex flex-col"
+        className="bg-white dark:bg-neutral-900 rounded-2xl shadow-xl w-[820px] max-h-[85vh] flex flex-col"
         onClick={e => e.stopPropagation()}
       >
         {detailIntegration ? (
@@ -256,22 +258,35 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
                 </div>
               )}
 
-              {/* CoAgent Mobile QR code pairing */}
+              {/* Workflow examples — only shown when connected */}
+              {detailIntegration.connected && detailIntegration.workflows && detailIntegration.workflows.length > 0 && (
+                <div className="mb-5">
+                  <p className="text-[11px] font-semibold text-neutral-400 dark:text-neutral-500 tracking-wider mb-2">Try these workflows</p>
+                  <div className="flex flex-wrap gap-2">
+                    {detailIntegration.workflows.map((workflow, i) => (
+                      <button
+                        key={i}
+                        type="button"
+                        onClick={() => {
+                          onClose()
+                          window.dispatchEvent(new CustomEvent('coagent-inject-text', { detail: workflow }))
+                        }}
+                        className="text-[12px] px-3 py-1.5 rounded-lg border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-700 hover:border-neutral-300 dark:hover:border-neutral-600 transition-colors text-left"
+                      >
+                        {workflow}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* CoAgent Mobile — coming soon */}
               {detailIntegration.slug === 'coagent:mobile' && (
                 <div className="mb-5 p-4 rounded-xl border border-neutral-100 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-800 flex flex-col items-center gap-3">
-                  {mobileQrDataUrl ? (
-                    <>
-                      <p className="text-[12px] font-semibold text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">Scan with your iPhone camera to connect</p>
-                      <img src={mobileQrDataUrl} alt="CoAgent Mobile QR Code" className="w-48 h-48 rounded-lg" />
-                      <p className="text-[11px] text-neutral-400 dark:text-neutral-500 text-center">
-                        Open the CoAgent app on your iPhone and scan this code
-                      </p>
-                    </>
-                  ) : (
-                    <p className="text-[12px] text-neutral-400 dark:text-neutral-500">
-                      {relayCredentials === null ? 'Loading...' : 'Relay not configured. Activate your relay in Settings first.'}
-                    </p>
-                  )}
+                  <p className="text-[13px] font-medium text-neutral-500 dark:text-neutral-400">Coming soon</p>
+                  <p className="text-[11px] text-neutral-400 dark:text-neutral-500 text-center">
+                    Push notifications and mobile access are on the roadmap.
+                  </p>
                 </div>
               )}
 
@@ -288,71 +303,24 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
 
               {/* Pending fields (shown inline in detail view) */}
               {detailPendingFields && detailPendingFields.fields.length > 0 && (
-                <div className="mb-5 p-4 rounded-xl border border-neutral-100 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-800">
-                  <p className="text-[12px] font-semibold text-neutral-500 dark:text-neutral-400 uppercase tracking-wider mb-3">Required credentials</p>
-                  <div className="flex flex-col gap-2">
-                    {detailPendingFields.fields.map((field, i) => (
-                      <div key={field.name} className="flex flex-col gap-1">
-                        <input
-                          autoFocus={i === 0}
-                          type="text"
-                          placeholder={field.displayName}
-                          aria-label={field.displayName}
-                          title={field.description}
-                          value={fieldValues[field.name] ?? ''}
-                          onChange={e => setFieldValues(prev => ({ ...prev, [field.name]: e.target.value }))}
-                          onKeyDown={e => e.key === 'Enter' && handleFieldSubmit()}
-                          className="text-[13px] px-3 py-2 border border-neutral-200 dark:border-neutral-700 rounded-lg bg-white dark:bg-neutral-900 outline-none focus:border-neutral-400 dark:focus:border-neutral-500 transition-colors text-neutral-800 dark:text-neutral-100 placeholder-neutral-400 dark:placeholder-neutral-500"
-                        />
-                        {(field.helpText || field.helpUrl) && (
-                          <p className="text-[11px] text-neutral-400 dark:text-neutral-500">
-                            {field.helpText}
-                            {field.helpUrl && (
-                              <>
-                                {field.helpText ? ' ' : ''}
-                                <a
-                                  href={field.helpUrl}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="text-neutral-600 dark:text-neutral-300 hover:underline"
-                                >
-                                  {field.helpText ? 'Open →' : `Find your ${field.displayName} →`}
-                                </a>
-                              </>
-                            )}
-                          </p>
-                        )}
-                      </div>
-                    ))}
-                    {detailPendingFields.fields.some(f => !f.helpUrl) && (
-                      <p className="text-[11px] text-neutral-400 dark:text-neutral-500">
-                        {detailPendingFields.fields.filter(f => !f.helpUrl).map(f => f.description).join('. ')}
-                      </p>
-                    )}
-                  </div>
+                <div className="mb-5 p-4 rounded-xl border border-neutral-100 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-800 flex flex-col items-center gap-2">
+                  <p className="text-[13px] font-medium text-neutral-500 dark:text-neutral-400">Coming soon</p>
+                  <p className="text-[11px] text-neutral-400 dark:text-neutral-500 text-center">
+                    This integration requires API keys. Automated setup is on the roadmap.
+                  </p>
                 </div>
               )}
 
               {/* Connect / Disconnect button */}
               <div className="flex items-center gap-3">
                 {detailPendingFields && detailPendingFields.fields.length > 0 ? (
-                  <>
-                    <button
-                      type="button"
-                      onClick={handleFieldSubmit}
-                      disabled={!detailPendingFields.fields.every(f => fieldValues[f.name]?.trim())}
-                      className="text-[13px] font-medium px-4 py-2 rounded-xl bg-neutral-900 text-white hover:bg-neutral-700 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      Connect
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleCancelFields}
-                      className="text-[13px] font-medium px-4 py-2 rounded-xl text-neutral-500 hover:bg-neutral-100 dark:text-neutral-400 dark:hover:bg-neutral-800 transition-colors"
-                    >
-                      Cancel
-                    </button>
-                  </>
+                  <button
+                    type="button"
+                    onClick={handleCancelFields}
+                    className="text-[13px] font-medium px-4 py-2 rounded-xl text-neutral-500 hover:bg-neutral-100 dark:text-neutral-400 dark:hover:bg-neutral-800 transition-colors"
+                  >
+                    Back
+                  </button>
                 ) : detailIntegration.connected ? (
                   confirmingDisconnect === detailIntegration.slug ? (
                     <>
@@ -556,8 +524,11 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
                             )}
                             <div className="flex-1 min-w-0">
                               <p className="text-[13px] font-medium text-neutral-800 dark:text-neutral-200 truncate">{integration.name}</p>
+                              {integration.description && (
+                                <p className="text-[11px] text-neutral-400 dark:text-neutral-500 line-clamp-1 mt-0.5">{integration.description}</p>
+                              )}
                             </div>
-                            <span className="w-1.5 h-1.5 rounded-full flex-shrink-0 bg-emerald-400" />
+                            <span className="w-1.5 h-1.5 rounded-full flex-shrink-0 mt-1 bg-emerald-400" />
                           </button>
                         ))}
                       </div>
@@ -625,8 +596,11 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
                               )}
                               <div className="flex-1 min-w-0">
                                 <p className="text-[13px] font-medium text-neutral-800 dark:text-neutral-200 truncate">{integration.name}</p>
+                                {integration.description && (
+                                  <p className="text-[11px] text-neutral-400 dark:text-neutral-500 line-clamp-1 mt-0.5">{integration.description}</p>
+                                )}
                               </div>
-                              <span className={cn('w-1.5 h-1.5 rounded-full flex-shrink-0', integration.connected ? 'bg-emerald-400' : 'bg-neutral-300 dark:bg-neutral-600')} />
+                              <span className={cn('w-1.5 h-1.5 rounded-full flex-shrink-0 mt-1', integration.connected ? 'bg-emerald-400' : 'bg-neutral-300 dark:bg-neutral-600')} />
                             </button>
                           ))}
                         </div>

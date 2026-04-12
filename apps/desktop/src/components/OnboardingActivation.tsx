@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useEffect } from 'react'
 import { Loader2, CheckCircle2, Mail, Calendar, BarChart3, Zap, ExternalLink } from 'lucide-react'
 import { listen } from '@tauri-apps/api/event'
+import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-shell'
 
 const RELAY_URL = (import.meta.env.VITE_RELAY_URL as string).replace(/\/$/, '')
@@ -133,11 +134,23 @@ export function OnboardingActivation({ onActivated }: OnboardingActivationProps)
         setSuccess(true)
         setTimeout(() => onActivated(data.token), 1200)
       } else {
-        // Paid tiers: open Stripe Checkout in browser
+        // Paid tiers: open Stripe Checkout in browser.
+        // Generate a one-time nonce first — the relay embeds it in the Stripe
+        // success URL (coagent://activate?session_id=XXX&nonce=YYY) so that
+        // the deep link handler can reject forged or replayed deep links.
+        let nonce: string | null = null
+        try {
+          nonce = await invoke<string>('generate_activation_nonce')
+        } catch (e) {
+          // Non-fatal: if the command fails we still proceed, the deep link
+          // handler will accept nonce-less links with a warning (transition mode).
+          console.warn('[Activation] Could not generate nonce:', e)
+        }
+
         const res = await fetch(`${RELAY_URL}/invite/redeem`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ referralCode: code }),
+          body: JSON.stringify({ referralCode: code, ...(nonce ? { nonce } : {}) }),
         })
         const data = await res.json() as any
         if (!res.ok) { setError(data.error || 'Failed to start checkout'); setLoading(false); return }
@@ -202,7 +215,7 @@ export function OnboardingActivation({ onActivated }: OnboardingActivationProps)
                   onChange={e => { setReferralCode(e.target.value); setError(''); setTierInfo(null) }}
                   onBlur={validateReferral}
                   onKeyDown={e => { if (e.key === 'Enter') handleSubmit() }}
-                  placeholder="REF_..."
+                  placeholder="Enter your invite code"
                   className="w-full px-4 py-2.5 rounded-xl border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-800 text-[14px] text-neutral-900 dark:text-neutral-100 placeholder:text-neutral-400 dark:placeholder:text-neutral-500 focus:outline-none focus:ring-2 focus:ring-neutral-300 dark:focus:ring-neutral-600"
                   autoFocus
                 />

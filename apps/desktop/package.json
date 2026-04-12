@@ -1,6 +1,6 @@
 {
   "name": "@coagent/desktop",
-  "version": "0.2.0",
+  "version": "0.5.0",
   "private": true,
   "scripts": {
     "dev": "node scripts/copy-pyodide.mjs && node ../../scripts/start-dev.js",
@@ -16,7 +16,7 @@
     "@radix-ui/react-separator": "^1.1.8",
     "@radix-ui/react-slot": "^1.2.4",
     "@react-pdf/renderer": "^4.4.0",
-"@tauri-apps/api": "^2.10.1",
+    "@tauri-apps/api": "^2.10.1",
     "@tauri-apps/plugin-dialog": "^2.4.1",
     "@tauri-apps/plugin-global-shortcut": "^2.3.1",
     "@tauri-apps/plugin-opener": "^2.5.3",
@@ -27,6 +27,7 @@
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
     "lucide-react": "^0.575.0",
+    "mermaid": "^11.14.0",
     "pdfjs-dist": "^5.4.624",
     "pyodide": "^0.29.3",
     "qrcode": "^1.5.4",

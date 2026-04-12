@@ -5,6 +5,9 @@ export function useTheme() {
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark)
+    // Clear inline background set by index.html's early dark-mode script
+    document.documentElement.style.background = ''
+    document.body.style.background = dark ? '#0a0a0a' : '#fff'
     localStorage.setItem('theme', dark ? 'dark' : 'light')
   }, [dark])
 

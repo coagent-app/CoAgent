@@ -997,56 +997,10 @@ function AccountTab({
     <>
       {/* Referrals */}
       <SectionHeader eyebrow="Referrals" title="Earn by referring" />
-      <div className="flex items-center gap-2 mb-3">
-        <span className={cn(
-          'text-[10px] font-semibold px-1.5 py-0.5 rounded-full',
-          TIER_STYLES[displayTier] || TIER_STYLES.Standard
-        )}>
-          {displayTier}
-        </span>
-        <span className="text-[12.5px] text-neutral-500 dark:text-neutral-400">
-          You earn {displayRate}% on every user you refer
-        </span>
+      <div className="mb-4 p-4 rounded-xl border border-neutral-100 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900 text-center">
+        <p className="text-[13px] font-medium text-neutral-500 dark:text-neutral-400">Coming soon</p>
+        <p className="text-[11px] text-neutral-400 dark:text-neutral-500 mt-1">Referral program and payouts are on the roadmap.</p>
       </div>
-      <FieldRow label="Your referral code">
-        <div className="flex items-center gap-2">
-          <div className="flex-1 font-mono text-[12px] px-3 py-2 rounded-lg bg-neutral-100 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 truncate select-all border border-neutral-200 dark:border-neutral-700">
-            {referralUrl}
-          </div>
-          <button
-            type="button"
-            onClick={handleCopyReferral}
-            className="px-3 py-2 rounded-lg text-[12px] font-semibold border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-neutral-700 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-neutral-700 transition-colors flex-shrink-0"
-          >
-            {copied ? 'Copied!' : 'Copy'}
-          </button>
-        </div>
-      </FieldRow>
-
-      <Separator className="my-6 dark:bg-neutral-800" />
-
-      {/* Payouts */}
-      <SectionHeader eyebrow="Payouts" title="Referral payouts" />
-      {stripeConnectId ? (
-        <div className="flex items-center gap-2 mb-4">
-          <span className="text-[12.5px] font-semibold px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
-            Payouts active
-          </span>
-        </div>
-      ) : (
-        <div className="mb-4">
-          <p className="text-[12.5px] text-neutral-500 dark:text-neutral-400 mb-3">
-            Connect your Stripe account to receive referral payouts.
-          </p>
-          <button
-            type="button"
-            onClick={onSetupPayouts}
-            className="px-4 py-2 rounded-lg text-[13px] font-semibold bg-neutral-900 text-white dark:bg-neutral-100 dark:text-neutral-900 hover:opacity-90 transition-opacity"
-          >
-            Set up payouts
-          </button>
-        </div>
-      )}
 
       <Separator className="my-6 dark:bg-neutral-800" />
 
@@ -1063,17 +1017,17 @@ function AccountTab({
       <div className="flex gap-2">
         <button
           type="button"
-          onClick={onBackup}
-          className="px-4 py-2 rounded-lg text-[13px] font-semibold bg-neutral-900 text-white dark:bg-neutral-100 dark:text-neutral-900 hover:opacity-90 transition-opacity"
+          disabled
+          className="px-4 py-2 rounded-lg text-[13px] font-semibold bg-neutral-200 dark:bg-neutral-800 text-neutral-400 dark:text-neutral-500 cursor-not-allowed"
         >
-          Create Backup
+          Create Backup — Coming soon
         </button>
         <button
           type="button"
-          onClick={onRestore}
-          className="px-4 py-2 rounded-lg text-[13px] font-semibold border border-neutral-200 dark:border-neutral-700 text-neutral-700 dark:text-neutral-200 bg-white dark:bg-neutral-800 hover:bg-neutral-50 dark:hover:bg-neutral-700 transition-colors"
+          disabled
+          className="px-4 py-2 rounded-lg text-[13px] font-semibold border border-neutral-200 dark:border-neutral-700 text-neutral-400 dark:text-neutral-500 bg-white dark:bg-neutral-800 cursor-not-allowed"
         >
-          Restore from Backup
+          Restore — Coming soon
         </button>
       </div>
     </>
@@ -1086,7 +1040,6 @@ const BASE_TABS: { id: SettingsTab; label: string }[] = [
   { id: 'general', label: 'General' },
   { id: 'model', label: 'Model' },
   { id: 'brand', label: 'Brand' },
-  { id: 'usage', label: 'Usage' },
   { id: 'account', label: 'Account' },
 ]
 

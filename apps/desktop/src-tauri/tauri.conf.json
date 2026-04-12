@@ -1,6 +1,6 @@
 {
   "productName": "Co-Agent",
-  "version": "0.4.15",
+  "version": "0.5.0",
   "identifier": "com.coagent.desktop",
   "build": {
     "frontendDist": "../dist",
@@ -12,7 +12,7 @@
     "withGlobalTauri": false,
     "macOSPrivateApi": true,
     "security": {
-      "csp": "default-src 'self' tauri: ipc: http://localhost:1420 asset: http://asset.localhost; connect-src 'self' ws://localhost:7830 http://localhost:7830 https://backend.composio.dev https://api.openai.com https://api.voyageai.com https://*.workers.dev; img-src 'self' asset: http://asset.localhost blob: data: https://logos.composio.dev https://t3.gstatic.com; media-src 'self' asset: http://asset.localhost blob: mediastream:; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com",
+      "csp": "default-src 'self' tauri: ipc: http://localhost:1420 asset: http://asset.localhost blob: data:; connect-src 'self' ws://localhost:7830 http://localhost:7830 https://backend.composio.dev https://api.openai.com https://api.voyageai.com https://*.workers.dev https://cdn.jsdelivr.net; img-src 'self' asset: http://asset.localhost blob: data: https://logos.composio.dev https://t3.gstatic.com; media-src 'self' asset: http://asset.localhost blob: mediastream:; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; worker-src 'self' blob: data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com",
       "assetProtocol": {
         "enable": true
       }

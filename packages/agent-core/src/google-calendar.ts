@@ -34,6 +34,7 @@ export class GoogleCalendarService {
   private onUpdate: (() => void) | null = null
   private onStoreEvents: ((entries: CalendarEntry[]) => void) | null = null
   private onSyncResult: ((result: { entries: CalendarEntry[]; changed: boolean; full: boolean; removedIds?: string[] }) => void) | null = null
+  onAuthExpired?: () => void
 
   constructor(
     private clientId: string,
@@ -313,6 +314,13 @@ export class GoogleCalendarService {
       this.onUpdate?.()
       return { entries: added, changed: true, full: false, removedIds: removed }
     } catch (err: any) {
+      // Detect expired/revoked refresh token — stop polling and notify the user
+      if (err.status === 401 || err.code === 401 || err.response?.status === 401) {
+        console.error('[GoogleCal] Auth expired — stopping polling and notifying user')
+        this.stopPolling()
+        this.onAuthExpired?.()
+        return { entries: [], changed: false, full: false }
+      }
       console.error('[GoogleCal] Sync error:', err.message)
       return { entries: [], changed: false, full: false }
     }
