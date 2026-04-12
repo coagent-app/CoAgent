@@ -180,6 +180,22 @@ jobs:
           prerelease: false
           args: --target ${{ matrix.rust-target }}
 
+      # Staple notarization ticket to DMG so Gatekeeper works offline
+      - name: Staple notarization ticket to DMG
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DMG=$(find apps/desktop/src-tauri/target/${{ matrix.rust-target }}/release/bundle/dmg -name "*.dmg" 2>/dev/null | head -1)
+          if [ -n "$DMG" ]; then
+            echo "Stapling $DMG"
+            xcrun stapler staple "$DMG"
+            xcrun stapler validate "$DMG"
+            # Re-upload stapled DMG (replace the unstapled one)
+            ASSET_NAME=$(basename "$DMG")
+            gh release delete-asset "${{ github.ref_name }}" "$ASSET_NAME" --repo "${{ github.repository }}" --yes 2>/dev/null || true
+            gh release upload "${{ github.ref_name }}" "$DMG" --repo "${{ github.repository }}"
+          fi
+
   rename-assets:
     needs: build
     runs-on: ubuntu-latest
