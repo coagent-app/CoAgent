@@ -89,6 +89,27 @@
       -webkit-text-fill-color: transparent;
     }
 
+    /* Vertical word flip */
+    .flip-words {
+      display: inline-block;
+      position: relative;
+      overflow: hidden;
+      vertical-align: bottom;
+    }
+    .flip-words span {
+      display: block;
+      animation: flipWord 15s infinite;
+      /* Each word shows for 3s — 5 words × 3s = 15s total */
+    }
+    @keyframes flipWord {
+      0%, 16%    { transform: translateY(0); }
+      20%, 36%   { transform: translateY(-100%); }
+      40%, 56%   { transform: translateY(-200%); }
+      60%, 76%   { transform: translateY(-300%); }
+      80%, 96%   { transform: translateY(-400%); }
+      100%       { transform: translateY(-400%); }
+    }
+
     /* Grid pattern bg */
     .grid-bg {
       background-image:
@@ -272,11 +293,11 @@
 
         <h1 class="animate-fade-up opacity-0 text-[clamp(2rem,5vw,3.5rem)] font-bold tracking-tight leading-[1.1] mb-6">
           <span class="gradient-text">Your personal AI operator</span><br />
-          <span class="text-brand-400 dark:text-brand-500">for freelancers</span>
+          <span class="text-brand-400 dark:text-brand-500">so you can stop being your own <span class="flip-words" style="height:1.1em;"><span>assistant</span><span>admin</span><span>secretary</span><span>support staff</span><span>ops team</span></span></span>
         </h1>
 
         <p class="animate-fade-up-delay opacity-0 text-[15px] sm:text-[17px] text-brand-500 dark:text-brand-400 max-w-xl mx-auto leading-relaxed mb-10">
-          Co-Agent connects to your email, CRM, calendar, and tools &mdash; then handles the busywork so you can focus on billable hours.
+          Co-Agent connects to your email, CRM, calendar, and tools &mdash; then runs the busywork in the background so you can focus on your actual work.
         </p>
 
         <div class="animate-fade-up-delay-2 opacity-0 flex flex-col sm:flex-row items-center justify-center gap-3">
@@ -302,26 +323,26 @@
           </div>
           <!-- App body mockup -->
           <div class="flex min-h-[360px] sm:min-h-[420px]">
-            <!-- Sidebar mock -->
+            <!-- Sidebar mock — clickable tabs -->
             <div class="w-44 border-r border-brand-200/60 dark:border-brand-800/60 p-3 hidden sm:block">
               <div class="text-[13px] font-semibold text-brand-900 dark:text-brand-100 px-2 mb-4">Co-Agent</div>
-              <div class="space-y-0.5">
-                <div class="flex items-center gap-2 px-2 py-1.5 rounded-md bg-brand-100 dark:bg-brand-800 text-[12px] font-medium text-brand-900 dark:text-brand-100">
-                  <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" /></svg>
-                  Open
-                </div>
-                <div class="flex items-center gap-2 px-2 py-1.5 text-[12px] text-brand-400 dark:text-brand-500">
+              <div class="space-y-0.5" id="demo-sidebar">
+                <button onclick="switchDemoTab('chat')" data-tab="chat" class="demo-tab w-full flex items-center gap-2 px-2 py-1.5 rounded-md bg-brand-100 dark:bg-brand-800 text-[12px] font-medium text-brand-900 dark:text-brand-100 text-left">
+                  <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.087.16 2.185.283 3.293.369V21l4.076-4.076a1.526 1.526 0 011.037-.443 48.2 48.2 0 005.022-.356c1.588-.232 2.71-1.626 2.71-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" /></svg>
+                  Chat
+                </button>
+                <button onclick="switchDemoTab('skills')" data-tab="skills" class="demo-tab w-full flex items-center gap-2 px-2 py-1.5 text-[12px] text-brand-400 dark:text-brand-500 rounded-md text-left hover:bg-brand-50 dark:hover:bg-brand-800/50 transition-colors">
                   <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
                   Skills
-                </div>
-                <div class="flex items-center gap-2 px-2 py-1.5 text-[12px] text-brand-400 dark:text-brand-500">
+                </button>
+                <button onclick="switchDemoTab('schedule')" data-tab="schedule" class="demo-tab w-full flex items-center gap-2 px-2 py-1.5 text-[12px] text-brand-400 dark:text-brand-500 rounded-md text-left hover:bg-brand-50 dark:hover:bg-brand-800/50 transition-colors">
                   <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
                   Schedule
-                </div>
-                <div class="flex items-center gap-2 px-2 py-1.5 text-[12px] text-brand-400 dark:text-brand-500">
+                </button>
+                <button onclick="switchDemoTab('queue')" data-tab="queue" class="demo-tab w-full flex items-center gap-2 px-2 py-1.5 text-[12px] text-brand-400 dark:text-brand-500 rounded-md text-left hover:bg-brand-50 dark:hover:bg-brand-800/50 transition-colors">
                   <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-2.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" /></svg>
                   Queue
-                </div>
+                </button>
               </div>
               <div class="mt-6 pt-4 border-t border-brand-200/40 dark:border-brand-800/40">
                 <div class="text-[9px] font-semibold text-brand-300 dark:text-brand-600 uppercase tracking-widest px-2 mb-2">Integrations</div>
@@ -341,59 +362,142 @@
                 </div>
               </div>
             </div>
-            <!-- Chat mock — animated sequence -->
-            <div id="demo-chat" class="flex-1 flex flex-col p-4 sm:p-6">
-              <div class="flex-1 space-y-4">
-                <!-- User message — types in -->
-                <div id="demo-user" class="flex justify-end opacity-0 translate-y-2 transition-all duration-500">
-                  <div class="bg-brand-900 dark:bg-brand-700 rounded-2xl rounded-tr-sm px-3.5 py-2.5 text-[13px] max-w-[280px] text-white">
-                    <span id="demo-user-text"></span><span id="demo-cursor" class="inline-block w-[2px] h-[14px] bg-white/70 ml-0.5 align-middle animate-pulse"></span>
-                  </div>
-                </div>
-                <!-- Typing indicator -->
-                <div id="demo-typing" class="flex gap-3 items-start opacity-0 transition-all duration-300">
-                  <div class="w-6 h-6 rounded-full bg-brand-900 dark:bg-brand-100 flex-shrink-0 flex items-center justify-center">
-                    <img src="icon-transparent.png" alt="" class="w-4 h-4 brightness-100" />
-                  </div>
-                  <div class="bg-brand-100 dark:bg-brand-800 rounded-2xl rounded-tl-sm px-3.5 py-2.5">
-                    <div class="flex gap-1">
-                      <div class="w-1.5 h-1.5 rounded-full bg-brand-400 dark:bg-brand-500 animate-bounce" style="animation-delay:0ms"></div>
-                      <div class="w-1.5 h-1.5 rounded-full bg-brand-400 dark:bg-brand-500 animate-bounce" style="animation-delay:150ms"></div>
-                      <div class="w-1.5 h-1.5 rounded-full bg-brand-400 dark:bg-brand-500 animate-bounce" style="animation-delay:300ms"></div>
+
+            <!-- Content panels -->
+            <div class="flex-1 flex flex-col relative">
+
+              <!-- CHAT panel (animated mock) -->
+              <div id="demo-panel-chat" class="demo-panel flex-1 flex flex-col p-4 sm:p-6">
+                <div id="demo-chat" class="flex-1 space-y-4">
+                  <!-- User message — types in -->
+                  <div id="demo-user" class="flex justify-end opacity-0 translate-y-2 transition-all duration-500">
+                    <div class="bg-brand-900 dark:bg-brand-700 rounded-2xl rounded-tr-sm px-3.5 py-2.5 text-[13px] max-w-[280px] text-white">
+                      <span id="demo-user-text"></span><span id="demo-cursor" class="inline-block w-[2px] h-[14px] bg-white/70 ml-0.5 align-middle animate-pulse"></span>
                     </div>
                   </div>
-                </div>
-                <!-- Agent response -->
-                <div id="demo-agent" class="flex gap-3 items-start opacity-0 translate-y-2 transition-all duration-500" style="display:none">
-                  <div class="w-6 h-6 rounded-full bg-brand-900 dark:bg-brand-100 flex-shrink-0 flex items-center justify-center">
-                    <img src="icon-transparent.png" alt="" class="w-4 h-4 brightness-100" />
-                  </div>
-                  <div class="space-y-2 max-w-[280px]">
-                    <div class="bg-brand-100 dark:bg-brand-800 rounded-2xl rounded-tl-sm px-3.5 py-2.5 text-[13px] text-brand-700 dark:text-brand-300">
-                      <span id="demo-agent-text"></span>
-                    </div>
-                    <div class="flex flex-wrap items-center gap-1.5 px-1">
-                      <div id="demo-badge1" class="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-brand-50 dark:bg-brand-900 border border-brand-200 dark:border-brand-800 text-[10px] text-brand-500 dark:text-brand-400 opacity-0 translate-y-1 transition-all duration-300">
-                        <svg class="w-2.5 h-2.5 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" /></svg>
-                        HubSpot: 4 contacts
-                      </div>
-                      <div id="demo-badge2" class="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-brand-50 dark:bg-brand-900 border border-brand-200 dark:border-brand-800 text-[10px] text-brand-500 dark:text-brand-400 opacity-0 translate-y-1 transition-all duration-300">
-                        <svg class="w-2.5 h-2.5 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" /></svg>
-                        Gmail: 4 drafts
+                  <!-- Typing indicator -->
+                  <div id="demo-typing" class="flex items-start opacity-0 transition-all duration-300">
+                    <div class="bg-brand-100 dark:bg-brand-800 rounded-2xl rounded-tl-sm px-3.5 py-2.5">
+                      <div class="flex gap-1">
+                        <div class="w-1.5 h-1.5 rounded-full bg-brand-400 dark:bg-brand-500 animate-bounce" style="animation-delay:0ms"></div>
+                        <div class="w-1.5 h-1.5 rounded-full bg-brand-400 dark:bg-brand-500 animate-bounce" style="animation-delay:150ms"></div>
+                        <div class="w-1.5 h-1.5 rounded-full bg-brand-400 dark:bg-brand-500 animate-bounce" style="animation-delay:300ms"></div>
                       </div>
                     </div>
                   </div>
+                  <!-- Agent response -->
+                  <div id="demo-agent" class="flex items-start opacity-0 translate-y-2 transition-all duration-500" style="display:none">
+                    <div class="space-y-2 max-w-[280px]">
+                      <div class="bg-brand-100 dark:bg-brand-800 rounded-2xl rounded-tl-sm px-3.5 py-2.5 text-[13px] text-brand-700 dark:text-brand-300">
+                        <span id="demo-agent-text"></span>
+                      </div>
+                      <div class="flex flex-wrap items-center gap-1.5 px-1">
+                        <div id="demo-badge1" class="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-brand-50 dark:bg-brand-900 border border-brand-200 dark:border-brand-800 text-[10px] text-brand-500 dark:text-brand-400 opacity-0 translate-y-1 transition-all duration-300">
+                          <svg class="w-2.5 h-2.5 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" /></svg>
+                          HubSpot: 4 contacts
+                        </div>
+                        <div id="demo-badge2" class="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-brand-50 dark:bg-brand-900 border border-brand-200 dark:border-brand-800 text-[10px] text-brand-500 dark:text-brand-400 opacity-0 translate-y-1 transition-all duration-300">
+                          <svg class="w-2.5 h-2.5 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" /></svg>
+                          Gmail: 4 drafts
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <!-- Input mock -->
+                <div class="mt-4 flex items-center gap-2 px-3 py-2.5 rounded-xl border border-brand-200 dark:border-brand-800 bg-brand-50/50 dark:bg-brand-900/50">
+                  <svg class="w-4 h-4 text-brand-300 dark:text-brand-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 01-6.364-6.364l10.94-10.94A3 3 0 1119.5 7.372L8.552 18.32m.009-.01l-.01.01m5.699-9.941l-7.81 7.81a1.5 1.5 0 002.112 2.13" /></svg>
+                  <span class="text-[13px] text-brand-300 dark:text-brand-600 flex-1">Ask Co-Agent anything&hellip;</span>
+                  <svg class="w-4 h-4 text-brand-300 dark:text-brand-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" /></svg>
+                  <div class="w-7 h-7 rounded-lg bg-brand-900 dark:bg-brand-100 flex items-center justify-center flex-shrink-0">
+                    <svg class="w-3.5 h-3.5 text-white dark:text-brand-900" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 19V5m0 0l-7 7m7-7l7 7" /></svg>
+                  </div>
                 </div>
               </div>
-              <!-- Input mock -->
-              <div class="mt-4 flex items-center gap-2 px-3 py-2.5 rounded-xl border border-brand-200 dark:border-brand-800 bg-brand-50/50 dark:bg-brand-900/50">
-                <svg class="w-4 h-4 text-brand-300 dark:text-brand-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 01-6.364-6.364l10.94-10.94A3 3 0 1119.5 7.372L8.552 18.32m.009-.01l-.01.01m5.699-9.941l-7.81 7.81a1.5 1.5 0 002.112 2.13" /></svg>
-                <span class="text-[13px] text-brand-300 dark:text-brand-600 flex-1">Ask Co-Agent anything&hellip;</span>
-                <svg class="w-4 h-4 text-brand-300 dark:text-brand-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" /></svg>
-                <div class="w-7 h-7 rounded-lg bg-brand-900 dark:bg-brand-100 flex items-center justify-center flex-shrink-0">
-                  <svg class="w-3.5 h-3.5 text-white dark:text-brand-900" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 19V5m0 0l-7 7m7-7l7 7" /></svg>
+
+              <!-- SKILLS panel (mock) -->
+              <div id="demo-panel-skills" class="demo-panel hidden flex-1 p-4 sm:p-6">
+                <div class="text-[11px] font-semibold text-brand-400 dark:text-brand-500 uppercase tracking-widest mb-4">Skills</div>
+                <div class="space-y-2">
+                  <div class="flex items-center gap-3 p-3 rounded-xl border border-brand-200 dark:border-brand-800 bg-brand-50/50 dark:bg-brand-900/50">
+                    <div class="w-8 h-8 rounded-lg bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center text-blue-600 dark:text-blue-400 text-[14px]">@</div>
+                    <div class="flex-1 min-w-0"><div class="text-[13px] font-medium text-brand-900 dark:text-brand-100">daily-briefing</div><div class="text-[11px] text-brand-400 dark:text-brand-500 truncate">Pull calendar, emails, and tasks. Present what needs action.</div></div>
+                  </div>
+                  <div class="flex items-center gap-3 p-3 rounded-xl border border-brand-200 dark:border-brand-800 bg-brand-50/50 dark:bg-brand-900/50">
+                    <div class="w-8 h-8 rounded-lg bg-emerald-100 dark:bg-emerald-900/30 flex items-center justify-center text-emerald-600 dark:text-emerald-400 text-[14px]">@</div>
+                    <div class="flex-1 min-w-0"><div class="text-[13px] font-medium text-brand-900 dark:text-brand-100">follow-up</div><div class="text-[11px] text-brand-400 dark:text-brand-500 truncate">Find recent context, draft a follow-up email. Queue for review.</div></div>
+                  </div>
+                  <div class="flex items-center gap-3 p-3 rounded-xl border border-brand-200 dark:border-brand-800 bg-brand-50/50 dark:bg-brand-900/50">
+                    <div class="w-8 h-8 rounded-lg bg-purple-100 dark:bg-purple-900/30 flex items-center justify-center text-purple-600 dark:text-purple-400 text-[14px]">@</div>
+                    <div class="flex-1 min-w-0"><div class="text-[13px] font-medium text-brand-900 dark:text-brand-100">client-recap</div><div class="text-[11px] text-brand-400 dark:text-brand-500 truncate">Search all tools for a client over the last 7 days. Timeline + open items.</div></div>
+                  </div>
+                  <div class="flex items-center gap-3 p-3 rounded-xl border border-brand-200 dark:border-brand-800 bg-brand-50/50 dark:bg-brand-900/50">
+                    <div class="w-8 h-8 rounded-lg bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center text-amber-600 dark:text-amber-400 text-[14px]">@</div>
+                    <div class="flex-1 min-w-0"><div class="text-[13px] font-medium text-brand-900 dark:text-brand-100">weekly-recap</div><div class="text-[11px] text-brand-400 dark:text-brand-500 truncate">Summarize the week across calendar, email, Slack, and tasks.</div></div>
+                  </div>
                 </div>
               </div>
+
+              <!-- SCHEDULE panel (mock) -->
+              <div id="demo-panel-schedule" class="demo-panel hidden flex-1 p-4 sm:p-6">
+                <div class="text-[11px] font-semibold text-brand-400 dark:text-brand-500 uppercase tracking-widest mb-4">Today &mdash; April 12</div>
+                <div class="space-y-2">
+                  <div class="flex gap-3 p-3 rounded-xl border border-brand-200 dark:border-brand-800 bg-brand-50/50 dark:bg-brand-900/50">
+                    <div class="text-[12px] font-medium text-brand-400 dark:text-brand-500 w-14 flex-shrink-0 pt-0.5">9:00 AM</div>
+                    <div><div class="text-[13px] font-medium text-brand-900 dark:text-brand-100">Weekly team sync</div><div class="text-[11px] text-brand-400 dark:text-brand-500">Google Meet &middot; 30 min</div></div>
+                  </div>
+                  <div class="flex gap-3 p-3 rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-900/20">
+                    <div class="text-[12px] font-medium text-blue-500 w-14 flex-shrink-0 pt-0.5">11:00 AM</div>
+                    <div><div class="text-[13px] font-medium text-brand-900 dark:text-brand-100">Client call &mdash; Sarah M.</div><div class="text-[11px] text-brand-400 dark:text-brand-500">Zoom &middot; 1 hr &middot; <span class="text-emerald-500">Brief ready</span></div></div>
+                  </div>
+                  <div class="flex gap-3 p-3 rounded-xl border border-brand-200 dark:border-brand-800 bg-brand-50/50 dark:bg-brand-900/50">
+                    <div class="text-[12px] font-medium text-brand-400 dark:text-brand-500 w-14 flex-shrink-0 pt-0.5">2:00 PM</div>
+                    <div><div class="text-[13px] font-medium text-brand-900 dark:text-brand-100">Deep work block</div><div class="text-[11px] text-brand-400 dark:text-brand-500">Focus time &middot; 2 hrs &middot; auto-blocked</div></div>
+                  </div>
+                  <div class="flex gap-3 p-3 rounded-xl border border-brand-200 dark:border-brand-800 bg-brand-50/50 dark:bg-brand-900/50">
+                    <div class="text-[12px] font-medium text-brand-400 dark:text-brand-500 w-14 flex-shrink-0 pt-0.5">5:00 PM</div>
+                    <div><div class="text-[13px] font-medium text-brand-900 dark:text-brand-100">Proposal review &mdash; Jake R.</div><div class="text-[11px] text-brand-400 dark:text-brand-500">Phone &middot; 30 min</div></div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- QUEUE panel (mock) -->
+              <div id="demo-panel-queue" class="demo-panel hidden flex-1 p-4 sm:p-6">
+                <div class="text-[11px] font-semibold text-brand-400 dark:text-brand-500 uppercase tracking-widest mb-4">Pending your review</div>
+                <div class="space-y-2">
+                  <div class="p-3 rounded-xl border border-brand-200 dark:border-brand-800 bg-brand-50/50 dark:bg-brand-900/50">
+                    <div class="flex items-center justify-between mb-1.5">
+                      <div class="text-[13px] font-medium text-brand-900 dark:text-brand-100">Follow-up email to Jake R.</div>
+                      <div class="flex gap-1.5">
+                        <div class="w-6 h-6 rounded-md bg-emerald-100 dark:bg-emerald-900/30 flex items-center justify-center text-emerald-600 text-[10px]">&#10003;</div>
+                        <div class="w-6 h-6 rounded-md bg-red-100 dark:bg-red-900/30 flex items-center justify-center text-red-500 text-[10px]">&#10005;</div>
+                      </div>
+                    </div>
+                    <div class="text-[11px] text-brand-400 dark:text-brand-500">Draft reply re: proposal timeline. Sent via Gmail.</div>
+                  </div>
+                  <div class="p-3 rounded-xl border border-brand-200 dark:border-brand-800 bg-brand-50/50 dark:bg-brand-900/50">
+                    <div class="flex items-center justify-between mb-1.5">
+                      <div class="text-[13px] font-medium text-brand-900 dark:text-brand-100">Weekly seller update &mdash; 4 clients</div>
+                      <div class="flex gap-1.5">
+                        <div class="w-6 h-6 rounded-md bg-emerald-100 dark:bg-emerald-900/30 flex items-center justify-center text-emerald-600 text-[10px]">&#10003;</div>
+                        <div class="w-6 h-6 rounded-md bg-red-100 dark:bg-red-900/30 flex items-center justify-center text-red-500 text-[10px]">&#10005;</div>
+                      </div>
+                    </div>
+                    <div class="text-[11px] text-brand-400 dark:text-brand-500">Market report PDFs generated. Ready to send via Gmail.</div>
+                  </div>
+                  <div class="p-3 rounded-xl border border-brand-200 dark:border-brand-800 bg-brand-50/50 dark:bg-brand-900/50">
+                    <div class="flex items-center justify-between mb-1.5">
+                      <div class="text-[13px] font-medium text-brand-900 dark:text-brand-100">HubSpot: move 2 deals to &ldquo;Negotiation&rdquo;</div>
+                      <div class="flex gap-1.5">
+                        <div class="w-6 h-6 rounded-md bg-emerald-100 dark:bg-emerald-900/30 flex items-center justify-center text-emerald-600 text-[10px]">&#10003;</div>
+                        <div class="w-6 h-6 rounded-md bg-red-100 dark:bg-red-900/30 flex items-center justify-center text-red-500 text-[10px]">&#10005;</div>
+                      </div>
+                    </div>
+                    <div class="text-[11px] text-brand-400 dark:text-brand-500">Based on email activity — both contacts replied positively.</div>
+                  </div>
+                </div>
+              </div>
+
             </div>
           </div>
         </div>
@@ -405,18 +509,18 @@
       <div class="max-w-4xl mx-auto px-6">
         <div id="stats-bar" class="flex flex-col sm:flex-row items-center justify-center gap-8 sm:gap-16 text-[13px] text-brand-400 dark:text-brand-500">
           <div class="flex items-center gap-3">
+            <span class="text-[24px] font-bold text-brand-900 dark:text-brand-100"><span class="stat-number" data-target="70" data-suffix="%">0</span></span>
+            <span>of your time is<br/>admin, not craft</span>
+          </div>
+          <div class="hidden sm:block w-px h-8 bg-brand-200 dark:bg-brand-800"></div>
+          <div class="flex items-center gap-3">
             <span class="text-[24px] font-bold text-brand-900 dark:text-brand-100"><span class="stat-number" data-target="30" data-suffix="+">0</span></span>
-            <span>integrations<br/>supported</span>
+            <span>tools connected<br/>in one place</span>
           </div>
           <div class="hidden sm:block w-px h-8 bg-brand-200 dark:bg-brand-800"></div>
           <div class="flex items-center gap-3">
-            <span class="text-[24px] font-bold text-brand-900 dark:text-brand-100"><span class="stat-number" data-target="24" data-suffix="/7">0</span></span>
-            <span>autonomous<br/>operation</span>
-          </div>
-          <div class="hidden sm:block w-px h-8 bg-brand-200 dark:bg-brand-800"></div>
-          <div class="flex items-center gap-3">
-            <span class="text-[24px] font-bold text-brand-900 dark:text-brand-100"><span class="stat-number" data-target="10" data-suffix="x">0</span></span>
-            <span>faster than<br/>manual workflows</span>
+            <span class="text-[24px] font-bold text-brand-900 dark:text-brand-100"><span class="stat-number" data-target="0" data-suffix="">0</span></span>
+            <span>balls dropped<br/>on follow-ups</span>
           </div>
         </div>
       </div>
@@ -439,8 +543,8 @@
                 <path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
               </svg>
             </div>
-            <h3 class="text-[15px] font-semibold mb-2">Email Triage & Drafts</h3>
-            <p class="text-[13px] text-brand-500 dark:text-brand-400 leading-relaxed">Reads your inbox, flags what matters, and drafts replies in your tone. Handles follow-ups automatically.</p>
+            <h3 class="text-[15px] font-semibold mb-2">Email & Follow-ups</h3>
+            <p class="text-[13px] text-brand-500 dark:text-brand-400 leading-relaxed">Flags what matters, drafts replies in your voice, and follows up on time &mdash; even when you forget.</p>
           </div>
 
           <!-- Feature 2 -->
@@ -450,8 +554,8 @@
                 <path stroke-linecap="round" stroke-linejoin="round" d="M18 18.72a9.094 9.094 0 003.741-.479 3 3 0 00-4.682-2.72m.94 3.198l.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0112 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 016 18.719m12 0a5.971 5.971 0 00-.941-3.197m0 0A5.995 5.995 0 0012 12.75a5.995 5.995 0 00-5.058 2.772m0 0a3 3 0 00-4.681 2.72 8.986 8.986 0 003.74.477m.94-3.197a5.971 5.971 0 00-.94 3.197M15 6.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z" />
               </svg>
             </div>
-            <h3 class="text-[15px] font-semibold mb-2">CRM Automation</h3>
-            <p class="text-[13px] text-brand-500 dark:text-brand-400 leading-relaxed">Updates your CRM contacts, logs interactions, and moves deals through your pipeline automatically. Works with HubSpot, Salesforce, and more.</p>
+            <h3 class="text-[15px] font-semibold mb-2">CRM & Pipeline</h3>
+            <p class="text-[13px] text-brand-500 dark:text-brand-400 leading-relaxed">Updates contacts, logs interactions, and moves deals through your pipeline. Works with HubSpot, Salesforce, and more.</p>
           </div>
 
           <!-- Feature 3 -->
@@ -461,8 +565,8 @@
                 <path stroke-linecap="round" stroke-linejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 012.25-2.25h13.5A2.25 2.25 0 0121 7.5v11.25m-18 0A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75m-18 0v-7.5A2.25 2.25 0 015.25 9h13.5A2.25 2.25 0 0121 11.25v7.5" />
               </svg>
             </div>
-            <h3 class="text-[15px] font-semibold mb-2">Smart Scheduling</h3>
-            <p class="text-[13px] text-brand-500 dark:text-brand-400 leading-relaxed">Manages your calendar, proposes meeting times, and blocks focus hours. Works across Google Calendar and iCal.</p>
+            <h3 class="text-[15px] font-semibold mb-2">Calendar & Scheduling</h3>
+            <p class="text-[13px] text-brand-500 dark:text-brand-400 leading-relaxed">Manages your calendar, preps you before meetings, and recaps after. Blocks focus time automatically.</p>
           </div>
 
           <!-- Feature 4 -->
@@ -472,7 +576,7 @@
                 <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 0v3.75m-16.5-3.75v3.75m16.5 0v3.75C20.25 16.153 16.556 18 12 18s-8.25-1.847-8.25-4.125v-3.75m16.5 0c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125" />
               </svg>
             </div>
-            <h3 class="text-[15px] font-semibold mb-2">Intelligent Persistent Memory</h3>
+            <h3 class="text-[15px] font-semibold mb-2">Long-term Memory</h3>
             <p class="text-[13px] text-brand-500 dark:text-brand-400 leading-relaxed">Remembers your clients, preferences, and context across every conversation. Gets smarter the more you use it.</p>
           </div>
 
@@ -483,7 +587,7 @@
                 <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
               </svg>
             </div>
-            <h3 class="text-[15px] font-semibold mb-2">Document Generation</h3>
+            <h3 class="text-[15px] font-semibold mb-2">Documents & Reports</h3>
             <p class="text-[13px] text-brand-500 dark:text-brand-400 leading-relaxed">Creates proposals, reports, and client deliverables from conversation. Export to PDF with your branding.</p>
           </div>
 
@@ -533,7 +637,6 @@
           <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M10.006 5.415a4.195 4.195 0 013.045-1.306c1.56 0 2.954.9 3.69 2.205.63-.3 1.35-.45 2.1-.45 2.85 0 5.159 2.34 5.159 5.22s-2.31 5.22-5.176 5.22c-.345 0-.69-.044-1.02-.104a3.75 3.75 0 01-3.3 1.95c-.6 0-1.155-.15-1.65-.375A4.314 4.314 0 018.88 20.4a4.302 4.302 0 01-4.05-2.82c-.27.062-.54.076-.825.076-2.204 0-4.005-1.8-4.005-4.05 0-1.5.811-2.805 2.01-3.51-.255-.57-.39-1.2-.39-1.846 0-2.58 2.1-4.65 4.65-4.65 1.53 0 2.85.705 3.72 1.8" fill="#00A1E0"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Salesforce</span></div>
           <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M19.655 14.262c.281 0 .557.023.828.064 0 .005-.005.01-.005.014-.105.267-.234.534-.381.786l-1.219 2.106c-1.112 1.936-3.177 3.127-5.411 3.127h-2.432c-2.23 0-4.294-1.191-5.412-3.127l-1.218-2.106a6.251 6.251 0 0 1 0-6.252l1.218-2.106C6.736 4.832 8.8 3.641 11.035 3.641h2.432c2.23 0 4.294 1.191 5.411 3.127l1.219 2.106c.147.252.271.519.381.786 0 .004.005.009.005.014-.267.041-.543.064-.828.064-1.816 0-2.501-.607-3.291-1.306-.764-.676-1.711-1.517-3.44-1.517h-1.029c-1.251 0-2.387.455-3.2 1.278-.796.805-1.233 1.904-1.233 3.099v1.411c0 1.196.437 2.295 1.233 3.099.813.823 1.949 1.278 3.2 1.278h1.034c1.729 0 2.676-.841 3.439-1.517.791-.703 1.471-1.306 3.287-1.301Zm.005-3.237c.399 0 .794-.036 1.179-.11-.002-.004-.002-.01-.002-.014-.073-.414-.193-.823-.349-1.218.731-.12 1.407-.396 1.986-.819 0-.004-.005-.013-.005-.018-.331-1.085-.832-2.101-1.489-3.03-.649-.915-1.435-1.719-2.331-2.395-1.867-1.398-4.088-2.138-6.428-2.138-1.448 0-2.855.28-4.175.841-1.273.543-2.423 1.315-3.407 2.299S2.878 6.552 2.341 7.83c-.557 1.324-.842 2.726-.842 4.175 0 1.448.281 2.855.842 4.174.542 1.274 1.314 2.423 2.298 3.407s2.129 1.761 3.407 2.299c1.324.556 2.727.841 4.175.841 2.34 0 4.561-.74 6.428-2.137a10.815 10.815 0 0 0 2.331-2.396c.652-.929 1.158-1.949 1.489-3.03 0-.004.005-.014.005-.018-.579-.423-1.255-.699-1.986-.819.161-.395.276-.804.349-1.218.005-.009.005-.014.005-.023.869.166 1.692.506 2.404 1.035.685.505.552 1.075.446 1.416C22.184 20.437 17.619 24 12.221 24c-6.625 0-12-5.375-12-12s5.37-12 12-12c5.398 0 9.963 3.563 11.471 8.464.106.341.239.915-.446 1.421-.717.529-1.535.873-2.404 1.034.128.716.128 1.45 0 2.166-.387-.074-.782-.11-1.182-.11-4.184 0-3.968 2.823-6.736 2.823h-1.029c-1.899 0-3.15-1.357-3.15-3.095v-1.411c0-1.738 1.251-3.094 3.15-3.094h1.034c2.768 0 2.552 2.823 6.731 2.827Z" fill="#006BFF"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Calendly</span></div>
           <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5 text-brand-800 dark:text-brand-200" viewBox="0 0 24 24"><path d="M4.459 4.208c.746.606 1.026.56 2.428.466l13.215-.793c.28 0 .047-.28-.046-.326L17.86 1.968c-.42-.326-.981-.7-2.055-.607L3.01 2.295c-.466.046-.56.28-.374.466zm.793 3.08v13.904c0 .747.373 1.027 1.214.98l14.523-.84c.841-.046.935-.56.935-1.167V6.354c0-.606-.233-.933-.748-.887l-15.177.887c-.56.047-.747.327-.747.933zm14.337.745c.093.42 0 .84-.42.888l-.7.14v10.264c-.608.327-1.168.514-1.635.514-.748 0-.935-.234-1.495-.933l-4.577-7.186v6.952L12.21 19s0 .84-1.168.84l-3.222.186c-.093-.186 0-.653.327-.746l.84-.233V9.854L7.822 9.76c-.094-.42.14-1.026.793-1.073l3.456-.233 4.764 7.279v-6.44l-1.215-.139c-.093-.514.28-.887.747-.933zM1.936 1.035l13.31-.98c1.634-.14 2.055-.047 3.082.7l4.249 2.986c.7.513.934.653.934 1.213v16.378c0 1.026-.373 1.634-1.68 1.726l-15.458.934c-.98.047-1.448-.093-1.962-.747l-3.129-4.06c-.56-.747-.793-1.306-.793-1.96V2.667c0-.839.374-1.54 1.447-1.632z" fill="currentColor"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Notion</span></div>
-          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M12 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0zm.642 4.1335c.9554 0 1.7296.776 1.7296 1.7332v9.0667h1.6c1.614 0 2.9275-1.3156 2.9275-2.933 0-1.6173-1.3136-2.9333-2.9276-2.9333h-.6654V7.3334h.6654c2.5722 0 4.6577 2.0897 4.6577 4.667 0 2.5774-2.0855 4.6666-4.6577 4.6666H12.642zM7.9837 7.333h3.3291v12.533c-.9555 0-1.73-.7759-1.73-1.7332V9.0662H7.9837c-1.6146 0-2.9277 1.316-2.9277 2.9334 0 1.6175 1.3131 2.9333 2.9277 2.9333h.6654v1.7332h-.6654c-2.5725 0-4.6577-2.0892-4.6577-4.6665 0-2.5771 2.0852-4.6666 4.6577-4.6666Z" fill="#2CA01C"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">QuickBooks</span></div>
           <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M14.728 0v6h6l-6-6zm1.363 10.636h-3.41v1.91h3.41v-1.91zm0 3.273h-3.41v1.91h3.41v-1.91zM20.727 6.5v15.864c0 .904-.732 1.636-1.636 1.636H4.909a1.636 1.636 0 0 1-1.636-1.636V1.636C3.273.732 4.005 0 4.909 0h9.318v6.5h6.5zm-3.273 2.773H6.545v7.909h10.91v-7.91zm-6.136 4.636H7.91v1.91h3.41v-1.91zm0-3.273H7.91v1.91h3.41v-1.91z" fill="#34A853"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Google Sheets</span></div>
           <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M21.147 0H2.853A2.86 2.86 0 000 2.853v18.294A2.86 2.86 0 002.853 24h18.294A2.86 2.86 0 0024 21.147V2.853A2.86 2.86 0 0021.147 0zM10.34 17.287a.953.953 0 01-.953.953h-4a.954.954 0 01-.954-.953V5.38a.953.953 0 01.954-.953h4a.954.954 0 01.953.953zm9.233-5.467a.944.944 0 01-.953.947h-4a.947.947 0 01-.953-.947V5.38a.953.953 0 01.953-.953h4a.954.954 0 01.953.953z" fill="#0052CC"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Trello</span></div>
           <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M18.78 12.653c-2.882 0-5.22 2.336-5.22 5.22s2.338 5.22 5.22 5.22 5.22-2.34 5.22-5.22-2.336-5.22-5.22-5.22zm-13.56 0c-2.88 0-5.22 2.337-5.22 5.22s2.338 5.22 5.22 5.22 5.22-2.338 5.22-5.22-2.336-5.22-5.22-5.22zm12-6.525c0 2.883-2.337 5.22-5.22 5.22-2.882 0-5.22-2.337-5.22-5.22 0-2.88 2.338-5.22 5.22-5.22 2.883 0 5.22 2.34 5.22 5.22z" fill="#F06A6A"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Asana</span></div>
@@ -556,7 +659,6 @@
           <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M10.006 5.415a4.195 4.195 0 013.045-1.306c1.56 0 2.954.9 3.69 2.205.63-.3 1.35-.45 2.1-.45 2.85 0 5.159 2.34 5.159 5.22s-2.31 5.22-5.176 5.22c-.345 0-.69-.044-1.02-.104a3.75 3.75 0 01-3.3 1.95c-.6 0-1.155-.15-1.65-.375A4.314 4.314 0 018.88 20.4a4.302 4.302 0 01-4.05-2.82c-.27.062-.54.076-.825.076-2.204 0-4.005-1.8-4.005-4.05 0-1.5.811-2.805 2.01-3.51-.255-.57-.39-1.2-.39-1.846 0-2.58 2.1-4.65 4.65-4.65 1.53 0 2.85.705 3.72 1.8" fill="#00A1E0"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Salesforce</span></div>
           <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M19.655 14.262c.281 0 .557.023.828.064 0 .005-.005.01-.005.014-.105.267-.234.534-.381.786l-1.219 2.106c-1.112 1.936-3.177 3.127-5.411 3.127h-2.432c-2.23 0-4.294-1.191-5.412-3.127l-1.218-2.106a6.251 6.251 0 0 1 0-6.252l1.218-2.106C6.736 4.832 8.8 3.641 11.035 3.641h2.432c2.23 0 4.294 1.191 5.411 3.127l1.219 2.106c.147.252.271.519.381.786 0 .004.005.009.005.014-.267.041-.543.064-.828.064-1.816 0-2.501-.607-3.291-1.306-.764-.676-1.711-1.517-3.44-1.517h-1.029c-1.251 0-2.387.455-3.2 1.278-.796.805-1.233 1.904-1.233 3.099v1.411c0 1.196.437 2.295 1.233 3.099.813.823 1.949 1.278 3.2 1.278h1.034c1.729 0 2.676-.841 3.439-1.517.791-.703 1.471-1.306 3.287-1.301Zm.005-3.237c.399 0 .794-.036 1.179-.11-.002-.004-.002-.01-.002-.014-.073-.414-.193-.823-.349-1.218.731-.12 1.407-.396 1.986-.819 0-.004-.005-.013-.005-.018-.331-1.085-.832-2.101-1.489-3.03-.649-.915-1.435-1.719-2.331-2.395-1.867-1.398-4.088-2.138-6.428-2.138-1.448 0-2.855.28-4.175.841-1.273.543-2.423 1.315-3.407 2.299S2.878 6.552 2.341 7.83c-.557 1.324-.842 2.726-.842 4.175 0 1.448.281 2.855.842 4.174.542 1.274 1.314 2.423 2.298 3.407s2.129 1.761 3.407 2.299c1.324.556 2.727.841 4.175.841 2.34 0 4.561-.74 6.428-2.137a10.815 10.815 0 0 0 2.331-2.396c.652-.929 1.158-1.949 1.489-3.03 0-.004.005-.014.005-.018-.579-.423-1.255-.699-1.986-.819.161-.395.276-.804.349-1.218.005-.009.005-.014.005-.023.869.166 1.692.506 2.404 1.035.685.505.552 1.075.446 1.416C22.184 20.437 17.619 24 12.221 24c-6.625 0-12-5.375-12-12s5.37-12 12-12c5.398 0 9.963 3.563 11.471 8.464.106.341.239.915-.446 1.421-.717.529-1.535.873-2.404 1.034.128.716.128 1.45 0 2.166-.387-.074-.782-.11-1.182-.11-4.184 0-3.968 2.823-6.736 2.823h-1.029c-1.899 0-3.15-1.357-3.15-3.095v-1.411c0-1.738 1.251-3.094 3.15-3.094h1.034c2.768 0 2.552 2.823 6.731 2.827Z" fill="#006BFF"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Calendly</span></div>
           <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5 text-brand-800 dark:text-brand-200" viewBox="0 0 24 24"><path d="M4.459 4.208c.746.606 1.026.56 2.428.466l13.215-.793c.28 0 .047-.28-.046-.326L17.86 1.968c-.42-.326-.981-.7-2.055-.607L3.01 2.295c-.466.046-.56.28-.374.466zm.793 3.08v13.904c0 .747.373 1.027 1.214.98l14.523-.84c.841-.046.935-.56.935-1.167V6.354c0-.606-.233-.933-.748-.887l-15.177.887c-.56.047-.747.327-.747.933zm14.337.745c.093.42 0 .84-.42.888l-.7.14v10.264c-.608.327-1.168.514-1.635.514-.748 0-.935-.234-1.495-.933l-4.577-7.186v6.952L12.21 19s0 .84-1.168.84l-3.222.186c-.093-.186 0-.653.327-.746l.84-.233V9.854L7.822 9.76c-.094-.42.14-1.026.793-1.073l3.456-.233 4.764 7.279v-6.44l-1.215-.139c-.093-.514.28-.887.747-.933zM1.936 1.035l13.31-.98c1.634-.14 2.055-.047 3.082.7l4.249 2.986c.7.513.934.653.934 1.213v16.378c0 1.026-.373 1.634-1.68 1.726l-15.458.934c-.98.047-1.448-.093-1.962-.747l-3.129-4.06c-.56-.747-.793-1.306-.793-1.96V2.667c0-.839.374-1.54 1.447-1.632z" fill="currentColor"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Notion</span></div>
-          <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M12 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0zm.642 4.1335c.9554 0 1.7296.776 1.7296 1.7332v9.0667h1.6c1.614 0 2.9275-1.3156 2.9275-2.933 0-1.6173-1.3136-2.9333-2.9276-2.9333h-.6654V7.3334h.6654c2.5722 0 4.6577 2.0897 4.6577 4.667 0 2.5774-2.0855 4.6666-4.6577 4.6666H12.642zM7.9837 7.333h3.3291v12.533c-.9555 0-1.73-.7759-1.73-1.7332V9.0662H7.9837c-1.6146 0-2.9277 1.316-2.9277 2.9334 0 1.6175 1.3131 2.9333 2.9277 2.9333h.6654v1.7332h-.6654c-2.5725 0-4.6577-2.0892-4.6577-4.6665 0-2.5771 2.0852-4.6666 4.6577-4.6666Z" fill="#2CA01C"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">QuickBooks</span></div>
           <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M14.728 0v6h6l-6-6zm1.363 10.636h-3.41v1.91h3.41v-1.91zm0 3.273h-3.41v1.91h3.41v-1.91zM20.727 6.5v15.864c0 .904-.732 1.636-1.636 1.636H4.909a1.636 1.636 0 0 1-1.636-1.636V1.636C3.273.732 4.005 0 4.909 0h9.318v6.5h6.5zm-3.273 2.773H6.545v7.909h10.91v-7.91zm-6.136 4.636H7.91v1.91h3.41v-1.91zm0-3.273H7.91v1.91h3.41v-1.91z" fill="#34A853"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Google Sheets</span></div>
           <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M21.147 0H2.853A2.86 2.86 0 000 2.853v18.294A2.86 2.86 0 002.853 24h18.294A2.86 2.86 0 0024 21.147V2.853A2.86 2.86 0 0021.147 0zM10.34 17.287a.953.953 0 01-.953.953h-4a.954.954 0 01-.954-.953V5.38a.953.953 0 01.954-.953h4a.954.954 0 01.953.953zm9.233-5.467a.944.944 0 01-.953.947h-4a.947.947 0 01-.953-.947V5.38a.953.953 0 01.953-.953h4a.954.954 0 01.953.953z" fill="#0052CC"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Trello</span></div>
           <div class="flex items-center gap-2 flex-shrink-0"><svg class="w-5 h-5" viewBox="0 0 24 24"><path d="M18.78 12.653c-2.882 0-5.22 2.336-5.22 5.22s2.338 5.22 5.22 5.22 5.22-2.34 5.22-5.22-2.336-5.22-5.22-5.22zm-13.56 0c-2.88 0-5.22 2.337-5.22 5.22s2.338 5.22 5.22 5.22 5.22-2.338 5.22-5.22-2.336-5.22-5.22-5.22zm12-6.525c0 2.883-2.337 5.22-5.22 5.22-2.882 0-5.22-2.337-5.22-5.22 0-2.88 2.338-5.22 5.22-5.22 2.883 0 5.22 2.34 5.22 5.22z" fill="#F06A6A"/></svg><span class="text-[13px] font-medium text-brand-500 dark:text-brand-400 whitespace-nowrap">Asana</span></div>
@@ -661,16 +763,24 @@
           <h2 class="text-[clamp(1.5rem,3vw,2.25rem)] font-bold tracking-tight mb-4">Download Co-Agent</h2>
           <p class="text-[15px] text-brand-500 dark:text-brand-400 mb-8">Get started in under a minute. Download the app, enter your invite code, and connect your tools.</p>
 
-          <a
-            id="main-download-btn"
-            href="#"
-            class="btn-primary inline-flex items-center justify-center gap-2.5 px-8 py-4 rounded-xl bg-brand-900 dark:bg-brand-100 text-white dark:text-brand-900 text-[15px] font-semibold hover:bg-brand-800 dark:hover:bg-brand-200 transition-all shadow-lg shadow-brand-900/10 dark:shadow-brand-100/10 mb-4"
-          >
-            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
-            Download for macOS
-          </a>
+          <div class="flex flex-col sm:flex-row items-center justify-center gap-3 mb-4">
+            <a
+              href="https://github.com/coagent-app/CoAgent/releases/download/v0.4.14/Co-Agent_0.4.14_Apple-Silicon.dmg"
+              class="btn-primary inline-flex items-center justify-center gap-2.5 px-7 py-3.5 rounded-xl bg-brand-900 dark:bg-brand-100 text-white dark:text-brand-900 text-[15px] font-semibold hover:bg-brand-800 dark:hover:bg-brand-200 transition-all shadow-lg shadow-brand-900/10 dark:shadow-brand-100/10"
+            >
+              <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+              Apple Silicon
+            </a>
+            <a
+              href="https://github.com/coagent-app/CoAgent/releases/download/v0.4.14/Co-Agent_0.4.14_Intel.dmg"
+              class="btn-primary inline-flex items-center justify-center gap-2.5 px-7 py-3.5 rounded-xl border-2 border-brand-200 dark:border-brand-700 text-brand-900 dark:text-brand-100 text-[15px] font-semibold hover:bg-brand-50 dark:hover:bg-brand-800 transition-all"
+            >
+              <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+              Intel Mac
+            </a>
+          </div>
 
-          <p class="text-[12px] text-brand-400 dark:text-brand-500">Requires macOS 13 or later &middot; Apple Silicon & Intel</p>
+          <p class="text-[12px] text-brand-400 dark:text-brand-500">Requires macOS 13 or later</p>
         </div>
       </div>
     </section>
@@ -722,15 +832,23 @@
               <p class="text-[14px] text-brand-500 dark:text-brand-400">Your personal AI operator is ready. Download the app and enter the referral code below to get started.</p>
             </div>
 
-            <!-- Download button -->
-            <a
-              id="invite-download"
-              href="#"
-              class="btn-primary flex items-center justify-center gap-2.5 w-full py-3.5 rounded-xl bg-brand-900 dark:bg-brand-100 text-white dark:text-brand-900 text-[14px] font-semibold hover:bg-brand-800 dark:hover:bg-brand-200 transition-all mb-6 shadow-lg shadow-brand-900/10 dark:shadow-brand-100/10"
-            >
-              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
-              Download for macOS
-            </a>
+            <!-- Download buttons -->
+            <div class="flex gap-3 mb-6">
+              <a
+                href="https://github.com/coagent-app/CoAgent/releases/download/v0.4.14/Co-Agent_0.4.14_Apple-Silicon.dmg"
+                class="btn-primary flex-1 flex items-center justify-center gap-2 py-3.5 rounded-xl bg-brand-900 dark:bg-brand-100 text-white dark:text-brand-900 text-[14px] font-semibold hover:bg-brand-800 dark:hover:bg-brand-200 transition-all shadow-lg shadow-brand-900/10 dark:shadow-brand-100/10"
+              >
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                Apple Silicon
+              </a>
+              <a
+                href="https://github.com/coagent-app/CoAgent/releases/download/v0.4.14/Co-Agent_0.4.14_Intel.dmg"
+                class="btn-primary flex-1 flex items-center justify-center gap-2 py-3.5 rounded-xl border-2 border-brand-200 dark:border-brand-700 text-brand-900 dark:text-brand-100 text-[14px] font-semibold hover:bg-brand-50 dark:hover:bg-brand-800 transition-all"
+              >
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                Intel Mac
+              </a>
+            </div>
 
             <!-- Referral code display -->
             <div class="border border-brand-200 dark:border-brand-800 rounded-xl p-4">
@@ -904,6 +1022,19 @@
       }
     });
 
+    // ---- Demo tab switching ----
+    function switchDemoTab(tab) {
+      document.querySelectorAll('.demo-panel').forEach(p => p.classList.add('hidden'));
+      document.getElementById('demo-panel-' + tab).classList.remove('hidden');
+      document.querySelectorAll('.demo-tab').forEach(btn => {
+        if (btn.dataset.tab === tab) {
+          btn.className = 'demo-tab w-full flex items-center gap-2 px-2 py-1.5 rounded-md bg-brand-100 dark:bg-brand-800 text-[12px] font-medium text-brand-900 dark:text-brand-100 text-left';
+        } else {
+          btn.className = 'demo-tab w-full flex items-center gap-2 px-2 py-1.5 text-[12px] text-brand-400 dark:text-brand-500 rounded-md text-left hover:bg-brand-50 dark:hover:bg-brand-800/50 transition-colors';
+        }
+      });
+    }
+
     // ---- Demo chat animation ----
     function runDemoChat() {
       const userMsg = 'Follow up with all leads who haven\'t replied in 3 days. Draft personal emails for each one.';
@@ -966,7 +1097,6 @@
                           setTimeout(() => {
                             badge2.style.opacity = '1';
                             badge2.style.transform = 'translateY(0)';
-                            // Done — no loop
                           }, 300);
                         }, 400);
                       }
