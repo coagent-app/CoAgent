@@ -180,6 +180,47 @@ jobs:
           prerelease: false
           args: --target ${{ matrix.rust-target }}
 
+      # Re-sign sidecars inside the .app bundle with permissive entitlements.
+      # Tauri's bundler signs everything with the main Entitlements.plist, but
+      # sidecars need disable-library-validation to dlopen native modules (LanceDB).
+      - name: Re-sign sidecars in bundle
+        if: env.APPLE_SIGNING_IDENTITY != ''
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          APP=$(find apps/desktop/src-tauri/target/${{ matrix.rust-target }}/release/bundle -name "*.app" -type d 2>/dev/null | head -1)
+          if [ -z "$APP" ]; then echo "No .app found"; exit 1; fi
+          ENTITLEMENTS="apps/desktop/src-tauri/SidecarEntitlements.plist"
+          echo "Re-signing sidecars in $APP with $ENTITLEMENTS"
+          for bin in \
+            "$APP/Contents/MacOS/coagent-server" \
+            "$APP/Contents/MacOS/coagent-memory" \
+            "$APP/Contents/MacOS/node" \
+            "$APP/Contents/MacOS/whisper"; do
+            if [ ! -f "$bin" ]; then continue; fi
+            echo "  Re-signing $bin"
+            codesign --force --options runtime --entitlements "$ENTITLEMENTS" \
+              --sign "$APPLE_SIGNING_IDENTITY" "$bin"
+          done
+          # Re-seal the .app bundle after modifying nested binaries
+          echo "Re-sealing $APP"
+          codesign --force --options runtime --entitlements "apps/desktop/src-tauri/Entitlements.plist" \
+            --sign "$APPLE_SIGNING_IDENTITY" "$APP"
+          echo "Verifying signatures..."
+          codesign --verify --deep --strict "$APP"
+          echo "Done"
+
+      # Rebuild the DMG with the re-signed .app
+      - name: Rebuild DMG
+        run: |
+          APP=$(find apps/desktop/src-tauri/target/${{ matrix.rust-target }}/release/bundle -name "*.app" -type d 2>/dev/null | head -1)
+          DMG=$(find apps/desktop/src-tauri/target/${{ matrix.rust-target }}/release/bundle/dmg -name "*.dmg" 2>/dev/null | head -1)
+          if [ -z "$APP" ] || [ -z "$DMG" ]; then echo "No .app or .dmg found"; exit 1; fi
+          echo "Rebuilding $DMG with re-signed app"
+          rm -f "$DMG"
+          hdiutil create -volname "Co-Agent" -srcfolder "$APP" -ov -format UDZO "$DMG"
+          echo "DMG rebuilt: $(ls -lh "$DMG")"
+
       # Notarize the DMG, staple it, rename it, and upload — all on macOS
       - name: Notarize, staple, and rename DMG
         env:

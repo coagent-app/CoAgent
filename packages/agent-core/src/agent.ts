@@ -3264,6 +3264,26 @@ Rules:
   private sanitizeHistory(messages: typeof this.conversationHistory, opts: { preserveTail?: boolean } = {}): typeof this.conversationHistory {
     let result = [...messages]
 
+    // ── Sanitize tool IDs to match Anthropic's ^[a-zA-Z0-9-]+ pattern ──
+    // Non-Anthropic providers (Kimi, OpenAI) may produce IDs with underscores, colons, etc.
+    const sanitizeId = (id: string): string => id.replace(/[^a-zA-Z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || 'tc'
+    const idRemap = new Map<string, string>()
+    for (const msg of result) {
+      if (!Array.isArray(msg.content)) continue
+      for (const block of msg.content as any[]) {
+        if (block.type === 'tool_use' && block.id && /[^a-zA-Z0-9-]/.test(block.id)) {
+          const clean = idRemap.get(block.id) ?? sanitizeId(block.id)
+          idRemap.set(block.id, clean)
+          block.id = clean
+        }
+        if (block.type === 'tool_result' && block.tool_use_id && idRemap.has(block.tool_use_id)) {
+          block.tool_use_id = idRemap.get(block.tool_use_id)!
+        } else if (block.type === 'tool_result' && block.tool_use_id && /[^a-zA-Z0-9-]/.test(block.tool_use_id)) {
+          block.tool_use_id = sanitizeId(block.tool_use_id)
+        }
+      }
+    }
+
     // ── Deduplicate tool_call IDs (Kimi K2.5 reuses IDs across responses) ──
     // Collect all (tool_use id, msgIndex, blockIndex) and (tool_result tool_use_id, msgIndex, blockIndex) in order
     const useOccurrences = new Map<string, { msgIdx: number; blockIdx: number }[]>()
@@ -3288,7 +3308,7 @@ Rules:
       if (uses.length <= 1) continue
       const results = resultOccurrences.get(id) || []
       for (let k = 1; k < uses.length; k++) {
-        const newId = `${id}_dedup_${Math.random().toString(36).slice(2, 8)}`
+        const newId = `${id.replace(/[^a-zA-Z0-9-]/g, '-')}-dd-${Math.random().toString(36).slice(2, 8)}`
         const use = uses[k];
         (result[use.msgIdx].content as any[])[use.blockIdx] = {
           ...(result[use.msgIdx].content as any[])[use.blockIdx],

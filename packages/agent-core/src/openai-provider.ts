@@ -113,7 +113,7 @@ export function translateMessages(
       for (const tc of msg.tool_calls) {
         if (seenToolCallIds.has(tc.id)) {
           const oldId = tc.id
-          const newId = `${oldId}_dedup_${Math.random().toString(36).slice(2, 8)}`
+          const newId = `${oldId.replace(/[^a-zA-Z0-9-]/g, '-')}-dd-${Math.random().toString(36).slice(2, 8)}`
           tc.id = newId
           // Find and rename the matching tool response message
           for (let j = i + 1; j < out.length; j++) {
@@ -343,7 +343,9 @@ export async function streamOpenAI(
     // Kimi reuses tool_call IDs like "tool_name:N" across different API calls.
     // Append a random suffix to make IDs globally unique across the conversation,
     // preventing orphaned tool_call errors when the same ID appears in multiple turns.
-    const uniqueId = tc.id ? `${tc.id}_${Math.random().toString(36).slice(2, 8)}` : `tc_${Math.random().toString(36).slice(2, 10)}`
+    // IDs must match ^[a-zA-Z0-9-]+ for Anthropic API compatibility.
+    const sanitized = (tc.id || '').replace(/[^a-zA-Z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || 'tc'
+    const uniqueId = `${sanitized}-${Math.random().toString(36).slice(2, 10)}`
     content.push({
       type: 'tool_use',
       id: uniqueId,
