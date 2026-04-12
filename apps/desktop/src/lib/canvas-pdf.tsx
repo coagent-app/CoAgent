@@ -627,9 +627,8 @@ async function renderMermaidBlocks(blocks: Block[]): Promise<void> {
           pie8: '#f97316',
         },
         xyChart: {
-          backgroundColor: 'transparent',
           plotColorPalette: '#3b82f6,#10b981,#ef4444,#f59e0b,#8b5cf6,#06b6d4,#ec4899,#f97316',
-        },
+        } as any,
       })
     }
 
