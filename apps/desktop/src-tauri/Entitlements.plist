@@ -5,26 +5,6 @@
     <key>com.apple.security.app-sandbox</key>
     <false/>
 
-    <!-- Bun sidecars use JIT compilation -->
-    <key>com.apple.security.cs.allow-jit</key>
-    <true/>
-
-    <!-- Bun sidecars need unsigned executable memory for V8/JSC -->
-    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
-    <true/>
-
-    <!-- Sidecar binaries bundle their own libraries -->
-    <key>com.apple.security.cs.disable-library-validation</key>
-    <true/>
-
-    <!-- Bun sidecars need executable page protection disabled -->
-    <key>com.apple.security.cs.disable-executable-page-protection</key>
-    <true/>
-
-    <!-- Bun sidecars need dyld environment variable access -->
-    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
-    <true/>
-
     <!-- Network: API calls (Anthropic, OpenAI, Moonshot, relay) -->
     <key>com.apple.security.network.client</key>
     <true/>

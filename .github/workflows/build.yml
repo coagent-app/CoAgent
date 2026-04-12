@@ -143,7 +143,7 @@ jobs:
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
-          ENTITLEMENTS="apps/desktop/src-tauri/Entitlements.plist"
+          ENTITLEMENTS="apps/desktop/src-tauri/SidecarEntitlements.plist"
           for bin in \
             apps/desktop/src-tauri/binaries/coagent-server-${{ matrix.rust-target }} \
             apps/desktop/src-tauri/binaries/coagent-memory-${{ matrix.rust-target }} \
@@ -180,67 +180,39 @@ jobs:
           prerelease: false
           args: --target ${{ matrix.rust-target }}
 
-      # Notarize & staple the DMG itself so Gatekeeper never warns
-      - name: Notarize and staple DMG
+      # Notarize the DMG, staple it, rename it, and upload — all on macOS
+      - name: Notarize, staple, and rename DMG
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          DMG=$(find apps/desktop/src-tauri/target/${{ matrix.rust-target }}/release/bundle/dmg -name "*.dmg" 2>/dev/null | head -1)
-          if [ -n "$DMG" ]; then
-            echo "Submitting $DMG for notarization..."
-            xcrun notarytool submit "$DMG" \
-              --apple-id "$APPLE_ID" \
-              --password "$APPLE_PASSWORD" \
-              --team-id "$APPLE_TEAM_ID" \
-              --wait --timeout 10m
-            echo "Stapling ticket to $DMG"
-            xcrun stapler staple "$DMG"
-            xcrun stapler validate "$DMG"
-            # Re-upload notarized+stapled DMG
-            ASSET_NAME=$(basename "$DMG")
-            gh release delete-asset "${{ github.ref_name }}" "$ASSET_NAME" --repo "${{ github.repository }}" --yes 2>/dev/null || true
-            gh release upload "${{ github.ref_name }}" "$DMG" --repo "${{ github.repository }}"
-          fi
-
-  rename-assets:
-    needs: build
-    runs-on: ubuntu-latest
-    name: Rename release assets
-    steps:
-      - name: Rename DMGs for clarity
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${GITHUB_REF_NAME:-${{ github.ref_name }}}"
+          TAG="${{ github.ref_name }}"
           VERSION="${TAG#v}"
+          DMG=$(find apps/desktop/src-tauri/target/${{ matrix.rust-target }}/release/bundle/dmg -name "*.dmg" 2>/dev/null | head -1)
+          if [ -z "$DMG" ]; then echo "No DMG found"; exit 1; fi
 
-          sleep 5
+          # Notarize
+          echo "Submitting $DMG for notarization..."
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait --timeout 10m
 
-          echo "Current assets:"
-          gh release view "$TAG" --repo "${{ github.repository }}" --json assets -q '.assets[].name'
+          # Staple
+          echo "Stapling ticket..."
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
 
-          # Rename aarch64 DMG
-          AARCH64_DMG=$(gh release view "$TAG" --repo "${{ github.repository }}" --json assets -q '.assets[].name' | grep "aarch64.*\.dmg$" | head -1)
-          if [ -n "$AARCH64_DMG" ]; then
-            echo "Renaming $AARCH64_DMG → Co-Agent_${VERSION}_Apple-Silicon.dmg"
-            gh release download "$TAG" --repo "${{ github.repository }}" --pattern "$AARCH64_DMG" --dir /tmp
-            mv "/tmp/$AARCH64_DMG" "/tmp/Co-Agent_${VERSION}_Apple-Silicon.dmg"
-            gh release delete-asset "$TAG" --repo "${{ github.repository }}" "$AARCH64_DMG" --yes
-            gh release upload "$TAG" --repo "${{ github.repository }}" "/tmp/Co-Agent_${VERSION}_Apple-Silicon.dmg"
-          fi
+          # Rename to friendly name
+          FRIENDLY="Co-Agent_${VERSION}_${{ matrix.label == 'Apple Silicon' && 'Apple-Silicon' || 'Intel' }}.dmg"
+          FRIENDLY_PATH="$(dirname "$DMG")/$FRIENDLY"
+          mv "$DMG" "$FRIENDLY_PATH"
 
-          # Rename x86_64 DMG
-          X86_DMG=$(gh release view "$TAG" --repo "${{ github.repository }}" --json assets -q '.assets[].name' | grep "x64.*\.dmg$\|x86_64.*\.dmg$" | head -1)
-          if [ -n "$X86_DMG" ]; then
-            echo "Renaming $X86_DMG → Co-Agent_${VERSION}_Intel.dmg"
-            gh release download "$TAG" --repo "${{ github.repository }}" --pattern "$X86_DMG" --dir /tmp
-            mv "/tmp/$X86_DMG" "/tmp/Co-Agent_${VERSION}_Intel.dmg"
-            gh release delete-asset "$TAG" --repo "${{ github.repository }}" "$X86_DMG" --yes
-            gh release upload "$TAG" --repo "${{ github.repository }}" "/tmp/Co-Agent_${VERSION}_Intel.dmg"
-          fi
-
-          echo "Final assets:"
-          gh release view "$TAG" --repo "${{ github.repository }}" --json assets -q '.assets[].name'
+          # Delete the original Tauri-uploaded DMG and upload the final one
+          ORIG_NAME=$(basename "$DMG")
+          gh release delete-asset "$TAG" "$ORIG_NAME" --repo "${{ github.repository }}" --yes 2>/dev/null || true
+          gh release upload "$TAG" "$FRIENDLY_PATH" --repo "${{ github.repository }}"
+          echo "Uploaded $FRIENDLY"
