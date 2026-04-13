@@ -13,10 +13,6 @@
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
     <true/>
 
-    <!-- Sidecar binaries bundle their own libraries -->
-    <key>com.apple.security.cs.disable-library-validation</key>
-    <true/>
-
     <!-- Network: API calls (Anthropic, OpenAI, Moonshot, relay) -->
     <key>com.apple.security.network.client</key>
     <true/>
