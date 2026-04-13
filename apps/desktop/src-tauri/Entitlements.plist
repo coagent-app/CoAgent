@@ -20,5 +20,17 @@
     <!-- File access: user uploads, ~/.coagent data directory -->
     <key>com.apple.security.files.user-selected.read-write</key>
     <true/>
+
+    <!-- JIT: required for WebKit/JavaScriptCore in the Tauri WebView -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+
+    <!-- Unsigned memory: required for WebKit JIT compilation -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- Library validation: required to load Tauri framework dylibs -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
 </dict>
 </plist>
