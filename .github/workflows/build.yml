@@ -102,8 +102,16 @@ jobs:
               ;;
           esac
           cmake --build build --target whisper-cli -j$(sysctl -n hw.logicalcpu)
-          cp build/bin/whisper-cli $GITHUB_WORKSPACE/apps/desktop/src-tauri/binaries/whisper-${{ matrix.rust-target }}
-          chmod +x $GITHUB_WORKSPACE/apps/desktop/src-tauri/binaries/whisper-${{ matrix.rust-target }}
+          WHISPER_BIN="$GITHUB_WORKSPACE/apps/desktop/src-tauri/binaries/whisper-${{ matrix.rust-target }}"
+          cp build/bin/whisper-cli "$WHISPER_BIN"
+          chmod +x "$WHISPER_BIN"
+
+          # Strip dangling build-time rpaths — Gatekeeper blocks apps with
+          # disable-library-validation that contain paths to non-existent dirs
+          for rp in $(otool -l "$WHISPER_BIN" | grep -A1 LC_RPATH | grep "path /tmp" | awk '{print $2}'); do
+            echo "Removing dangling rpath: $rp"
+            install_name_tool -delete_rpath "$rp" "$WHISPER_BIN"
+          done
 
       # macOS: Import signing certificate
       - name: Import Apple certificate
