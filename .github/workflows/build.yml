@@ -18,154 +18,156 @@ jobs:
           - arch: aarch64
             rust-target: aarch64-apple-darwin
             bun-target: bun-darwin-arm64
+            node-arch: darwin-arm64
+            cmake-arch: arm64
+            whisper-flags: -DWHISPER_METAL=ON
             label: Apple Silicon
           - arch: x86_64
             rust-target: x86_64-apple-darwin
             bun-target: bun-darwin-x64
+            node-arch: darwin-x64
+            cmake-arch: x86_64
+            whisper-flags: -DGGML_NATIVE=OFF -DGGML_METAL=OFF
             label: Intel
     name: Build — macOS (${{ matrix.label }})
+
+    env:
+      BINARIES: apps/desktop/src-tauri/binaries
+      ENTITLEMENTS: apps/desktop/src-tauri/Entitlements.plist
+      NODE_VERSION: v22.12.0
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      # ── Toolchain ──────────────────────────────────────────────
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: pnpm
-
-      # Download standalone Node.js binary to bundle with the app.
-      # This lets custom integrations run even when users don't have Node installed.
-      - name: Download bundled Node.js
-        run: |
-          NODE_VERSION="v22.12.0"
-          case "${{ matrix.rust-target }}" in
-            aarch64-apple-darwin) NODE_ARCH="darwin-arm64" ;;
-            x86_64-apple-darwin)  NODE_ARCH="darwin-x64"  ;;
-          esac
-          echo "Downloading node ${NODE_VERSION} for ${NODE_ARCH}"
-          curl -fsSL "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-${NODE_ARCH}.tar.gz" -o /tmp/node.tar.gz
-          rm -rf /tmp/node-extract
-          mkdir -p /tmp/node-extract
-          tar -xzf /tmp/node.tar.gz -C /tmp/node-extract --strip-components=1
-          mkdir -p apps/desktop/src-tauri/binaries
-          cp /tmp/node-extract/bin/node "apps/desktop/src-tauri/binaries/node-${{ matrix.rust-target }}"
-          chmod +x "apps/desktop/src-tauri/binaries/node-${{ matrix.rust-target }}"
-          ls -la "apps/desktop/src-tauri/binaries/node-${{ matrix.rust-target }}"
-
-      # Pre-install @modelcontextprotocol/sdk so custom integrations don't need
-      # to run `npm install` at runtime on the user's machine.
-      - name: Vendor MCP SDK
-        run: |
-          mkdir -p apps/desktop/src-tauri/vendor
-          cd apps/desktop/src-tauri/vendor
-          cat > package.json <<'EOF'
-          {
-            "name": "coagent-vendor",
-            "version": "0.0.0",
-            "private": true,
-            "dependencies": {
-              "@modelcontextprotocol/sdk": "^1.0.0"
-            }
-          }
-          EOF
-          npm install --production --ignore-scripts
-          ls node_modules/@modelcontextprotocol/sdk/package.json
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust-target }}
-
-      - name: Rust cache
-        uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@v2
         with:
           workspaces: apps/desktop/src-tauri
           key: ${{ matrix.rust-target }}
 
-      - name: Compile whisper sidecar
-        run: |
-          git clone --depth 1 https://github.com/ggerganov/whisper.cpp /tmp/whisper.cpp
-          cd /tmp/whisper.cpp
-          case "${{ matrix.rust-target }}" in
-            aarch64-apple-darwin)
-              cmake -B build -DCMAKE_OSX_ARCHITECTURES=arm64 -DWHISPER_METAL=ON -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release
-              ;;
-            x86_64-apple-darwin)
-              cmake -B build -DCMAKE_OSX_ARCHITECTURES=x86_64 -DGGML_NATIVE=OFF -DGGML_METAL=OFF -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release
-              ;;
-          esac
-          cmake --build build --target whisper-cli -j$(sysctl -n hw.logicalcpu)
-          WHISPER_BIN="$GITHUB_WORKSPACE/apps/desktop/src-tauri/binaries/whisper-${{ matrix.rust-target }}"
-          cp build/bin/whisper-cli "$WHISPER_BIN"
-          chmod +x "$WHISPER_BIN"
-
-          # Strip dangling build-time rpaths — Gatekeeper blocks apps with
-          # disable-library-validation that contain paths to non-existent dirs
-          for rp in $(otool -l "$WHISPER_BIN" | grep -A1 LC_RPATH | grep "path /tmp" | awk '{print $2}'); do
-            echo "Removing dangling rpath: $rp"
-            install_name_tool -delete_rpath "$rp" "$WHISPER_BIN"
-          done
-
-      # macOS: Import signing certificate
+      # ── Signing certificate ────────────────────────────────────
       - name: Import Apple certificate
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
         run: |
-          if [ -n "$APPLE_CERTIFICATE" ]; then
-            echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
-            security create-keychain -p actions build.keychain
-            security default-keychain -s build.keychain
-            security unlock-keychain -p actions build.keychain
-            security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-            security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k actions build.keychain
-            rm certificate.p12
-          fi
+          echo "$APPLE_CERTIFICATE" | base64 --decode > /tmp/cert.p12
+          security create-keychain -p actions build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p actions build.keychain
+          security import /tmp/cert.p12 -k build.keychain \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k actions build.keychain
+          rm /tmp/cert.p12
 
+      # ── Sidecar: bundled Node.js ───────────────────────────────
+      - name: Download bundled Node.js
+        run: |
+          mkdir -p "$BINARIES"
+          curl -fsSL "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-${{ matrix.node-arch }}.tar.gz" \
+            | tar -xz --strip-components=1 -C /tmp
+          cp /tmp/bin/node "$BINARIES/node-${{ matrix.rust-target }}"
+
+      # ── Sidecar: whisper (static build) ────────────────────────
+      - name: Compile whisper sidecar
+        run: |
+          git clone --depth 1 https://github.com/ggerganov/whisper.cpp /tmp/whisper.cpp
+          cmake -S /tmp/whisper.cpp -B /tmp/whisper.cpp/build \
+            -DCMAKE_OSX_ARCHITECTURES=${{ matrix.cmake-arch }} \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            ${{ matrix.whisper-flags }}
+          cmake --build /tmp/whisper.cpp/build --target whisper-cli -j$(sysctl -n hw.logicalcpu)
+
+          BIN="$BINARIES/whisper-${{ matrix.rust-target }}"
+          cp /tmp/whisper.cpp/build/bin/whisper-cli "$BIN"
+
+          # Strip dangling build-time rpaths (Gatekeeper rejects these)
+          otool -l "$BIN" | awk '/LC_RPATH/{getline;print $2}' | grep '^/tmp' | while read rp; do
+            echo "Stripping rpath: $rp"
+            install_name_tool -delete_rpath "$rp" "$BIN"
+          done
+
+      # ── Vendor MCP SDK ─────────────────────────────────────────
+      - name: Vendor MCP SDK
+        run: |
+          mkdir -p apps/desktop/src-tauri/vendor
+          cd apps/desktop/src-tauri/vendor
+          cat > package.json <<'PKG'
+          { "name": "coagent-vendor", "private": true,
+            "dependencies": { "@modelcontextprotocol/sdk": "^1.0.0" } }
+          PKG
+          npm install --production --ignore-scripts
+
+      # ── Build frontend & TypeScript packages ───────────────────
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Build TypeScript packages
         run: pnpm build
 
-      # Compile sidecar binaries
-      - name: Compile coagent-server sidecar
-        run: bun build packages/agent-core/dist/server.js --compile --target=${{ matrix.bun-target }} --outfile apps/desktop/src-tauri/binaries/coagent-server-${{ matrix.rust-target }}
+      # ── Sidecar: Bun-compiled binaries ─────────────────────────
+      - name: Compile Bun sidecars
+        run: |
+          bun build packages/agent-core/dist/server.js \
+            --compile --target=${{ matrix.bun-target }} \
+            --outfile "$BINARIES/coagent-server-${{ matrix.rust-target }}"
+          bun build packages/mcp-memory/dist/index.js \
+            --compile --target=${{ matrix.bun-target }} \
+            --outfile "$BINARIES/coagent-memory-${{ matrix.rust-target }}"
 
-      - name: Compile coagent-memory sidecar
-        run: bun build packages/mcp-memory/dist/index.js --compile --target=${{ matrix.bun-target }} --outfile apps/desktop/src-tauri/binaries/coagent-memory-${{ matrix.rust-target }}
-
-      - name: chmod sidecars
-        run: chmod +x apps/desktop/src-tauri/binaries/*
-
-      # Pre-sign sidecars with hardened runtime before Tauri bundles them
+      # ── Sign all sidecars ──────────────────────────────────────
       - name: Sign sidecars
-        if: env.APPLE_SIGNING_IDENTITY != ''
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
-          ENTITLEMENTS="apps/desktop/src-tauri/Entitlements.plist"
-          for bin in \
-            apps/desktop/src-tauri/binaries/coagent-server-${{ matrix.rust-target }} \
-            apps/desktop/src-tauri/binaries/coagent-memory-${{ matrix.rust-target }} \
-            apps/desktop/src-tauri/binaries/node-${{ matrix.rust-target }} \
-            apps/desktop/src-tauri/binaries/whisper-${{ matrix.rust-target }}; do
-            if [ ! -f "$bin" ]; then continue; fi
-            echo "Signing $bin"
-            # Strip any embedded ad-hoc signature (Bun --compile adds one)
+          for bin in "$BINARIES"/*-${{ matrix.rust-target }}; do
+            [ -f "$bin" ] || continue
+            echo "Signing $(basename "$bin")"
             codesign --remove-signature "$bin" 2>/dev/null || true
-            codesign --force --options runtime --entitlements "$ENTITLEMENTS" \
+            codesign --force --options runtime \
+              --entitlements "$ENTITLEMENTS" \
               --sign "$APPLE_SIGNING_IDENTITY" "$bin"
+            codesign --verify --strict "$bin"
           done
 
-      # Build Tauri app (signs main bundle + notarizes .app)
+      # ── Verify all sidecars before Tauri build ─────────────────
+      - name: Verify sidecars
+        run: |
+          echo "--- Checking for dangling load commands ---"
+          FAIL=0
+          for bin in "$BINARIES"/*-${{ matrix.rust-target }}; do
+            [ -f "$bin" ] || continue
+            DANGLING=$(otool -l "$bin" | awk '/LC_RPATH/{getline;print $2}' | grep -v '^@' | grep -v '^/usr' | grep -v '^/System' || true)
+            if [ -n "$DANGLING" ]; then
+              echo "DANGLING RPATHS in $(basename "$bin"):"
+              echo "$DANGLING"
+              FAIL=1
+            fi
+            DANGLING_DYLIB=$(otool -L "$bin" | tail -n+2 | awk '{print $1}' | grep -v '^@' | grep -v '^/usr/lib' | grep -v '^/System' || true)
+            if [ -n "$DANGLING_DYLIB" ]; then
+              echo "EXTERNAL DYLIBS in $(basename "$bin"):"
+              echo "$DANGLING_DYLIB"
+              FAIL=1
+            fi
+          done
+          if [ "$FAIL" = "1" ]; then
+            echo "::error::Dangling load commands detected — Gatekeeper will block this build"
+            exit 1
+          fi
+          echo "All sidecars clean"
+
+      # ── Tauri build (sign + notarize .app) ─────────────────────
       - name: Build Tauri app
         id: tauri
         uses: tauri-apps/tauri-action@v0
@@ -189,9 +191,8 @@ jobs:
           prerelease: false
           args: --target ${{ matrix.rust-target }}
 
-      # Notarize the DMG itself (Tauri only notarizes .app inside)
-      # Then rename with friendly architecture labels
-      - name: Notarize, staple & rename DMG
+      # ── Notarize DMG + rename with arch label ──────────────────
+      - name: Notarize & rename DMG
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
@@ -205,33 +206,21 @@ jobs:
             x86_64)  FRIENDLY="Intel" ;;
           esac
 
-          # Find DMG in Tauri build output
-          DMG=$(find apps/desktop/src-tauri/target/${{ matrix.rust-target }}/release/bundle/dmg -name "*.dmg" 2>/dev/null | head -1)
-          if [ -z "$DMG" ]; then
-            echo "WARNING: No DMG found in build output, skipping"
-            exit 0
-          fi
+          DMG=$(find apps/desktop/src-tauri/target/${{ matrix.rust-target }}/release/bundle/dmg \
+                -name "*.dmg" 2>/dev/null | head -1)
+          [ -z "$DMG" ] && { echo "No DMG found"; exit 0; }
           echo "Found DMG: $DMG"
 
-          # Submit DMG to Apple for notarization
-          if [ -n "$APPLE_ID" ] && [ -n "$APPLE_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
-            echo "Submitting DMG for notarization..."
-            xcrun notarytool submit "$DMG" \
-              --apple-id "$APPLE_ID" \
-              --password "$APPLE_PASSWORD" \
-              --team-id "$APPLE_TEAM_ID" \
-              --wait --timeout 600
+          # Notarize + staple DMG (Tauri only notarizes the .app inside)
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" --wait --timeout 600
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
 
-            echo "Stapling notarization ticket to DMG..."
-            xcrun stapler staple "$DMG"
-            xcrun stapler validate "$DMG"
-          fi
-
-          # Replace the release asset with renamed + notarized DMG
-          ORIGINAL=$(basename "$DMG")
+          # Upload renamed DMG to release
           FINAL="Co-Agent_${VERSION}_${FRIENDLY}.dmg"
           cp "$DMG" "/tmp/${FINAL}"
-
-          echo "Replacing ${ORIGINAL} → ${FINAL}"
+          ORIGINAL=$(basename "$DMG")
           gh release delete-asset "$TAG" --repo "${{ github.repository }}" "$ORIGINAL" --yes 2>/dev/null || true
           gh release upload "$TAG" --repo "${{ github.repository }}" "/tmp/${FINAL}"
