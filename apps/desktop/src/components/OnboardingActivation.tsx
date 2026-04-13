@@ -167,8 +167,18 @@ export function OnboardingActivation({ onActivated }: OnboardingActivationProps)
   }, [onActivated])
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-background">
-      <div className="w-[440px] rounded-2xl border border-border bg-card shadow-2xl overflow-hidden">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-background overflow-hidden">
+      {/* Subtle grid background */}
+      <div
+        className="absolute inset-0 opacity-[0.035] dark:opacity-[0.04]"
+        style={{
+          backgroundImage: `linear-gradient(to right, currentColor 1px, transparent 1px), linear-gradient(to bottom, currentColor 1px, transparent 1px)`,
+          backgroundSize: '40px 40px',
+        }}
+      />
+      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,_transparent_30%,_var(--background)_70%)]" />
+
+      <div className="relative w-[440px] rounded-2xl border border-border bg-card shadow-2xl overflow-hidden">
         {/* Header gradient bar */}
         <div className="h-1.5 bg-gradient-to-r from-neutral-900 via-neutral-600 to-neutral-900 dark:from-neutral-100 dark:via-neutral-400 dark:to-neutral-100" />
 

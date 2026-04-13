@@ -210,8 +210,10 @@ jobs:
           codesign --verify --deep --strict "$APP"
           echo "Done"
 
-      # Rebuild the DMG with the re-signed .app
-      - name: Rebuild DMG
+      # Rebuild the DMG with the re-signed .app and sign it
+      - name: Rebuild and sign DMG
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           APP=$(find apps/desktop/src-tauri/target/${{ matrix.rust-target }}/release/bundle -name "*.app" -type d 2>/dev/null | head -1)
           DMG=$(find apps/desktop/src-tauri/target/${{ matrix.rust-target }}/release/bundle/dmg -name "*.dmg" 2>/dev/null | head -1)
@@ -219,6 +221,11 @@ jobs:
           echo "Rebuilding $DMG with re-signed app"
           rm -f "$DMG"
           hdiutil create -volname "Co-Agent" -srcfolder "$APP" -ov -format UDZO "$DMG"
+          # Sign the DMG itself — macOS Sequoia rejects unsigned disk images
+          if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+            codesign --force --sign "$APPLE_SIGNING_IDENTITY" "$DMG"
+            echo "DMG signed"
+          fi
           echo "DMG rebuilt: $(ls -lh "$DMG")"
 
       # Notarize the DMG, staple it, rename it, and upload — all on macOS
