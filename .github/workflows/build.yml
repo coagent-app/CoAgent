@@ -143,7 +143,7 @@ jobs:
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
-          ENTITLEMENTS="apps/desktop/src-tauri/SidecarEntitlements.plist"
+          ENTITLEMENTS="apps/desktop/src-tauri/Entitlements.plist"
           for bin in \
             apps/desktop/src-tauri/binaries/coagent-server-${{ matrix.rust-target }} \
             apps/desktop/src-tauri/binaries/coagent-memory-${{ matrix.rust-target }} \
@@ -157,10 +157,7 @@ jobs:
               --sign "$APPLE_SIGNING_IDENTITY" "$bin"
           done
 
-      # Build Tauri app — sign only, do NOT notarize here.
-      # We re-sign sidecars after Tauri builds the bundle, which would
-      # invalidate any notarization ticket Tauri staples. Instead we
-      # notarize the final .app and DMG ourselves in later steps.
+      # Build Tauri app (signs main bundle + notarizes)
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -170,6 +167,9 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           VITE_RELAY_URL: ${{ secrets.VITE_RELAY_URL }}
         with:
           projectPath: apps/desktop
@@ -180,115 +180,42 @@ jobs:
           prerelease: false
           args: --target ${{ matrix.rust-target }}
 
-      # Re-sign sidecars inside the .app bundle with permissive entitlements.
-      # Tauri's bundler signs everything with the main Entitlements.plist, but
-      # sidecars need disable-library-validation to dlopen native modules (LanceDB).
-      - name: Re-sign sidecars in bundle
-        if: env.APPLE_SIGNING_IDENTITY != ''
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        run: |
-          APP=$(find apps/desktop/src-tauri/target/${{ matrix.rust-target }}/release/bundle -name "*.app" -type d 2>/dev/null | head -1)
-          if [ -z "$APP" ]; then echo "No .app found"; exit 1; fi
-          ENTITLEMENTS="apps/desktop/src-tauri/SidecarEntitlements.plist"
-          echo "Re-signing sidecars in $APP with $ENTITLEMENTS"
-          for bin in \
-            "$APP/Contents/MacOS/coagent-server" \
-            "$APP/Contents/MacOS/coagent-memory" \
-            "$APP/Contents/MacOS/node" \
-            "$APP/Contents/MacOS/whisper"; do
-            if [ ! -f "$bin" ]; then continue; fi
-            echo "  Re-signing $bin"
-            codesign --force --options runtime --entitlements "$ENTITLEMENTS" \
-              --sign "$APPLE_SIGNING_IDENTITY" "$bin"
-          done
-          # Re-seal the .app bundle after modifying nested binaries
-          echo "Re-sealing $APP"
-          codesign --force --options runtime --entitlements "apps/desktop/src-tauri/Entitlements.plist" \
-            --sign "$APPLE_SIGNING_IDENTITY" "$APP"
-          echo "Verifying signatures..."
-          codesign --verify --deep --strict "$APP"
-          echo "Done"
-
-      # Notarize the re-signed .app so it has a valid ticket when
-      # the user copies it out of the DMG to /Applications.
-      - name: Notarize .app
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          APP=$(find apps/desktop/src-tauri/target/${{ matrix.rust-target }}/release/bundle -name "*.app" -type d 2>/dev/null | head -1)
-          if [ -z "$APP" ]; then echo "No .app found"; exit 1; fi
-
-          # Zip the .app for notarization submission
-          echo "Zipping $APP for notarization..."
-          ditto -c -k --keepParent "$APP" /tmp/Co-Agent-notarize.zip
-
-          echo "Submitting .app for notarization..."
-          xcrun notarytool submit /tmp/Co-Agent-notarize.zip \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait --timeout 10m
-
-          echo "Stapling .app..."
-          xcrun stapler staple "$APP"
-          xcrun stapler validate "$APP"
-          echo ".app notarized and stapled"
-          rm /tmp/Co-Agent-notarize.zip
-
-      # Rebuild the DMG with the notarized .app and sign it
-      - name: Rebuild and sign DMG
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        run: |
-          APP=$(find apps/desktop/src-tauri/target/${{ matrix.rust-target }}/release/bundle -name "*.app" -type d 2>/dev/null | head -1)
-          DMG=$(find apps/desktop/src-tauri/target/${{ matrix.rust-target }}/release/bundle/dmg -name "*.dmg" 2>/dev/null | head -1)
-          if [ -z "$APP" ] || [ -z "$DMG" ]; then echo "No .app or .dmg found"; exit 1; fi
-          echo "Rebuilding $DMG with notarized app"
-          rm -f "$DMG"
-          hdiutil create -volname "Co-Agent" -srcfolder "$APP" -ov -format UDZO "$DMG"
-          # Sign the DMG itself — macOS Sequoia rejects unsigned disk images
-          if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
-            codesign --force --sign "$APPLE_SIGNING_IDENTITY" "$DMG"
-            echo "DMG signed"
-          fi
-          echo "DMG rebuilt: $(ls -lh "$DMG")"
-
-      # Notarize the DMG, staple it, rename it, and upload — all on macOS
-      - name: Notarize, staple, and rename DMG
+  rename-assets:
+    needs: build
+    runs-on: ubuntu-latest
+    name: Rename release assets
+    steps:
+      - name: Rename DMGs for clarity
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          TAG="${{ github.ref_name }}"
+          TAG="${GITHUB_REF_NAME:-${{ github.ref_name }}}"
           VERSION="${TAG#v}"
-          DMG=$(find apps/desktop/src-tauri/target/${{ matrix.rust-target }}/release/bundle/dmg -name "*.dmg" 2>/dev/null | head -1)
-          if [ -z "$DMG" ]; then echo "No DMG found"; exit 1; fi
 
-          # Notarize
-          echo "Submitting $DMG for notarization..."
-          xcrun notarytool submit "$DMG" \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait --timeout 10m
+          sleep 5
 
-          # Staple
-          echo "Stapling ticket..."
-          xcrun stapler staple "$DMG"
-          xcrun stapler validate "$DMG"
+          echo "Current assets:"
+          gh release view "$TAG" --repo "${{ github.repository }}" --json assets -q '.assets[].name'
 
-          # Rename to friendly name
-          FRIENDLY="Co-Agent_${VERSION}_${{ matrix.label == 'Apple Silicon' && 'Apple-Silicon' || 'Intel' }}.dmg"
-          FRIENDLY_PATH="$(dirname "$DMG")/$FRIENDLY"
-          mv "$DMG" "$FRIENDLY_PATH"
+          # Rename aarch64 DMG
+          AARCH64_DMG=$(gh release view "$TAG" --repo "${{ github.repository }}" --json assets -q '.assets[].name' | grep "aarch64.*\.dmg$" | head -1)
+          if [ -n "$AARCH64_DMG" ]; then
+            echo "Renaming $AARCH64_DMG → Co-Agent_${VERSION}_Apple-Silicon.dmg"
+            gh release download "$TAG" --repo "${{ github.repository }}" --pattern "$AARCH64_DMG" --dir /tmp
+            mv "/tmp/$AARCH64_DMG" "/tmp/Co-Agent_${VERSION}_Apple-Silicon.dmg"
+            gh release delete-asset "$TAG" --repo "${{ github.repository }}" "$AARCH64_DMG" --yes
+            gh release upload "$TAG" --repo "${{ github.repository }}" "/tmp/Co-Agent_${VERSION}_Apple-Silicon.dmg"
+          fi
 
-          # Delete the original Tauri-uploaded DMG and upload the final one
-          ORIG_NAME=$(basename "$DMG")
-          gh release delete-asset "$TAG" "$ORIG_NAME" --repo "${{ github.repository }}" --yes 2>/dev/null || true
-          gh release upload "$TAG" "$FRIENDLY_PATH" --repo "${{ github.repository }}"
-          echo "Uploaded $FRIENDLY"
+          # Rename x86_64 DMG
+          X86_DMG=$(gh release view "$TAG" --repo "${{ github.repository }}" --json assets -q '.assets[].name' | grep "x64.*\.dmg$\|x86_64.*\.dmg$" | head -1)
+          if [ -n "$X86_DMG" ]; then
+            echo "Renaming $X86_DMG → Co-Agent_${VERSION}_Intel.dmg"
+            gh release download "$TAG" --repo "${{ github.repository }}" --pattern "$X86_DMG" --dir /tmp
+            mv "/tmp/$X86_DMG" "/tmp/Co-Agent_${VERSION}_Intel.dmg"
+            gh release delete-asset "$TAG" --repo "${{ github.repository }}" "$X86_DMG" --yes
+            gh release upload "$TAG" --repo "${{ github.repository }}" "/tmp/Co-Agent_${VERSION}_Intel.dmg"
+          fi
+
+          echo "Final assets:"
+          gh release view "$TAG" --repo "${{ github.repository }}" --json assets -q '.assets[].name'
