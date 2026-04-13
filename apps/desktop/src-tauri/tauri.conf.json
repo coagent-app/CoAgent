@@ -1,7 +1,7 @@
 {
   "productName": "Co-Agent",
   "version": "0.5.9",
-  "identifier": "com.coagent.desktop",
+  "identifier": "com.coagent.app",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
