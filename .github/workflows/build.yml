@@ -157,8 +157,9 @@ jobs:
               --sign "$APPLE_SIGNING_IDENTITY" "$bin"
           done
 
-      # Build Tauri app (signs main bundle + notarizes)
+      # Build Tauri app (signs main bundle + notarizes .app)
       - name: Build Tauri app
+        id: tauri
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -180,42 +181,49 @@ jobs:
           prerelease: false
           args: --target ${{ matrix.rust-target }}
 
-  rename-assets:
-    needs: build
-    runs-on: ubuntu-latest
-    name: Rename release assets
-    steps:
-      - name: Rename DMGs for clarity
+      # Notarize the DMG itself (Tauri only notarizes .app inside)
+      # Then rename with friendly architecture labels
+      - name: Notarize, staple & rename DMG
         env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${GITHUB_REF_NAME:-${{ github.ref_name }}}"
           VERSION="${TAG#v}"
+          case "${{ matrix.arch }}" in
+            aarch64) FRIENDLY="Apple-Silicon" ;;
+            x86_64)  FRIENDLY="Intel" ;;
+          esac
 
-          sleep 5
+          # Find DMG in Tauri build output
+          DMG=$(find apps/desktop/src-tauri/target/${{ matrix.rust-target }}/release/bundle/dmg -name "*.dmg" 2>/dev/null | head -1)
+          if [ -z "$DMG" ]; then
+            echo "WARNING: No DMG found in build output, skipping"
+            exit 0
+          fi
+          echo "Found DMG: $DMG"
 
-          echo "Current assets:"
-          gh release view "$TAG" --repo "${{ github.repository }}" --json assets -q '.assets[].name'
+          # Submit DMG to Apple for notarization
+          if [ -n "$APPLE_ID" ] && [ -n "$APPLE_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+            echo "Submitting DMG for notarization..."
+            xcrun notarytool submit "$DMG" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" \
+              --wait --timeout 600
 
-          # Rename aarch64 DMG
-          AARCH64_DMG=$(gh release view "$TAG" --repo "${{ github.repository }}" --json assets -q '.assets[].name' | grep "aarch64.*\.dmg$" | head -1)
-          if [ -n "$AARCH64_DMG" ]; then
-            echo "Renaming $AARCH64_DMG → Co-Agent_${VERSION}_Apple-Silicon.dmg"
-            gh release download "$TAG" --repo "${{ github.repository }}" --pattern "$AARCH64_DMG" --dir /tmp
-            mv "/tmp/$AARCH64_DMG" "/tmp/Co-Agent_${VERSION}_Apple-Silicon.dmg"
-            gh release delete-asset "$TAG" --repo "${{ github.repository }}" "$AARCH64_DMG" --yes
-            gh release upload "$TAG" --repo "${{ github.repository }}" "/tmp/Co-Agent_${VERSION}_Apple-Silicon.dmg"
+            echo "Stapling notarization ticket to DMG..."
+            xcrun stapler staple "$DMG"
+            xcrun stapler validate "$DMG"
           fi
 
-          # Rename x86_64 DMG
-          X86_DMG=$(gh release view "$TAG" --repo "${{ github.repository }}" --json assets -q '.assets[].name' | grep "x64.*\.dmg$\|x86_64.*\.dmg$" | head -1)
-          if [ -n "$X86_DMG" ]; then
-            echo "Renaming $X86_DMG → Co-Agent_${VERSION}_Intel.dmg"
-            gh release download "$TAG" --repo "${{ github.repository }}" --pattern "$X86_DMG" --dir /tmp
-            mv "/tmp/$X86_DMG" "/tmp/Co-Agent_${VERSION}_Intel.dmg"
-            gh release delete-asset "$TAG" --repo "${{ github.repository }}" "$X86_DMG" --yes
-            gh release upload "$TAG" --repo "${{ github.repository }}" "/tmp/Co-Agent_${VERSION}_Intel.dmg"
-          fi
+          # Replace the release asset with renamed + notarized DMG
+          ORIGINAL=$(basename "$DMG")
+          FINAL="Co-Agent_${VERSION}_${FRIENDLY}.dmg"
+          cp "$DMG" "/tmp/${FINAL}"
 
-          echo "Final assets:"
-          gh release view "$TAG" --repo "${{ github.repository }}" --json assets -q '.assets[].name'
+          echo "Replacing ${ORIGINAL} → ${FINAL}"
+          gh release delete-asset "$TAG" --repo "${{ github.repository }}" "$ORIGINAL" --yes 2>/dev/null || true
+          gh release upload "$TAG" --repo "${{ github.repository }}" "/tmp/${FINAL}"

@@ -1,6 +1,6 @@
 [package]
 name = "coagent-desktop"
-version = "0.5.6"
+version = "0.5.9"
 description = "Co-Agent Desktop"
 authors = []
 license = ""

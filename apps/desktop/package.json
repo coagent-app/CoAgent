@@ -1,6 +1,6 @@
 {
   "name": "@coagent/desktop",
-  "version": "0.5.6",
+  "version": "0.5.9",
   "private": true,
   "scripts": {
     "dev": "node scripts/copy-pyodide.mjs && node ../../scripts/start-dev.js",
