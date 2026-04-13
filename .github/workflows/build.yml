@@ -157,7 +157,10 @@ jobs:
               --sign "$APPLE_SIGNING_IDENTITY" "$bin"
           done
 
-      # Build Tauri app (signs main bundle + notarizes)
+      # Build Tauri app — sign only, do NOT notarize here.
+      # We re-sign sidecars after Tauri builds the bundle, which would
+      # invalidate any notarization ticket Tauri staples. Instead we
+      # notarize the final .app and DMG ourselves in later steps.
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -167,9 +170,6 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           VITE_RELAY_URL: ${{ secrets.VITE_RELAY_URL }}
         with:
           projectPath: apps/desktop
@@ -210,7 +210,35 @@ jobs:
           codesign --verify --deep --strict "$APP"
           echo "Done"
 
-      # Rebuild the DMG with the re-signed .app and sign it
+      # Notarize the re-signed .app so it has a valid ticket when
+      # the user copies it out of the DMG to /Applications.
+      - name: Notarize .app
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          APP=$(find apps/desktop/src-tauri/target/${{ matrix.rust-target }}/release/bundle -name "*.app" -type d 2>/dev/null | head -1)
+          if [ -z "$APP" ]; then echo "No .app found"; exit 1; fi
+
+          # Zip the .app for notarization submission
+          echo "Zipping $APP for notarization..."
+          ditto -c -k --keepParent "$APP" /tmp/Co-Agent-notarize.zip
+
+          echo "Submitting .app for notarization..."
+          xcrun notarytool submit /tmp/Co-Agent-notarize.zip \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait --timeout 10m
+
+          echo "Stapling .app..."
+          xcrun stapler staple "$APP"
+          xcrun stapler validate "$APP"
+          echo ".app notarized and stapled"
+          rm /tmp/Co-Agent-notarize.zip
+
+      # Rebuild the DMG with the notarized .app and sign it
       - name: Rebuild and sign DMG
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -218,7 +246,7 @@ jobs:
           APP=$(find apps/desktop/src-tauri/target/${{ matrix.rust-target }}/release/bundle -name "*.app" -type d 2>/dev/null | head -1)
           DMG=$(find apps/desktop/src-tauri/target/${{ matrix.rust-target }}/release/bundle/dmg -name "*.dmg" 2>/dev/null | head -1)
           if [ -z "$APP" ] || [ -z "$DMG" ]; then echo "No .app or .dmg found"; exit 1; fi
-          echo "Rebuilding $DMG with re-signed app"
+          echo "Rebuilding $DMG with notarized app"
           rm -f "$DMG"
           hdiutil create -volname "Co-Agent" -srcfolder "$APP" -ov -format UDZO "$DMG"
           # Sign the DMG itself — macOS Sequoia rejects unsigned disk images
