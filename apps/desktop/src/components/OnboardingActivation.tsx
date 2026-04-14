@@ -187,7 +187,7 @@ export function OnboardingActivation({ onActivated }: OnboardingActivationProps)
           <img
             src="/coagent-logo.png"
             alt="Co-Agent"
-            className="w-16 h-16 rounded-2xl mx-auto mb-4 shadow-lg"
+            className="w-16 h-16 mx-auto mb-2 invert contrast-[3] mix-blend-multiply dark:invert-0 dark:contrast-[3] dark:mix-blend-screen"
           />
 
           <h2 className="text-[22px] font-semibold text-neutral-900 dark:text-neutral-100 mb-1">

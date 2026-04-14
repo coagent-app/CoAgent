@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk'
+import OpenAI from 'openai'
 import { readFile, writeFile, mkdir, unlink, rename, readdir, rm, rmdir } from 'fs/promises'
 import { existsSync } from 'fs'
 import { join, extname, basename, dirname } from 'path'
@@ -12,12 +13,27 @@ const FILES_DIR = 'files'
 const FOLDER_ORDER_FILE = 'folder-order.json'
 import { getOpenAIProxy } from './auth.js'
 
+const KIMI_MODEL = 'kimi-k2.5'
+const MOONSHOT_BASE_URL = 'https://api.moonshot.cn/v1'
+
 function createAnthropicClient(): Anthropic {
   const relay = getRelayConfig()
   if (relay) {
     return new Anthropic({ baseURL: relay.url, apiKey: relay.token })
   }
   return new Anthropic()
+}
+
+function createOpenAIClient(): OpenAI | null {
+  const relay = getRelayConfig()
+  if (relay) {
+    return new OpenAI({ baseURL: `${relay.url.replace(/\/$/, '')}/v1`, apiKey: relay.token })
+  }
+  const apiKey = process.env.MOONSHOT_API_KEY
+  if (apiKey) {
+    return new OpenAI({ baseURL: MOONSHOT_BASE_URL, apiKey })
+  }
+  return null
 }
 
 // ── Internal index type (includes embedding, not sent to frontend) ────────────
@@ -383,14 +399,31 @@ async function generateSummary(
   filename: string,
   sample: SampleResult
 ): Promise<string> {
-  const anthropic = createAnthropicClient()
-
   const prompt = `You are analyzing a file to generate a brief summary.
 
 File: ${filename}
 
 Write ONE sentence summarizing what this file is. Be concise. Respond with the summary text only, no JSON.`
 
+  // For text-only samples, prefer Kimi; fall back to Claude
+  const openai = sample.type === 'text' ? createOpenAIClient() : null
+  if (openai && sample.type === 'text') {
+    const res = await openai.chat.completions.create({
+      model: KIMI_MODEL,
+      max_tokens: 256,
+      messages: [{ role: 'user', content: `${prompt}\n\nFile contents (sample):\n${sample.text}` }]
+    })
+    const text = res.choices[0]?.message?.content?.trim().slice(0, 300) || 'No summary available.'
+    recordUsage(dataDir, {
+      category: 'file_ingestion', model: KIMI_MODEL,
+      inputTokens: res.usage?.prompt_tokens ?? 0, outputTokens: res.usage?.completion_tokens ?? 0,
+      cacheReadTokens: 0, cacheCreationTokens: 0, timestamp: new Date().toISOString(),
+    }).catch(() => {})
+    return text
+  }
+
+  // Multimodal (image/document) or no Kimi client — use Claude
+  const anthropic = createAnthropicClient()
   const content: any =
     sample.type === 'image'
       ? [
@@ -496,7 +529,7 @@ export async function autoOrganizeFiles(
     if (files.length === 0) clusters.delete(id)
   }
 
-  // Ask Haiku to name the clusters
+  // Ask model to name the clusters — prefer Kimi, fall back to Claude
   const clusterDescriptions = [...clusters.entries()]
     .map(([id, files]) => {
       const fileList = files.map(f => `  - ${f.filename}: ${f.summary}`).join('\n')
@@ -504,27 +537,36 @@ export async function autoOrganizeFiles(
     })
     .join('\n\n')
 
-  const anthropic = createAnthropicClient()
-  const response = await anthropic.messages.create({
-    model: 'claude-haiku-4-5-20251001',
-    max_tokens: 256,
-    messages: [{
-      role: 'user',
-      content: `Name each file cluster with a short, descriptive folder name (1-2 words, Title Case, e.g. "Reports", "Contracts", "Images"). Each name must be unique.\n\nRespond with JSON only, no markdown fences:\n{"clusters":{"0":"FolderName","1":"FolderName"}}\n\n${clusterDescriptions}`
-    }]
-  })
+  const clusterPrompt = `Name each file cluster with a short, descriptive folder name (1-2 words, Title Case, e.g. "Reports", "Contracts", "Images"). Each name must be unique.\n\nRespond with JSON only, no markdown fences:\n{"clusters":{"0":"FolderName","1":"FolderName"}}\n\n${clusterDescriptions}`
 
-  recordUsage(dataDir, {
-    category: 'file_ingestion',
-    model: 'claude-haiku-4-5-20251001',
-    inputTokens: response.usage.input_tokens,
-    outputTokens: response.usage.output_tokens,
-    cacheReadTokens: (response.usage as any).cache_read_input_tokens ?? 0,
-    cacheCreationTokens: (response.usage as any).cache_creation_input_tokens ?? 0,
-    timestamp: new Date().toISOString(),
-  }).catch(() => {})
-
-  const rawText = response.content[0]?.type === 'text' ? response.content[0].text : ''
+  let rawText: string
+  const openai = createOpenAIClient()
+  if (openai) {
+    const res = await openai.chat.completions.create({
+      model: KIMI_MODEL, max_tokens: 256,
+      messages: [{ role: 'user', content: clusterPrompt }]
+    })
+    rawText = res.choices[0]?.message?.content ?? ''
+    recordUsage(dataDir, {
+      category: 'file_ingestion', model: KIMI_MODEL,
+      inputTokens: res.usage?.prompt_tokens ?? 0, outputTokens: res.usage?.completion_tokens ?? 0,
+      cacheReadTokens: 0, cacheCreationTokens: 0, timestamp: new Date().toISOString(),
+    }).catch(() => {})
+  } else {
+    const anthropic = createAnthropicClient()
+    const response = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001', max_tokens: 256,
+      messages: [{ role: 'user', content: clusterPrompt }]
+    })
+    recordUsage(dataDir, {
+      category: 'file_ingestion', model: 'claude-haiku-4-5-20251001',
+      inputTokens: response.usage.input_tokens, outputTokens: response.usage.output_tokens,
+      cacheReadTokens: (response.usage as any).cache_read_input_tokens ?? 0,
+      cacheCreationTokens: (response.usage as any).cache_creation_input_tokens ?? 0,
+      timestamp: new Date().toISOString(),
+    }).catch(() => {})
+    rawText = response.content[0]?.type === 'text' ? response.content[0].text : ''
+  }
   const cleanText = rawText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()
   let clusterNames: Record<string, string> = {}
   try {

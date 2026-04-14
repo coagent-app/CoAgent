@@ -840,7 +840,7 @@ function WeekView({
 
         {hours.map(hour => (
           <React.Fragment key={hour}>
-            <div className={cn('text-[10px] text-neutral-400 text-right pr-2 pt-1 h-[48px]', isOffHour(hour) && 'opacity-50')}>
+            <div className={cn('text-[10px] text-neutral-400 text-right pr-2 pt-1 h-[48px] border-b border-neutral-200 dark:border-neutral-800', isOffHour(hour) && 'opacity-50')}>
               {format(setHours(new Date(), hour), 'h a')}
             </div>
             {days.map(day => {
@@ -849,7 +849,7 @@ function WeekView({
                 <div key={`${day.toISOString()}-${hour}`}
                   className={cn(
                     'h-[48px] border-l border-b border-neutral-200 dark:border-neutral-800 relative overflow-visible',
-                    isToday(day) && !isOffHour(hour) && 'bg-blue-50/30 dark:bg-blue-950/10 dark:border-l-transparent',
+                    isToday(day) && !isOffHour(hour) && 'bg-blue-50/30 dark:bg-blue-950/10',
                     isOffHour(hour) && 'bg-neutral-50 dark:bg-neutral-900/50'
                   )}>
                   {dayEntries.map((entry, idx) => {

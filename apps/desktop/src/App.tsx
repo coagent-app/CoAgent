@@ -25,6 +25,33 @@ import { emit } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-shell'
 import type { ApprovalItem } from '@coagent/shared'
 
+function ConnectingOverlay({ visible }: { visible: boolean }) {
+  const [show, setShow] = React.useState(true)
+  React.useEffect(() => {
+    if (!visible) {
+      // Keep mounted for 1 extra frame so app renders beneath before unmount
+      const id = requestAnimationFrame(() => requestAnimationFrame(() => setShow(false)))
+      return () => cancelAnimationFrame(id)
+    }
+  }, [visible])
+  if (!show) return null
+  return (
+    <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-white dark:bg-neutral-950 gap-4 overflow-hidden">
+      <div
+        className="absolute inset-0 opacity-[0.035] dark:opacity-[0.04]"
+        style={{
+          backgroundImage: `linear-gradient(to right, currentColor 1px, transparent 1px), linear-gradient(to bottom, currentColor 1px, transparent 1px)`,
+          backgroundSize: '40px 40px',
+        }}
+      />
+      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,_transparent_30%,_var(--background)_70%)]" />
+      <img src="/coagent-logo.png" alt="Co-Agent" className="relative w-16 h-16 opacity-30 invert contrast-[3] mix-blend-multiply dark:invert-0 dark:contrast-[3] dark:mix-blend-screen" />
+      <div className="relative w-6 h-6 border-2 border-neutral-200 dark:border-neutral-700 border-t-neutral-900 dark:border-t-neutral-100 rounded-full animate-spin" />
+      <p className="relative text-[12px] text-neutral-400 dark:text-neutral-600">Connecting...</p>
+    </div>
+  )
+}
+
 export default function App() {
   const { queue, done, newQueueIds, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, hydrated, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, error, chat, approve, reject, editQueueItem, dismissQueueToast, connectIntegration, disconnectIntegration, settings, updateSettings, authStatus, updateAuth, verifyAuth, files, folders, searchResults, transcribingFiles, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, relayActive, relayModel, setRelayModel, relayUsage, activateRelay, refreshRelayStatus, pendingFields, setPendingFields, setModel, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, triggerPrompt, setTriggerPrompt, canvas, canvasVisible, canvasStreaming, canvasStreamingCode, openCanvas, closeCanvas, canvasesList, getCanvases, codeCells, codeCellOrder, cancelCodeCell, exportPdf } = useAgent()
   const { dark, toggle: toggleTheme } = useTheme()
@@ -36,6 +63,7 @@ export default function App() {
   const [modalOpen, setModalOpen] = useState(false)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [activated, setActivated] = useState(() => !!localStorage.getItem('coagent-token'))
+  const [activationFading, setActivationFading] = useState(false)
   // Wait for WebSocket to connect before showing activation gate.
   // If already activated from localStorage, skip the wait entirely.
   const [wsChecked, setWsChecked] = useState(() => !!localStorage.getItem('coagent-token'))
@@ -169,33 +197,29 @@ export default function App() {
   // rendering with empty states, red dots, or missing user names.
   // Also wait for hydration before showing activation gate — relay credentials
   // arrive after connection, so we can't decide "new user vs existing" until then.
-  if (!wsChecked || !hydrated) {
-    return (
-      <div className="flex flex-col items-center justify-center h-screen bg-white dark:bg-neutral-950 gap-4">
-        <img src="/coagent-logo.png" alt="Co-Agent" className="w-12 h-12 brightness-0 dark:brightness-100 opacity-40" />
-        <div className="w-6 h-6 border-2 border-neutral-200 dark:border-neutral-700 border-t-neutral-900 dark:border-t-neutral-100 rounded-full animate-spin" />
-        <p className="text-[12px] text-neutral-400 dark:text-neutral-600">Connecting...</p>
-      </div>
-    )
-  }
-
   // Show onboarding activation if user hasn't activated yet.
   // At this point hydrated=true, so relay credentials have had time to arrive.
   // If relayCredentials exist, the useEffect above will auto-activate.
-  if (!activated && !relayCredentials) {
+  if (wsChecked && hydrated && !activated && !relayCredentials) {
     return (
-      <OnboardingActivation
-        onActivated={(token) => {
-          setActivated(true)
-          // Also activate relay so the backend knows about this token
-          activateRelay(token, import.meta.env.VITE_RELAY_URL as string)
-        }}
-      />
+      <div className={`transition-opacity duration-400 ease-out ${activationFading ? 'opacity-0' : 'opacity-100'}`}>
+        <OnboardingActivation
+          onActivated={(token) => {
+            setActivationFading(true)
+            setTimeout(() => {
+              setActivated(true)
+              activateRelay(token, import.meta.env.VITE_RELAY_URL as string)
+            }, 450)
+          }}
+        />
+      </div>
     )
   }
 
   return (
     <>
+      <ConnectingOverlay visible={!wsChecked || !hydrated} />
+
       {error && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 text-[12.5px] px-4 py-2.5 rounded-xl shadow-md max-w-sm text-center">
           {error}
