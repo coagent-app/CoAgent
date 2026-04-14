@@ -153,6 +153,7 @@ export interface FileEntry {
   group: string         // agent-assigned folder name e.g. "Contracts"
   sizeBytes: number
   transcript?: string   // whisper transcription for audio/video files
+  canvasId?: string     // ID of source canvas, if file was saved from a canvas
 }
 
 export type WSClientMessage =
@@ -235,6 +236,7 @@ export type WSClientMessage =
   | { type: 'python_done'; requestId: string; stdout: string; stderr: string; resultRepr?: string; durationMs: number; figures?: string[] }
   | { type: 'python_error'; requestId: string; errorType: string; message: string; traceback: string; stdout: string; stderr: string }
   | { type: 'python_cancelled'; requestId: string; reason: 'user' | 'timeout' }
+  | { type: 'enable_wake_scheduling' }
 
 export type WSServerMessage =
   | { type: 'queue_update'; items: ApprovalItem[] }
@@ -309,6 +311,7 @@ export type WSServerMessage =
   | { type: 'code_cell_done'; cellId: string; stdout: string; stderr: string; resultRepr?: string; durationMs: number; figures?: string[] }
   | { type: 'code_cell_error'; cellId: string; errorType: string; message: string; traceback: string; stdout: string; stderr: string }
   | { type: 'subagent_complete'; agentId: string; label: string; resultLength: number }
+  | { type: 'wake_scheduling_result'; success: boolean; message?: string }
 
 export type PythonEvent =
   | { type: 'stdout'; line: string }

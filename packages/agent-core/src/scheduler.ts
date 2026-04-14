@@ -41,7 +41,7 @@ function checkPmsetAccess(): boolean {
   } catch { return false }
 }
 
-function setupPmsetAccess(): boolean {
+export function setupPmsetAccess(): boolean {
   if (pmsetSetupAttempted) return hasPmsetAccess
   pmsetSetupAttempted = true
 
@@ -292,7 +292,14 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
     if (next3am <= now) next3am.setDate(next3am.getDate() + 1)
     scheduleWake(next3am)
   }
-  scheduleNightlyWake()
+  // On startup: only schedule wake if access already granted (no prompt)
+  if (process.platform === 'darwin') {
+    hasPmsetAccess = checkPmsetAccess()
+    pmsetSetupAttempted = hasPmsetAccess
+    if (hasPmsetAccess) scheduleNightlyWake()
+  } else {
+    scheduleNightlyWake()
+  }
 
   cron.schedule('0 3 * * *', async () => {
     console.log('[Scheduler] 3 AM job starting...')

@@ -144,13 +144,7 @@ export function Sidebar({ view, onViewChange, queueCount, integrations, onConnec
         {hasTeam && <NavItem icon={Users} label="Team" active={view === 'team'} onClick={() => onViewChange('team')} />}
         <NavItem icon={Zap} label="Skills" active={view === 'skills'} onClick={() => onViewChange('skills')} />
         <NavItem icon={CalendarIcon} label="Schedule" active={view === 'calendar'} onClick={() => onViewChange('calendar')} />
-        <NavItem icon={Inbox} label="Queue" active={view === 'queue'} onClick={() => {
-          if (onQueueBadgeClick && view === 'chat') {
-            onQueueBadgeClick()
-          } else {
-            onViewChange('queue')
-          }
-        }} badge={queueCount} />
+        <NavItem icon={Inbox} label="Queue" active={view === 'queue'} onClick={() => onViewChange('queue')} badge={queueCount} />
         <NavItem icon={FolderOpen} label="Files" active={view === 'files'} onClick={() => onViewChange('files')} />
       </div>
 

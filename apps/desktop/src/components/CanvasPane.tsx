@@ -25,7 +25,7 @@ interface Props {
   streamingCode?: string
   settings: AgentSettings | null | undefined
   onClose: () => void
-  onSaveToFiles?: (filename: string, mimeType: string, data: string) => void
+  onSaveToFiles?: (filename: string, mimeType: string, data: string, group?: string, canvasId?: string) => void
   canvasesList?: Array<{ id: string; title: string; kind?: string; updatedAt: string }>
   onOpenCanvas?: (canvasId: string) => void
   onLoadCanvases?: () => void
@@ -33,6 +33,12 @@ interface Props {
 
 // Debounce interval for streaming updates (ms)
 const STREAM_DEBOUNCE_MS = 120
+
+// Strip emojis from canvas content — reports should be clean text only
+const EMOJI_RE = /[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{200D}\u{20E3}\u{E0020}-\u{E007F}]/gu
+function stripEmojis(text: string): string {
+  return text.replace(EMOJI_RE, '').replace(/  +/g, ' ')
+}
 
 function relativeDate(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime()
@@ -178,8 +184,6 @@ window.addEventListener('message', function(e) {
     var el = document.getElementById('content');
     if (el) {
       el.innerHTML = e.data.html;
-      // Only render mermaid when streaming is done — partial mermaid
-      // syntax causes error icons and layout thrashing.
       if (!e.data.streaming) renderMermaid();
     }
   } else if (e.data.type === 'set_logo') {
@@ -206,14 +210,20 @@ window.addEventListener('message', function(e) {
   // Render markdown to static HTML
   const markdownHtml = useMemo(() => {
     if (!debouncedCode.trim()) return ''
+    const cleanCode = stripEmojis(debouncedCode)
     try {
       return renderToStaticMarkup(
         <ReactMarkdown remarkPlugins={[remarkGfm]}>
-          {debouncedCode}
+          {cleanCode}
         </ReactMarkdown>
       )
     } catch {
-      return `<p>${debouncedCode}</p>`
+      const escaped = cleanCode
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*(.+?)\*/g, '<em>$1</em>')
+        .replace(/\n/g, '<br/>')
+      return `<p>${escaped}</p>`
     }
   }, [debouncedCode])
 
@@ -287,7 +297,7 @@ window.addEventListener('message', function(e) {
       const reader = new FileReader()
       reader.onload = () => {
         const base64 = (reader.result as string).split(',')[1] ?? ''
-        onSaveToFiles(`${canvas.title || 'document'}.pdf`, 'application/pdf', base64)
+        onSaveToFiles(`${canvas.title || 'document'}.pdf`, 'application/pdf', base64, undefined, canvas.id)
         setSaving(false)
       }
       reader.onerror = () => {

@@ -48,9 +48,9 @@ export function buildBrandCSS(brand: BrandValues): string {
 
     /* Container */
     .canvas-root {
-      max-width: 720px;
+      max-width: 900px;
       margin: 0 auto;
-      padding: 48px;
+      padding: 48px 56px;
     }
 
     /* Logo header — top-left aligned */
@@ -84,7 +84,7 @@ export function buildBrandCSS(brand: BrandValues): string {
     h3 { font-size: 18px; }
     h1:first-child, h2:first-child, h3:first-child { margin-top: 0; }
 
-    p { margin: 0 0 1em; }
+    p { margin: 0 0 1.15em; }
 
     strong { color: #111; }
 
@@ -109,27 +109,38 @@ export function buildBrandCSS(brand: BrandValues): string {
       width: 100%;
       border-collapse: collapse;
       margin: 1em 0;
-      font-size: 14px;
+      font-size: 13px;
+      table-layout: auto;
+      word-break: normal;
+      overflow-wrap: break-word;
     }
+    .table-wrap {
+      overflow-x: auto;
+      margin: 1em 0;
+      -webkit-overflow-scrolling: touch;
+    }
+    .table-wrap table { margin: 0; }
     thead th {
       background: ${primary};
       color: white;
       text-align: left;
-      padding: 8px 12px;
+      padding: 6px 10px;
       font-weight: 600;
       font-size: 11px;
       text-transform: uppercase;
       letter-spacing: 0.05em;
+      white-space: normal;
     }
     tbody td {
-      padding: 8px 12px;
+      padding: 6px 10px;
       border-bottom: 1px solid #eee;
+      vertical-align: top;
     }
     tbody tr:last-child td { border-bottom: none; }
 
     /* Lists */
-    ul, ol { margin: 0 0 1em; padding-left: 1.5em; }
-    li { margin-bottom: 0.3em; }
+    ul, ol { margin: 0.25em 0 1.15em; padding-left: 1.6em; }
+    li { margin-bottom: 0.4em; }
 
     /* Code */
     code {
@@ -154,7 +165,7 @@ export function buildBrandCSS(brand: BrandValues): string {
       text-align: center;
       background: transparent;
       padding: 0;
-      max-width: 560px;
+      max-width: 90%;
     }
     .mermaid svg {
       max-width: 100%;

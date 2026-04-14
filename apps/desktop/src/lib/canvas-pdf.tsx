@@ -32,6 +32,9 @@ type BlockType =
 interface TextSegment {
   text: string
   bold: boolean
+  italic?: boolean
+  strikethrough?: boolean
+  link?: string
 }
 
 interface Block {
@@ -55,14 +58,24 @@ interface Block {
 
 function parseInline(text: string): TextSegment[] {
   const segments: TextSegment[] = []
-  const re = /\*\*(.+?)\*\*/g
+  const re = /\*\*\*(.+?)\*\*\*|\*\*(.+?)\*\*|\*(.+?)\*|~~(.+?)~~|\[([^\]]+)\]\(([^)]+)\)/g
   let last = 0
   let match: RegExpExecArray | null
   while ((match = re.exec(text)) !== null) {
     if (match.index > last) {
       segments.push({ text: text.slice(last, match.index), bold: false })
     }
-    segments.push({ text: match[1], bold: true })
+    if (match[1]) {
+      segments.push({ text: match[1], bold: true, italic: true })
+    } else if (match[2]) {
+      segments.push({ text: match[2], bold: true })
+    } else if (match[3]) {
+      segments.push({ text: match[3], bold: false, italic: true })
+    } else if (match[4]) {
+      segments.push({ text: match[4], bold: false, strikethrough: true })
+    } else if (match[5] && match[6]) {
+      segments.push({ text: match[5], bold: false, link: match[6] })
+    }
     last = match.index + match[0].length
   }
   if (last < text.length) {
@@ -137,7 +150,7 @@ function parseMarkdown(markdown: string): Block[] {
       }
       blocks.push({
         type: 'blockquote',
-        segments: parseInline(quoteLines.join(' ')),
+        segments: parseInline(quoteLines.join('\n')),
       })
       continue
     }
@@ -151,11 +164,12 @@ function parseMarkdown(markdown: string): Block[] {
         i++
       }
       if (tableLines.length >= 2) {
-        const parseRow = (row: string) =>
-          row
-            .split('|')
-            .map((c) => c.trim())
-            .filter((c) => c.length > 0)
+        const parseRow = (row: string) => {
+          const cells = row.split('|').map((c) => c.trim())
+          if (cells.length > 0 && cells[0] === '') cells.shift()
+          if (cells.length > 0 && cells[cells.length - 1] === '') cells.pop()
+          return cells
+        }
 
         const headers = parseRow(tableLines[0])
         // tableLines[1] is the alignment row — skip it
@@ -402,15 +416,19 @@ function InlineText({
 }) {
   return (
     <Text style={style}>
-      {segments.map((seg, idx) =>
-        seg.bold ? (
-          <Text key={idx} style={boldStyle}>
-            {seg.text}
-          </Text>
+      {segments.map((seg, idx) => {
+        const segStyle: any = {}
+        if (seg.bold) Object.assign(segStyle, boldStyle)
+        if (seg.italic) segStyle.fontStyle = 'italic'
+        if (seg.strikethrough) segStyle.textDecoration = 'line-through'
+        if (seg.link) segStyle.color = '#2563eb'
+        const hasStyle = seg.bold || seg.italic || seg.strikethrough || seg.link
+        return hasStyle ? (
+          <Text key={idx} style={segStyle}>{seg.text}</Text>
         ) : (
           <Text key={idx}>{seg.text}</Text>
         )
-      )}
+      })}
     </Text>
   )
 }
@@ -552,14 +570,19 @@ function CanvasDocument({
             case 'table': {
               const headers = block.headers ?? []
               const rows = block.rows ?? []
+              const colCount = headers.length
+              const fontSize = colCount > 5 ? 8 : colCount > 4 ? 9 : 10
               return (
                 <View key={idx} style={styles.tableWrapper}>
                   {/* Header row */}
                   <View style={styles.tableHeaderRow}>
                     {headers.map((h, j) => (
-                      <Text key={j} style={styles.tableHeaderCell}>
-                        {h}
-                      </Text>
+                      <InlineText
+                        key={j}
+                        segments={parseInline(h)}
+                        style={{ ...styles.tableHeaderCell, fontSize }}
+                        boldStyle={{ ...styles.tableHeaderCell, fontSize, fontWeight: 'bold' }}
+                      />
                     ))}
                   </View>
                   {/* Data rows */}
@@ -568,10 +591,13 @@ function CanvasDocument({
                       key={j}
                       style={j % 2 === 0 ? styles.tableRow : styles.tableRowAlt}
                     >
-                      {row.map((cell, k) => (
-                        <Text key={k} style={styles.tableCell}>
-                          {cell}
-                        </Text>
+                      {headers.map((_h, k) => (
+                        <InlineText
+                          key={k}
+                          segments={parseInline(row[k] ?? '')}
+                          style={{ ...styles.tableCell, fontSize }}
+                          boldStyle={{ ...styles.tableCell, fontSize, fontWeight: 'bold', color: '#111' }}
+                        />
                       ))}
                     </View>
                   ))}
@@ -638,7 +664,7 @@ async function renderMermaidBlocks(blocks: Block[]): Promise<void> {
         const id = `pdf-mermaid-${Date.now()}-${i}`
         const { svg } = await mermaid.render(id, block.code!)
         // Convert SVG to PNG data URI via canvas
-        const pngDataUri = await svgToPng(svg, 700, 400)
+        const pngDataUri = await svgToPng(svg, 1440, 960)
         block.imageDataUri = pngDataUri
       } catch (err) {
         console.warn('[canvas-pdf] mermaid render failed for block:', err)
@@ -653,13 +679,10 @@ async function renderMermaidBlocks(blocks: Block[]): Promise<void> {
 function svgToPng(svgString: string, maxW: number, maxH: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const img = new window.Image()
-    const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
     img.onload = () => {
-      // Scale to fit within maxW × maxH while preserving aspect ratio
       let w = img.naturalWidth || maxW
       let h = img.naturalHeight || maxH
-      const scale = Math.min(maxW / w, maxH / h, 2) // cap at 2x
+      const scale = Math.min(maxW / w, maxH / h, 4)
       w = Math.round(w * scale)
       h = Math.round(h * scale)
       const canvas = document.createElement('canvas')
@@ -669,14 +692,13 @@ function svgToPng(svgString: string, maxW: number, maxH: number): Promise<string
       ctx.fillStyle = '#ffffff'
       ctx.fillRect(0, 0, w, h)
       ctx.drawImage(img, 0, 0, w, h)
-      URL.revokeObjectURL(url)
       resolve(canvas.toDataURL('image/png'))
     }
     img.onerror = () => {
-      URL.revokeObjectURL(url)
       reject(new Error('SVG to PNG conversion failed'))
     }
-    img.src = url
+    // Use data URI instead of blob URL to avoid tainting the canvas (SecurityError)
+    img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgString)
   })
 }
 

@@ -855,12 +855,14 @@ main().catch(console.error)
 \`\`\`
 
 CRITICAL RULES for generated code:
-- Use native fetch() (Node 18+, no axios needed)
+- MUST use ES module imports (import/from) — NEVER use require(). The package.json is "type": "module"
+- Use native fetch() — NEVER use axios or any HTTP library
 - Auth via process.env — the env var names MUST match the auth_fields names
 - One tool per confirmed capability
-- Always include EPIPE handlers
+- Always include EPIPE handlers (copy from the template above)
 - Return JSON.stringify(data, null, 2) for API responses
 - Handle errors with isError: true
+- Follow the template above EXACTLY — do not deviate from its structure
 
 ## Step 5: Create the integration
 
@@ -869,6 +871,8 @@ Call create_custom_integration with action "create":
 - capabilities: confirmed list
 - auth_fields: credentials needed — ALWAYS include help_url (direct link) and help_text (short step-by-step) for each field (e.g. [{name: "API_KEY", display_name: "API Key", description: "Your Notion integration token", help_url: "https://www.notion.so/my-integrations", help_text: "Go to notion.so/my-integrations → New integration → copy the Internal Integration Secret"}])
 - code: the generated index.js
+- domain: the service's domain (e.g. "notion.so") — used to auto-fetch their logo
+- credentials: if the user already gave you the API key in chat, pass it here (e.g. {"API_KEY": "abc123"}) — this writes the .env and connects immediately, no form needed
 - dependencies: {} (only @modelcontextprotocol/sdk is needed, it's added automatically)
 
 ## Step 6: Done
@@ -913,32 +917,54 @@ function loadDocDesignSkillInstructions(): string {
 
 DEFAULT_SKILLS['showcase'] = {
   name: 'showcase',
-  description: 'See what you can do with your connected integrations — @showcase to explore',
-  placeholder: 'show me what I can do…',
-  instructions: `The user wants to see what they can do with their connected integrations.
+  description: 'Live demo of what Co-Agent can do with your connected integrations right now — @showcase to see it in action',
+  placeholder: 'show me what you can do…',
+  instructions: `The user wants to see Co-Agent in action with their actual data. This is NOT a feature list — it's a live demo that proves value immediately.
 
-## Step 1: Get connected integrations
+## Step 1: Get connected integrations and user context
 
-Call list_integrations to see which integrations the user has connected.
+Call list_integrations to see what's connected. Also read profile.md and preferences.md from memory to understand who they are and what they care about.
 
-## Step 2: Present a personalized overview
+## Step 2: Do something useful RIGHT NOW
 
-For each connected integration, share 2-3 specific things you can help with — phrased naturally, like you're a helpful assistant suggesting ideas. Group them by what the user might care about:
+Based on what's connected, pick 2-3 actions and ACTUALLY DO THEM (don't just describe what you could do). Examples by integration:
 
-- **Stay on top of things** — catching up on email, Slack, tasks, calendar
-- **Get things done faster** — drafting messages, creating docs, updating records
-- **Stay organized** — tracking deals, managing contacts, filing notes
-- **Grow your business** — outreach, campaigns, lead research, analytics
+**Gmail connected:**
+- Pull their recent inbox and surface anything that needs attention — unanswered threads, new inquiries, follow-up opportunities
+- Draft a response to one of them and queue it for approval
 
-Only include categories that apply to their actual connected integrations. Skip anything that isn't connected.
+**Google Calendar connected:**
+- Check their upcoming week and flag scheduling conflicts, back-to-back meetings, or gaps
+- Suggest a prep note for their next meeting
 
-## Step 3: Offer to go deeper
+**Slack connected:**
+- Summarize unread channels and highlight anything relevant to their role
+- Flag messages that mention them or need a response
 
-End with something like: "Want me to try any of these right now? Or tell me what you're working on and I'll figure out how to help."
+**HubSpot/CRM connected:**
+- Pull recent deals or contacts and surface stale leads or overdue follow-ups
+- Cross-reference: find emails in Gmail about a contact in their CRM
 
-## Tone
+**Multiple integrations — cross-reference:**
+- Match calendar meetings with relevant emails or Slack threads
+- Find contacts mentioned in email who aren't in CRM yet
+- Correlate a lead's email activity with their CRM status
+- Surface email threads about upcoming calendar events
 
-Conversational and brief. Don't list every single capability — pick the most useful ones. This should feel like a quick tour, not a manual.`,
+## Step 3: Show the cross-referencing power
+
+This is the key differentiator. After the individual demos, do at least ONE cross-reference action that combines data from multiple integrations. Explain what you did: "I noticed you have a meeting with Sarah tomorrow — I pulled up your last 3 email threads with her and her company's CRM record so you're prepped."
+
+## Step 4: Invite them to go deeper
+
+End with: "That's a taste of what I can do running in the background. Want me to set up a routine for any of this — like a morning briefing or lead monitoring?"
+
+## Rules
+- DO the actions, don't just describe them. Show real data from their accounts.
+- Be specific — use actual names, dates, subjects from their data.
+- If only one integration is connected, focus on depth with that one and suggest what they'd unlock by connecting more.
+- Keep it conversational, not like a product demo script.
+- Write a canvas report summarizing what you found if there's enough substance.`,
 }
 
 // Extend DEFAULT_SKILLS with the document-design skill loaded from disk
@@ -1357,7 +1383,21 @@ agent.onCustomIntegration = async (action, data) => {
       const dir = getCustomMcpDir(name)
       await installCustomMcpDeps(dir)
 
-      // Send credential form to frontend
+      // If credentials were provided, write them and connect immediately
+      if (data.credentials && Object.keys(data.credentials).length > 0) {
+        await writeCustomMcpCredentials(name, data.credentials)
+        const configs = await getCustomMcpConfigs()
+        const config = configs.find(c => c.name === `custom:${name}`)
+        if (config) {
+          await agent.mcpManager.connect([config])
+          embedToolsFromMcp().catch(() => {})
+        }
+        const clients = Array.from(wss!.clients)
+        if (clients.length > 0) sendIntegrations(clients[0] as WebSocket).catch(() => {})
+        return `Integration "${displayName}" created, credentials saved, and connected.`
+      }
+
+      // No credentials provided — prompt the frontend for them
       if (authFields.length > 0) {
         broadcast({ type: 'integration_needs_fields', slug: `custom:${name}`, fields: authFields })
       }
@@ -1541,7 +1581,8 @@ async function processWhatsAppQueue(): Promise<void> {
       prompt,
       (chunk) => { streamed += chunk; broadcast({ type: 'chat_chunk', text: chunk }) },
       (tool, toolLabel) => { broadcast({ type: 'chat_segment_end' }); broadcast({ type: 'tool_start', tool, label: toolLabel }) },
-      undefined,
+      undefined, // fileIds
+      undefined, // voiceMode
       extraContent
     )
     const fullResponse = streamed || response
@@ -2460,13 +2501,12 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
         const doTts = settingsForTts.voice_response && !!getOpenAIProxy()
         // Queue TTS segments so they play in order (each awaits the previous)
         let ttsChain = Promise.resolve()
-        const voicePrompt = text + ' [voice]'
         const voiceAudioTimeout = new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error('Agent chat timed out after 10 minutes')), 10 * 60 * 1000)
         )
         const response = await Promise.race([
           agent.chat(
-            voicePrompt,
+            text,
             (chunk) => {
               streamed += chunk
               currentSegment += chunk
@@ -2481,7 +2521,9 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
               currentSegment = ''
               broadcast({ type: 'chat_segment_end' } as any)
               broadcast({ type: 'tool_start', tool, label } as any)
-            }
+            },
+            undefined, // fileIds
+            true // voiceMode
           ),
           voiceAudioTimeout
         ])
@@ -2540,13 +2582,12 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
         const settingsForTts = await readSettings(DATA_DIR)
         const doTts = settingsForTts.voice_response && !!getOpenAIProxy()
         let ttsChain = Promise.resolve()
-        const voicePrompt = msg.message + ' [voice]'
         const voiceChatTimeout = new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error('Agent chat timed out after 10 minutes')), 10 * 60 * 1000)
         )
         const response = await Promise.race([
           agent.chat(
-            voicePrompt,
+            msg.message,
             (chunk) => {
               streamed += chunk
               currentSegment += chunk
@@ -2560,7 +2601,9 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
               currentSegment = ''
               broadcast({ type: 'chat_segment_end' } as any)
               broadcast({ type: 'tool_start', tool, label } as any)
-            }
+            },
+            undefined, // fileIds
+            true // voiceMode
           ),
           voiceChatTimeout
         ])
@@ -3141,7 +3184,7 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
         const entry = await ingestFile(DATA_DIR, msg.filename, buffer, msg.mimeType, msg.group, (status, fileId) => {
           broadcast({ type: 'transcription_status', fileId, status } as any)
           if (status === 'done') broadcastFilesDebounced()
-        }, !!msg.canvasId /* upsert when saving canvas PDFs — overwrite, don't duplicate */)
+        }, !!msg.canvasId /* upsert when saving canvas PDFs — overwrite, don't duplicate */, msg.canvasId)
         send(ws, { type: 'file_ingested', id: entry.id, filename: entry.filename })
         await sendFilesAndFolders(ws)
         // If this was a canvas PDF save, resolve the pending promise so the agent can attach it
@@ -3302,6 +3345,14 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
       } catch (err: any) {
         console.error('[Server] heartbeat error:', err.message)
         send(ws, { type: 'error', message: `Heartbeat failed: ${err.message}` })
+      }
+    }
+
+    if (msg.type === 'enable_wake_scheduling') {
+      if (process.platform === 'darwin') {
+        const { setupPmsetAccess } = await import('./scheduler.js')
+        const ok = setupPmsetAccess()
+        send(ws, { type: 'wake_scheduling_result', success: ok })
       }
     }
 

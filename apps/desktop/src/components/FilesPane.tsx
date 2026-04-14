@@ -23,6 +23,7 @@ interface FilesPaneProps {
   onSearchFiles: (query: string) => void
   organizing?: boolean
   onAutoOrganize?: () => void
+  onOpenCanvas?: (canvasId: string) => void
 }
 
 type ContextMenu =
@@ -612,6 +613,7 @@ export function FilesPane({
   onSearchFiles,
   organizing,
   onAutoOrganize,
+  onOpenCanvas,
 }: FilesPaneProps) {
   const [currentPath, setCurrentPath] = useState<string>('')
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -1886,6 +1888,21 @@ export function FilesPane({
               {navigator.platform.includes('Mac') ? 'Show in Finder' : 'Show in Explorer'}
             </button>
           )}
+          {contextMenu.kind === 'file' && (() => {
+            const f = files.find(f => f.id === contextMenu.id)
+            return f?.canvasId && onOpenCanvas ? (
+              <button
+                className="w-full flex items-center gap-2.5 px-3 py-2 text-[13px] text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800 transition-colors"
+                onClick={() => {
+                  onOpenCanvas(f.canvasId!)
+                  setContextMenu(null)
+                }}
+              >
+                <LayoutGrid size={13} className="text-neutral-400 dark:text-neutral-500" />
+                Open in Canvas
+              </button>
+            ) : null
+          })()}
           {contextMenu.kind === 'file' && (() => {
             const f = files.find(f => f.id === contextMenu.id)
             return f?.transcript ? (

@@ -341,7 +341,9 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
         auth_fields: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, display_name: { type: 'string' }, description: { type: 'string' }, help_url: { type: 'string' }, help_text: { type: 'string' } }, required: ['name', 'display_name', 'description', 'help_url', 'help_text'] } },
         code: { type: 'string', description: 'Full index.js MCP server source' },
         dependencies: { type: 'object' },
-        icon: { type: 'string', description: 'SVG 32x32, rounded rect bg + white symbol' }
+        icon: { type: 'string', description: 'SVG 32x32, rounded rect bg + white symbol' },
+        domain: { type: 'string', description: 'Service domain for auto-fetching logo, e.g. "notion.so", "airtable.com"' },
+        credentials: { type: 'object', description: 'API keys/credentials to write immediately, e.g. {"RENTCAST_API_KEY": "abc123"}. Keys must match auth_fields names.' }
       },
       required: ['action', 'name']
     }
@@ -506,7 +508,7 @@ Write GFM markdown: headings, bold, italic, links, GFM tables, Mermaid fenced bl
 Rules:
 - Real content only — no {{placeholders}}, TBD, or "fill in later".
 - Do not reference colors or fonts — branding is applied automatically.
-- Use tables for structured data.
+- Use tables for structured data. Don't overdo table cells — use your judgement.
 - Use Mermaid fenced blocks for diagrams and charts. Prefer pie, flowchart, mindmap, quadrantChart, and sequence diagrams. Avoid gantt charts.
 - Charts are supplementary — keep them compact (3-6 data points max). Use surrounding text/tables for detail. Charts should support the narrative, not dominate the page.
 - The chart color palette in order is: 1=blue, 2=green, 3=red, 4=amber, 5=purple, 6=cyan, 7=pink, 8=orange. When referencing colors in legends or labels, use the correct color name for that series position.
@@ -826,7 +828,7 @@ You have web search — use search_tools with query "composio_search web" to fin
 - notify_user — push notification to the user
 - set_status_line — update the status line shown in the app
 - add_done_item — log a completed action
-- create_custom_integration — build new API integrations
+- create_custom_integration — build new API integrations. ALWAYS run skills(action: "execute", name: "integration-builder") FIRST before calling this tool. The skill has the required template and rules — never skip it.
 Every tool listed here is real and operational. Use them rather than saying you cannot.
 For anything outside these built-in tools, use search_tools to discover and call external integration tools.
 </tools>
@@ -854,7 +856,7 @@ Use plain text inside emails and messages — markdown renders literally in Gmai
 Before sending, replying, or modifying anything external, make sure you have the correct information — don't guess.
 When sharing documents via email, attach or link the actual file — never paste the document content into the email body.
 ${memoryFiles.length > 0 ? `\nRecent memories (read relevant ones before responding): ${memoryFiles.join(', ')}.` : ''}
-VOICE: when the message ends with [voice], reply in 1-2 spoken sentences, ≤30 words. Natural English, no markdown or symbols. Don't include "[voice]".
+VOICE: voice mode is handled automatically — no special tags needed.
 Notifications: 2-4 word title, one-sentence body.${onboardingSection}${teamRoster && teamRoster.length > 0 ? `\n\n<team name="${teamName || 'Your Team'}">\nYou are part of a team. Each member has their own AI agent — when you message someone, you're talking to their agent, not the person directly.\nMembers:\n${teamRoster.map((m: any) => `- ${m.name} (${m.role})`).join('\n')}\nUse send_team_message to reach them. Include agent_context with relevant background.\n</team>` : ''}`
 }
 
@@ -894,6 +896,7 @@ export class Agent {
   // Briefings removed — context now provided via search_tools context param
   /** ID of the canvas currently displayed in the frontend */
   public activeCanvasId: string | null = null
+  private _voiceMode = false
   public onSkillsChanged?: () => void
   public onSettingsChanged?: () => void
   public onCalendarChanged?: () => void
@@ -1247,6 +1250,7 @@ export class Agent {
     onChunk?: (text: string) => void,
     onToolCall?: (tool: string, label: string) => void,
     fileIds?: string[],
+    voiceMode?: boolean,
     extraContent?: any[]
   ): Promise<string> {
     this.isProcessing = true
@@ -1283,6 +1287,8 @@ export class Agent {
       this.conversationHistory.push({ role: 'user', content: resolved })
     }
     this.capHistory(this.conversationHistory)
+    this._voiceMode = voiceMode ?? false
+
     const prev = this.runLoopPromise ?? Promise.resolve('')
     const next: Promise<string> = prev
       .catch((err: unknown) => {
@@ -1404,6 +1410,11 @@ ${activeCanvas.code}
 Use patch_canvas with search-and-replace operations to modify specific parts. Each operation needs "find" (exact text from the document above) and "replace" (the replacement). Only use write_canvas if you need to completely rewrite the document from scratch.`
         }
       } catch {}
+    }
+
+    // Voice mode — short spoken responses, no markdown
+    if (this._voiceMode) {
+      systemPrompt += '\n\n[VOICE MODE] This is a voice conversation. Reply in 1-2 spoken sentences, ≤30 words. Natural English, no markdown, no symbols, no lists.'
     }
 
     // Team privacy guard — appended to system prompt for team context only
@@ -2963,9 +2974,20 @@ Rules:
               code?: string
               dependencies?: Record<string, string>
               icon?: string
+              credentials?: Record<string, string>
+            }
+            // Auto-load integration-builder skill if not already loaded
+            if (!this.activeSkillTools.has('create_custom_integration')) {
+              this.activeSkillTools.add('create_custom_integration')
+              const skill = await loadSkill(this.dataDir, 'integration-builder')
+              if (skill) {
+                // Inject skill instructions as context so the agent follows the template
+                result = `[Skill: integration-builder loaded]\n${skill.instructions}\n[/Skill]\n\nFollow these instructions. Now processing your create_custom_integration call...`
+              }
             }
             if (this.onCustomIntegration) {
-              result = await this.onCustomIntegration(input.action, input)
+              const handlerResult = await this.onCustomIntegration(input.action, input)
+              result = result ? `${result}\n\n${handlerResult}` : handlerResult
             } else {
               result = 'Custom integration handler not configured.'
             }

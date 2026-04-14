@@ -631,7 +631,8 @@ export async function ingestFile(
   mimeType: string,
   group?: string,
   onTranscription?: (status: 'started' | 'done', fileId: string) => void,
-  upsert?: boolean
+  upsert?: boolean,
+  canvasId?: string
 ): Promise<FileEntry> {
   const sample = await sampleContent(filename, buffer, mimeType)
   // Skip Haiku summary for media files — use the sampleContent description directly
@@ -684,7 +685,8 @@ export async function ingestFile(
     summary,
     group: safeGroup,
     sizeBytes: buffer.length,
-    embedding
+    embedding,
+    ...(canvasId ? { canvasId } : {})
   }
 
   return withIndexLock(async () => {

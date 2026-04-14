@@ -919,8 +919,8 @@ export function useAgent() {
   const updateAuth = useCallback((method: AuthMethod, credential: string) => send({ type: 'update_auth', method, credential }), [send])
   const verifyAuth = useCallback(() => send({ type: 'verify_auth' }), [send])
 
-  const ingestFile = useCallback((filename: string, mimeType: string, data: string, group?: string) => {
-    send({ type: 'ingest_file', filename, mimeType, data, ...(group ? { group } : {}) })
+  const ingestFile = useCallback((filename: string, mimeType: string, data: string, group?: string, canvasId?: string) => {
+    send({ type: 'ingest_file', filename, mimeType, data, ...(group ? { group } : {}), ...(canvasId ? { canvasId } : {}) })
   }, [send])
 
   const deleteFile = useCallback((id: string) => {
@@ -1089,6 +1089,10 @@ export function useAgent() {
     send({ type: 'trigger_heartbeat' })
   }, [send])
 
+  const enableWakeScheduling = useCallback(() => {
+    send({ type: 'enable_wake_scheduling' } as any)
+  }, [send])
+
   const cancelCodeCell = useCallback((cellId: string) => {
     const cell = codeCellsRef.current[cellId]
     const conversationId = cell?.conversationId || 'main'
@@ -1115,7 +1119,7 @@ export function useAgent() {
     googleCalendarSync, confirmCapabilities, deleteCustomIntegration, toggleTrigger,
     getRelayCredentials, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken,
     sendTeamMessage, getTeamInfo, getTeamHistory, setTriggerPrompt, openCanvas, closeCanvas,
-    getCanvases, cancelCodeCell, exportPdf, dismissQueueToast,
+    getCanvases, cancelCodeCell, exportPdf, dismissQueueToast, enableWakeScheduling,
   }), [
     triggerHeartbeat, updateSkill, deleteSkill, steer, stopAgent,
     handleSetRelayModel, setPendingFields, setModel, chat, approve, reject,
@@ -1127,7 +1131,7 @@ export function useAgent() {
     googleCalendarSync, confirmCapabilities, deleteCustomIntegration, toggleTrigger,
     getRelayCredentials, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken,
     sendTeamMessage, getTeamInfo, getTeamHistory, setTriggerPrompt, openCanvas, closeCanvas,
-    getCanvases, cancelCodeCell, exportPdf, dismissQueueToast,
+    getCanvases, cancelCodeCell, exportPdf, dismissQueueToast, enableWakeScheduling,
   ])
 
   return {

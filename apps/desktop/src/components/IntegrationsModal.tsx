@@ -301,13 +301,37 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
                 </div>
               )}
 
-              {/* Pending fields (shown inline in detail view) */}
+              {/* Pending fields — credential input form */}
               {detailPendingFields && detailPendingFields.fields.length > 0 && (
-                <div className="mb-5 p-4 rounded-xl border border-neutral-100 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-800 flex flex-col items-center gap-2">
-                  <p className="text-[13px] font-medium text-neutral-500 dark:text-neutral-400">Coming soon</p>
-                  <p className="text-[11px] text-neutral-400 dark:text-neutral-500 text-center">
-                    This integration requires API keys. Automated setup is on the roadmap.
-                  </p>
+                <div className="mb-5 p-4 rounded-xl border border-neutral-100 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-800/50 flex flex-col gap-3">
+                  <p className="text-[13px] font-medium text-neutral-700 dark:text-neutral-300">Enter credentials</p>
+                  {detailPendingFields.fields.map(f => (
+                    <div key={f.name}>
+                      <label className="block text-[12px] font-medium text-neutral-500 dark:text-neutral-400 mb-1">{f.displayName}</label>
+                      {f.description && <p className="text-[11px] text-neutral-400 dark:text-neutral-500 mb-1.5">{f.description}</p>}
+                      <input
+                        type="password"
+                        value={fieldValues[f.name] || ''}
+                        onChange={e => setFieldValues(v => ({ ...v, [f.name]: e.target.value }))}
+                        onKeyDown={e => { if (e.key === 'Enter') handleFieldSubmit() }}
+                        placeholder={f.displayName}
+                        className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-[13px] text-neutral-900 dark:text-neutral-100 placeholder:text-neutral-400 dark:placeholder:text-neutral-500 focus:outline-none focus:ring-2 focus:ring-neutral-300 dark:focus:ring-neutral-600"
+                      />
+                      {f.helpUrl && (
+                        <a href={f.helpUrl} target="_blank" rel="noopener noreferrer" className="text-[11px] text-blue-500 hover:underline mt-1 inline-block">
+                          {f.helpText || 'Get your key'}
+                        </a>
+                      )}
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={handleFieldSubmit}
+                    disabled={!detailPendingFields.fields.every(f => fieldValues[f.name]?.trim())}
+                    className="w-full py-2 rounded-lg bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900 text-[13px] font-medium hover:opacity-90 transition-opacity disabled:opacity-40"
+                  >
+                    Connect
+                  </button>
                 </div>
               )}
 
