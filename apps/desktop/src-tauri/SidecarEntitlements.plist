@@ -5,24 +5,26 @@
     <key>com.apple.security.app-sandbox</key>
     <false/>
 
-    <!-- Bun sidecars use JIT compilation -->
     <key>com.apple.security.cs.allow-jit</key>
     <true/>
 
-    <!-- Bun sidecars need unsigned executable memory for V8/JSC -->
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
     <true/>
 
-    <!-- Sidecar binaries bundle their own libraries -->
+    <!-- Sidecars need this to load their bundled libraries at runtime -->
     <key>com.apple.security.cs.disable-library-validation</key>
     <true/>
 
-    <!-- Bun sidecars need executable page protection disabled -->
-    <key>com.apple.security.cs.disable-executable-page-protection</key>
+    <key>com.apple.security.network.client</key>
     <true/>
 
-    <!-- Bun sidecars need dyld environment variable access -->
-    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <key>com.apple.security.network.server</key>
+    <true/>
+
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+
+    <key>com.apple.security.files.user-selected.read-write</key>
     <true/>
 </dict>
 </plist>

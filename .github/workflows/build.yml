@@ -34,6 +34,7 @@ jobs:
     env:
       BINARIES: apps/desktop/src-tauri/binaries
       ENTITLEMENTS: apps/desktop/src-tauri/Entitlements.plist
+      SIDECAR_ENTITLEMENTS: apps/desktop/src-tauri/SidecarEntitlements.plist
       NODE_VERSION: v22.12.0
 
     steps:
@@ -136,7 +137,7 @@ jobs:
             echo "Signing $(basename "$bin")"
             codesign --remove-signature "$bin" 2>/dev/null || true
             codesign --force --options runtime \
-              --entitlements "$ENTITLEMENTS" \
+              --entitlements "$SIDECAR_ENTITLEMENTS" \
               --sign "$APPLE_SIGNING_IDENTITY" "$bin"
             codesign --verify --strict "$bin"
           done
