@@ -6,8 +6,7 @@ import OpenAI from 'openai'
 import type { MCPManager } from './mcp-manager.js'
 import { recordUsage } from './usage-tracker.js'
 import { streamOpenAI } from './openai-provider.js'
-
-const KIMI_MODEL = 'kimi-k2.5'
+import { KIMI_MODEL } from './constants.js'
 const MAX_TOOL_LOOPS = 20
 
 // Tools sub-agents are NOT allowed to use — anything with external side effects
@@ -24,13 +23,13 @@ const BLOCKED_TOOLS = new Set([
 ])
 
 // External tool actions that imply write/mutation — sub-agents can only read
-const WRITE_ACTION_PATTERNS = [
+export const WRITE_ACTION_PATTERNS = [
   'send', 'create', 'delete', 'remove', 'update', 'modify', 'post', 'put', 'patch',
   'archive', 'trash', 'draft', 'reply', 'forward', 'schedule', 'cancel', 'invite',
 ]
 
 // Memory actions sub-agents CAN use (read + write to memory, but not delete)
-const ALLOWED_MEMORY_ACTIONS = new Set(['search', 'read', 'write', 'append', 'edit', 'list'])
+export const ALLOWED_MEMORY_ACTIONS = new Set(['search', 'read', 'write', 'append', 'edit', 'list'])
 
 // Schedule actions — read only
 const ALLOWED_SCHEDULE_ACTIONS = new Set(['list'])

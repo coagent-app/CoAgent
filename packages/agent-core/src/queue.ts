@@ -36,12 +36,12 @@ export class ApprovalQueue {
     this.scheduleDailyPurge()
   }
 
-  /** Clear all done items */
+  /** Remove done items older than 7 days (keeps recent history visible to users) */
   private purgeDone(): void {
-    if (this.done.length > 0) {
-      this.done = []
-      this.save()
-    }
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000
+    const before = this.done.length
+    this.done = this.done.filter(d => new Date(d.completedAt).getTime() >= cutoff)
+    if (this.done.length !== before) this.save()
   }
 
   /** Schedule purge at 3am every night */
@@ -73,14 +73,15 @@ export class ApprovalQueue {
   }
 
   private flushSave(): void {
-    const items = JSON.stringify(this.items, null, 2)
-    const done = JSON.stringify(this.done, null, 2)
     const tmpQ = this.queuePath + '.tmp'
     const tmpD = this.donePath + '.tmp'
-    // Acquire the lock so concurrent flush calls are serialised. Using
-    // withLock ensures the two atomic writes (queue + done) complete as a
-    // unit before the next writer begins.
+    // Acquire the lock so concurrent flush calls are serialised. The snapshot
+    // of this.items / this.done is taken *inside* the lock so we always write
+    // the latest in-memory state rather than a stale copy captured before we
+    // queued up behind a previous writer.
     withLock(async () => {
+      const items = JSON.stringify(this.items, null, 2)
+      const done = JSON.stringify(this.done, null, 2)
       await writeFile(tmpQ, items)
       await rename(tmpQ, this.queuePath)
       await writeFile(tmpD, done)

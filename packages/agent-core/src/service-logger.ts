@@ -8,9 +8,7 @@ import { getRelayConfig } from './auth.js'
 import { streamOpenAI } from './openai-provider.js'
 import { embed } from './tool-embeddings.js'
 import { connect, Table } from '@lancedb/lancedb'
-
-const KIMI_MODEL = 'kimi-k2.5'
-const MOONSHOT_BASE_URL = 'https://api.moonshot.cn/v1'
+import { KIMI_MODEL, MOONSHOT_BASE_URL, EMBED_DIM } from './constants.js'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -36,7 +34,6 @@ function logPath(dataDir: string): string {
 
 // ── LanceDB for log embeddings ──────────────────────────────────────────────
 
-const EMBED_DIM = 512
 let logTable: Table | null = null
 let logDbDir: string | null = null
 

@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils'
 import { hexToRgba } from '@/lib/colors'
 import type { AgentSettings, DayName, Autonomy, RelayUsage, UsageSummary, AdminUser } from '@coagent/shared'
 
-type SettingsTab = 'general' | 'model' | 'brand' | 'usage' | 'account' | 'admin'
+type SettingsTab = 'general' | 'model' | 'brand' | 'team' | 'usage' | 'account' | 'admin'
 
 /** Controlled input that syncs with server value and auto-saves on change with debounce */
 function useDebouncedField(serverValue: string, onSave: (val: string) => void, delay = 600) {
@@ -65,6 +65,10 @@ interface SettingsPaneProps {
   tier?: string
   stripeConnectId?: string
   lastBackupDate?: string
+  // Team tab props
+  teamInfo?: any
+  onTeamChanged?: () => void
+  relayToken?: string
 }
 
 // --- Shared UI ---
@@ -1034,16 +1038,293 @@ function AccountTab({
   )
 }
 
+// --- Tab: Team ---
+
+function TeamTab({ teamInfo, relayUrl, relayToken, userName, onTeamChanged }: {
+  teamInfo: any
+  relayUrl: string
+  relayToken?: string
+  userName?: string
+  onTeamChanged: () => void
+}) {
+  const [mode, setMode] = useState<'idle' | 'create' | 'join'>('idle')
+  const [teamName, setTeamName] = useState('')
+  const [inviteCode, setInviteCode] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [createdInvite, setCreatedInvite] = useState('')
+  const [copied, setCopied] = useState(false)
+
+  const token = relayToken || localStorage.getItem('coagent-token')
+  const url = relayUrl.replace(/\/$/, '')
+
+  async function handleCreate() {
+    if (!token || !teamName.trim()) return
+    setLoading(true)
+    setError('')
+    try {
+      const res = await fetch(`${url}/team/create`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: teamName.trim(), memberName: userName || undefined }),
+      })
+      const data = await res.json() as any
+      if (!res.ok) { setError(data.error || 'Failed to create team'); return }
+      setCreatedInvite(data.inviteCode)
+      onTeamChanged()
+    } catch { setError('Network error') }
+    finally { setLoading(false) }
+  }
+
+  async function handleJoin() {
+    if (!token || !inviteCode.trim()) return
+    setLoading(true)
+    setError('')
+    try {
+      const res = await fetch(`${url}/team/join`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ inviteCode: inviteCode.trim(), memberName: userName || undefined }),
+      })
+      const data = await res.json() as any
+      if (!res.ok) { setError(data.error || 'Invalid invite code'); return }
+      onTeamChanged()
+      setMode('idle')
+    } catch { setError('Network error') }
+    finally { setLoading(false) }
+  }
+
+  function handleCopyInvite() {
+    navigator.clipboard.writeText(createdInvite).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
+
+  // Already in a team — show info + invite management
+  if (teamInfo) {
+    const isOwner = teamInfo.members?.some((m: any) => String(m.userId) === String(teamInfo.selfUserId) && m.role === 'owner')
+
+    async function handleGenerateInvite() {
+      if (!token) return
+      setLoading(true)
+      setError('')
+      try {
+        const res = await fetch(`${url}/team/invite`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        })
+        const data = await res.json() as any
+        if (!res.ok) { setError(data.error || 'Failed to generate invite'); return }
+        setCreatedInvite(data.inviteCode)
+      } catch { setError('Network error') }
+      finally { setLoading(false) }
+    }
+
+    return (
+      <>
+        <SectionHeader eyebrow="Team" title={teamInfo.name || 'Your Team'} />
+        <div className="mb-4 p-4 rounded-xl border border-neutral-100 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900">
+          <div className="flex items-center gap-2 mb-3">
+            <div className="w-8 h-8 rounded-lg bg-neutral-200 dark:bg-neutral-700 flex items-center justify-center text-[14px] font-bold text-neutral-600 dark:text-neutral-300">
+              {(teamInfo.name || 'T')[0].toUpperCase()}
+            </div>
+            <div>
+              <p className="text-[13.5px] font-semibold text-neutral-900 dark:text-neutral-100">{teamInfo.name}</p>
+              <p className="text-[11px] text-neutral-400 dark:text-neutral-500">
+                {teamInfo.members?.length || 0} {(teamInfo.members?.length || 0) === 1 ? 'member' : 'members'}
+              </p>
+            </div>
+          </div>
+          {teamInfo.members?.map((m: any) => (
+            <div key={m.userId} className="flex items-center gap-2.5 py-1.5">
+              <div className="w-6 h-6 rounded-full bg-neutral-200 dark:bg-neutral-700 flex items-center justify-center text-[11px] font-medium text-neutral-600 dark:text-neutral-300">
+                {(m.name || '?')[0].toUpperCase()}
+              </div>
+              <span className="text-[12.5px] text-neutral-700 dark:text-neutral-300">{m.name}</span>
+              {m.role === 'owner' && <span className="text-[10px] px-1.5 py-0.5 rounded bg-neutral-200 dark:bg-neutral-700 text-neutral-500 dark:text-neutral-400 font-medium">Owner</span>}
+              {String(m.userId) === String(teamInfo.selfUserId) && <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-900/40 text-blue-600 dark:text-blue-400 font-medium">You</span>}
+            </div>
+          ))}
+        </div>
+
+        {/* Invite section */}
+        {isOwner && (
+          <div className="mb-4">
+            <p className="text-[13px] font-semibold text-neutral-900 dark:text-neutral-100 mb-2">Invite members</p>
+            {createdInvite ? (
+              <div className="flex items-center gap-2">
+                <Input
+                  readOnly
+                  value={createdInvite}
+                  className="text-[13px] font-mono dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100"
+                />
+                <button
+                  type="button"
+                  onClick={handleCopyInvite}
+                  className="px-3 py-2 rounded-lg text-[12.5px] font-semibold bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900 hover:opacity-90 transition-opacity whitespace-nowrap"
+                >
+                  {copied ? 'Copied' : 'Copy'}
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={handleGenerateInvite}
+                disabled={loading}
+                className="px-4 py-2 rounded-lg text-[13px] font-semibold bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900 hover:opacity-90 transition-opacity disabled:opacity-50"
+              >
+                {loading ? 'Generating...' : 'Generate invite code'}
+              </button>
+            )}
+            {error && <p className="text-red-500 text-[12px] mt-2">{error}</p>}
+          </div>
+        )}
+
+        <p className="text-[11.5px] text-neutral-400 dark:text-neutral-500">
+          Open the Team tab in the sidebar to chat with your team.
+        </p>
+      </>
+    )
+  }
+
+  // Show created invite code
+  if (createdInvite) {
+    return (
+      <>
+        <SectionHeader eyebrow="Team" title="Team created" />
+        <p className="text-[13px] text-neutral-600 dark:text-neutral-400 mb-4">
+          Share this invite code with your team members so they can join.
+        </p>
+        <div className="flex items-center gap-2 mb-4">
+          <Input
+            readOnly
+            value={createdInvite}
+            className="text-[13.5px] font-mono dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100"
+          />
+          <button
+            type="button"
+            onClick={handleCopyInvite}
+            className="px-4 py-2 rounded-lg text-[13px] font-semibold bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900 hover:opacity-90 transition-opacity whitespace-nowrap"
+          >
+            {copied ? 'Copied' : 'Copy'}
+          </button>
+        </div>
+        <p className="text-[11.5px] text-neutral-400 dark:text-neutral-500">
+          You can find your team in the sidebar.
+        </p>
+      </>
+    )
+  }
+
+  return (
+    <>
+      <SectionHeader eyebrow="Collaborate" title="Teams" />
+      <p className="text-[13px] text-neutral-600 dark:text-neutral-400 mb-5">
+        Create a team to collaborate with others. Each member gets their own AI agent that can communicate with the rest of the team.
+      </p>
+
+      {mode === 'idle' && (
+        <div className="flex flex-col gap-3">
+          <button
+            type="button"
+            onClick={() => { setMode('create'); setError('') }}
+            className="w-full text-left px-4 py-3.5 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 hover:border-neutral-400 dark:hover:border-neutral-600 transition-colors"
+          >
+            <p className="text-[13.5px] font-semibold text-neutral-900 dark:text-neutral-100">Create a team</p>
+            <p className="text-[12.5px] text-neutral-500 dark:text-neutral-400 mt-0.5">Start a new team and invite members</p>
+          </button>
+          <button
+            type="button"
+            onClick={() => { setMode('join'); setError('') }}
+            className="w-full text-left px-4 py-3.5 rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 hover:border-neutral-400 dark:hover:border-neutral-600 transition-colors"
+          >
+            <p className="text-[13.5px] font-semibold text-neutral-900 dark:text-neutral-100">Join a team</p>
+            <p className="text-[12.5px] text-neutral-500 dark:text-neutral-400 mt-0.5">Enter an invite code from your team lead</p>
+          </button>
+        </div>
+      )}
+
+      {mode === 'create' && (
+        <div className="space-y-4">
+          <FieldRow label="Team name">
+            <Input
+              autoFocus
+              className="text-[13.5px] dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500"
+              placeholder="e.g. Acme Agency"
+              value={teamName}
+              onChange={e => setTeamName(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && handleCreate()}
+            />
+          </FieldRow>
+          {error && <p className="text-[12px] text-red-500">{error}</p>}
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={handleCreate}
+              disabled={loading || !teamName.trim()}
+              className="px-4 py-2 rounded-lg text-[13px] font-semibold bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900 hover:opacity-90 transition-opacity disabled:opacity-50"
+            >
+              {loading ? 'Creating...' : 'Create Team'}
+            </button>
+            <button
+              type="button"
+              onClick={() => { setMode('idle'); setError('') }}
+              className="px-4 py-2 rounded-lg text-[13px] font-medium text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200 transition-colors"
+            >
+              Back
+            </button>
+          </div>
+        </div>
+      )}
+
+      {mode === 'join' && (
+        <div className="space-y-4">
+          <FieldRow label="Invite code">
+            <Input
+              autoFocus
+              className="text-[13.5px] font-mono dark:bg-neutral-800 dark:border-neutral-700 dark:text-neutral-100 dark:placeholder-neutral-500"
+              placeholder="Paste invite code"
+              value={inviteCode}
+              onChange={e => setInviteCode(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && handleJoin()}
+            />
+          </FieldRow>
+          {error && <p className="text-[12px] text-red-500">{error}</p>}
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={handleJoin}
+              disabled={loading || !inviteCode.trim()}
+              className="px-4 py-2 rounded-lg text-[13px] font-semibold bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900 hover:opacity-90 transition-opacity disabled:opacity-50"
+            >
+              {loading ? 'Joining...' : 'Join Team'}
+            </button>
+            <button
+              type="button"
+              onClick={() => { setMode('idle'); setError('') }}
+              className="px-4 py-2 rounded-lg text-[13px] font-medium text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200 transition-colors"
+            >
+              Back
+            </button>
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
+
 // --- Main ---
 
 const BASE_TABS: { id: SettingsTab; label: string }[] = [
   { id: 'general', label: 'General' },
-  { id: 'model', label: 'Model' },
   { id: 'brand', label: 'Brand' },
+  { id: 'team', label: 'Team' },
   { id: 'account', label: 'Account' },
 ]
 
-export function SettingsPane({ settings, onUpdate, onSetModel, usage, onRefreshUsage, isAdmin, adminUsers, adminNewToken, onAdminCreateToken, onAdminListTokens, onAdminRevokeToken, onClearAdminNewToken, relayActive, onActivateRelay, onSetupPayouts, onBackup, onRestore, referralCode, commissionRate, tier, stripeConnectId, lastBackupDate }: SettingsPaneProps) {
+export function SettingsPane({ settings, onUpdate, onSetModel, usage, onRefreshUsage, isAdmin, adminUsers, adminNewToken, onAdminCreateToken, onAdminListTokens, onAdminRevokeToken, onClearAdminNewToken, relayActive, onActivateRelay, onSetupPayouts, onBackup, onRestore, referralCode, commissionRate, tier, stripeConnectId, lastBackupDate, teamInfo, onTeamChanged, relayToken }: SettingsPaneProps) {
   const [tab, setTab] = useState<SettingsTab>('general')
   const TABS = isAdmin ? [...BASE_TABS, { id: 'admin' as SettingsTab, label: 'Admin' }] : BASE_TABS
 
@@ -1082,8 +1363,8 @@ export function SettingsPane({ settings, onUpdate, onSetModel, usage, onRefreshU
       <ScrollArea className="flex-1">
         <div className="px-8 py-6 max-w-xl">
           {tab === 'general' && <GeneralTab settings={settings} onUpdate={onUpdate} />}
-          {tab === 'model' && <ModelTab settings={settings} onSetModel={onSetModel} />}
-          {tab === 'brand' && <BrandTab settings={settings} onUpdate={onUpdate} />}
+{tab === 'brand' && <BrandTab settings={settings} onUpdate={onUpdate} />}
+          {tab === 'team' && <TeamTab teamInfo={teamInfo} relayUrl={(import.meta as any).env.VITE_RELAY_URL || ''} relayToken={relayToken} userName={settings?.name} onTeamChanged={onTeamChanged ?? (() => {})} />}
           {tab === 'usage' && <UsageTab usage={usage ?? null} onRefresh={onRefreshUsage} />}
           {tab === 'account' && (
             <AccountTab

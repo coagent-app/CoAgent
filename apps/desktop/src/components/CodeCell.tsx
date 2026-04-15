@@ -94,7 +94,7 @@ export function CodeCell({ cell, onCancel }: CodeCellProps) {
 
       {/* stdout (always visible while running and after done) */}
       {cell.stdout && (
-        <pre className="px-3 py-2 border-t border-neutral-100 dark:border-neutral-800 text-[12px] leading-relaxed text-neutral-700 dark:text-neutral-300 overflow-x-auto font-mono whitespace-pre-wrap">
+        <pre className="px-3 py-2 border-t border-neutral-100 dark:border-neutral-800 text-[12px] leading-relaxed text-neutral-700 dark:text-neutral-300 overflow-x-auto overflow-y-auto max-h-[200px] font-mono whitespace-pre-wrap">
           {cell.stdout.trimEnd()}
         </pre>
       )}
@@ -128,7 +128,7 @@ export function CodeCell({ cell, onCancel }: CodeCellProps) {
             {cell.errorType}: {cell.errorMessage}
           </div>
           {cell.traceback && (
-            <pre className="mt-1.5 text-[11px] text-red-600/80 dark:text-red-400/80 font-mono whitespace-pre-wrap overflow-x-auto">
+            <pre className="mt-1.5 text-[11px] text-red-600/80 dark:text-red-400/80 font-mono whitespace-pre-wrap overflow-x-auto overflow-y-auto max-h-[200px]">
               {cell.traceback}
             </pre>
           )}

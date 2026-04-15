@@ -1,12 +1,15 @@
 /**
- * Simulates a team agent for testing.
+ * AI-powered team agent for testing.
+ *
+ * Runs as "Alex" — a real AI agent that responds to team messages
+ * using the relay's LLM proxy. Maintains conversation history and
+ * responds contextually.
  *
  * Usage:
  *   RELAY_URL=https://your-relay.example.com \
  *   RELAY_TOKEN=<token> \
- *   USER_ID=agent2 \
- *   USER_NAME=Agent2 \
- *   USER_ROLE=Sales \
+ *   USER_ID=<userId> \
+ *   USER_NAME=Alex \
  *   npx tsx scripts/test-team-agent.ts
  */
 
@@ -16,13 +19,33 @@ const RELAY_URL = (process.env.RELAY_URL || '').replace(/\/$/, '')
 const RELAY_TOKEN = process.env.RELAY_TOKEN
 if (!RELAY_URL || !RELAY_TOKEN) { console.error('Set RELAY_URL and RELAY_TOKEN env vars'); process.exit(1) }
 const USER_ID = process.env.USER_ID || 'agent2'
-const USER_NAME = process.env.USER_NAME || 'Agent2'
-const USER_ROLE = process.env.USER_ROLE || 'Sales'
+const USER_NAME = process.env.USER_NAME || 'Alex'
+const USER_ROLE = process.env.USER_ROLE || 'Agent'
 
-if (!RELAY_TOKEN) {
-  console.error('[Test Agent] RELAY_TOKEN is required')
-  process.exit(1)
-}
+const SYSTEM_PROMPT = `You are ${USER_NAME}'s AI agent on a team collaboration platform called CoAgent. You represent ${USER_NAME} and act on their behalf.
+
+## Your identity
+- You are ${USER_NAME}'s personal AI assistant
+- You respond as "${USER_NAME}'s Agent" in team conversations
+- You are helpful, professional, and concise
+
+## Guidelines
+- Keep responses brief and conversational (1-3 sentences usually)
+- Be friendly but professional
+- You can help with questions, planning, brainstorming, and coordination
+- Never share personal details about ${USER_NAME} (address, phone, financial info, etc.)
+- If asked to do something you can't (like access files or run code), be upfront about it
+- When someone says hi or greets you, respond naturally
+- Match the tone of the conversation — casual if they're casual, professional if they're formal
+
+## Context
+- You're on a team called "CoAgent Team"
+- Messages tagged to you mean someone wants your help specifically
+- You can see recent conversation history for context`
+
+// Conversation history for context
+const conversationHistory: { role: 'user' | 'assistant'; content: string }[] = []
+const MAX_HISTORY = 20
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -60,99 +83,97 @@ async function sendMessage(
     body: JSON.stringify(msg)
   })
   const toLabel = to ? ` → ${Array.isArray(to) ? to.join(', ') : to}` : ' (broadcast)'
-  console.log(`[Send${toLabel}] "${visible}" — ${res.status}`)
+  console.log(`[Send${toLabel}] "${visible.slice(0, 80)}${visible.length > 80 ? '...' : ''}" — ${res.status}`)
 }
 
-function formatFrom(m: TeamMessage): string {
-  return m.from.isAgent ? `${m.from.name}'s Agent` : m.from.name
-}
+async function generateResponse(fromName: string, message: string): Promise<string> {
+  // Add the incoming message to history
+  conversationHistory.push({ role: 'user', content: `${fromName}: ${message}` })
+  if (conversationHistory.length > MAX_HISTORY) {
+    conversationHistory.splice(0, conversationHistory.length - MAX_HISTORY)
+  }
 
-function formatTo(m: TeamMessage): string {
-  if (!m.to) return ''
-  return ` → ${Array.isArray(m.to) ? m.to.join(', ') : m.to}`
+  try {
+    const res = await fetch(`${RELAY_URL}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${RELAY_TOKEN}`,
+        'Content-Type': 'application/json',
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 300,
+        system: SYSTEM_PROMPT,
+        messages: conversationHistory,
+      }),
+    })
+
+    if (!res.ok) {
+      const err = await res.text()
+      console.error(`[AI] LLM call failed: ${res.status} ${err}`)
+      return "Sorry, I'm having trouble processing that right now. Can you try again?"
+    }
+
+    const data = await res.json() as { content: { type: string; text: string }[] }
+    const reply = data.content?.[0]?.text || "I didn't get a response. Can you try again?"
+
+    // Add our response to history
+    conversationHistory.push({ role: 'assistant', content: reply })
+    if (conversationHistory.length > MAX_HISTORY) {
+      conversationHistory.splice(0, conversationHistory.length - MAX_HISTORY)
+    }
+
+    return reply
+  } catch (err) {
+    console.error('[AI] Error:', err)
+    return "Sorry, I ran into an error. Let me try again in a moment."
+  }
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  console.log(`\n[Test Agent] Starting as ${USER_NAME} (${USER_ROLE})`)
-  console.log(`[Test Agent] Relay: ${RELAY_URL}`)
-  console.log(`[Test Agent] User ID: ${USER_ID}\n`)
+  console.log(`\n[${USER_NAME}'s Agent] Starting...`)
+  console.log(`[${USER_NAME}'s Agent] Relay: ${RELAY_URL}`)
+  console.log(`[${USER_NAME}'s Agent] User ID: ${USER_ID}\n`)
 
-  // Fetch team roster — bail if not in a team
+  // Fetch team roster
   const rosterRes = await fetch(`${RELAY_URL}/team/roster`, {
     headers: { 'Authorization': `Bearer ${RELAY_TOKEN}` }
   })
   if (!rosterRes.ok) {
-    console.error(`[Test Agent] Roster fetch failed: ${rosterRes.status} ${await rosterRes.text()}`)
+    console.error(`[${USER_NAME}'s Agent] Roster fetch failed: ${rosterRes.status} ${await rosterRes.text()}`)
     process.exit(1)
   }
 
-  const roster = await rosterRes.json() as { teamId?: string; name?: string; members?: { name: string; role: string }[] }
-  if (!roster.teamId) {
-    console.error('[Test Agent] This token is not in a team. Join a team first.')
+  const roster = await rosterRes.json() as { team?: { teamId?: string; name?: string }; members?: { name: string; role: string; userId: string }[] }
+  if (!roster.team?.teamId) {
+    console.error(`[${USER_NAME}'s Agent] Not in a team. Join a team first.`)
     process.exit(1)
   }
 
-  const teamId = roster.teamId
+  const teamId = roster.team.teamId
   const memberList = roster.members?.map(m => `${m.name} (${m.role})`).join(', ') ?? 'none'
-  console.log(`[Test Agent] Team: ${roster.name} (${roster.members?.length ?? 0} members)`)
-  console.log(`[Test Agent] Members: ${memberList}\n`)
+  console.log(`[${USER_NAME}'s Agent] Team: ${roster.team.name}`)
+  console.log(`[${USER_NAME}'s Agent] Members: ${memberList}\n`)
 
-  // Build WebSocket URL — mirrors TeamClient.openConnection()
+  // Connect WebSocket
   const wsBase = RELAY_URL.replace(/^https?:\/\//, (p) => p === 'https://' ? 'wss://' : 'ws://')
   const wsUrl = `${wsBase}/team/ws?token=${RELAY_TOKEN}&userId=${USER_ID}`
-
   const ws = new WebSocket(wsUrl)
 
+  // Ping to keep alive
+  let pingInterval: ReturnType<typeof setInterval>
+
   ws.onopen = () => {
-    console.log('[Test Agent] WebSocket connected\n')
-    printHelp()
-
-    process.stdin.setEncoding('utf-8')
-    process.stdin.on('data', async (data: string) => {
-      const line = data.trim()
-      if (!line) return
-
-      if (line === 'quit' || line === 'exit') {
-        ws.close()
-        process.exit(0)
-      }
-
-      if (line === 'help') {
-        printHelp()
-        return
-      }
-
-      if (line === 'roster') {
-        console.log(`[Roster] ${memberList}`)
-        return
-      }
-
-      if (line.startsWith('send ')) {
-        await sendMessage(teamId, line.slice(5))
-      } else if (line.startsWith('tag ')) {
-        // tag <userId-agent> <message...>
-        const parts = line.slice(4).split(' ')
-        const target = parts[0]
-        const msg = parts.slice(1).join(' ')
-        if (!msg) { console.log('[Usage] tag <userId-agent> <message>'); return }
-        await sendMessage(teamId, msg, `Sent by ${USER_NAME}'s test agent`, target)
-      } else if (line.startsWith('notify ')) {
-        // notify <userId> <message...>
-        const parts = line.slice(7).split(' ')
-        const target = parts[0]
-        const msg = parts.slice(1).join(' ')
-        if (!msg) { console.log('[Usage] notify <userId> <message>'); return }
-        await sendMessage(teamId, msg, '', target)
-      } else {
-        // Bare input defaults to broadcast
-        await sendMessage(teamId, line)
-      }
-    })
+    console.log(`[${USER_NAME}'s Agent] Connected and listening for messages\n`)
+    pingInterval = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) ws.send('ping')
+    }, 30000)
   }
 
-  ws.onmessage = (event: MessageEvent) => {
+  ws.onmessage = async (event: MessageEvent) => {
     const raw = typeof event.data === 'string' ? event.data : event.data.toString()
     if (raw === 'pong') return
 
@@ -160,58 +181,47 @@ async function main(): Promise<void> {
     try {
       parsed = JSON.parse(raw)
     } catch {
-      console.warn('[Test Agent] Non-JSON message:', raw)
       return
     }
 
     if (parsed.type !== 'team_message' || !parsed.message) return
 
     const m = parsed.message
-    const time = new Date(m.timestamp).toLocaleTimeString()
-    const fromLabel = formatFrom(m)
-    const toLabel = formatTo(m)
+    const time = new Date(m.timestamp).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+    const fromLabel = m.from.isAgent ? `${m.from.name}'s Agent` : m.from.name
 
-    console.log(`\n[${time}] ${fromLabel} (${m.from.role})${toLabel}:`)
-    console.log(`  ${m.visible}`)
-    if (m.agentContext) console.log(`  [context: ${m.agentContext}]`)
+    // Don't respond to our own messages or other agents (prevent loops)
+    if (String(m.from.userId) === String(USER_ID)) return
+    if (m.from.isAgent) return
 
-    // Auto-respond when tagged as our agent (mirrors TeamClient.handleMessage logic)
+    console.log(`[${time}] ${fromLabel}: ${m.visible}`)
+
+    // Check if we're tagged
     const myAgentTag = `${USER_ID}-agent`
     const isTagged = m.to === myAgentTag || (Array.isArray(m.to) && m.to.includes(myAgentTag))
 
     if (isTagged) {
-      console.log('[Test Agent] Tagged — auto-responding in 2s...')
-      setTimeout(() => {
-        sendMessage(
-          teamId,
-          `${USER_NAME}'s agent here — got your message! This is an auto-response from the test script.`,
-          `Auto-response from test agent for ${USER_NAME}`,
-          null
-        ).catch(console.error)
-      }, 2000)
+      console.log(`[${USER_NAME}'s Agent] Thinking...`)
+
+      const reply = await generateResponse(m.from.name, m.visible)
+      console.log(`[${USER_NAME}'s Agent] → ${reply.slice(0, 100)}${reply.length > 100 ? '...' : ''}`)
+
+      // Reply to the human user directly (not their agent, to avoid triggering auto-responses)
+      const replyTo = m.from.isAgent ? m.from.userId : String(m.from.userId)
+      await sendMessage(teamId, reply, '', replyTo)
     }
   }
 
-  ws.onerror = (err: Event) => console.error('[Test Agent] WebSocket error:', err)
+  ws.onerror = (err: Event) => console.error(`[${USER_NAME}'s Agent] WebSocket error:`, err)
 
   ws.onclose = () => {
-    console.log('[Test Agent] Disconnected')
-    process.exit(0)
+    if (pingInterval) clearInterval(pingInterval)
+    console.log(`[${USER_NAME}'s Agent] Disconnected — reconnecting in 3s...`)
+    setTimeout(() => main(), 3000)
   }
 }
 
-function printHelp(): void {
-  console.log('Commands:')
-  console.log('  <message>                   broadcast to team')
-  console.log('  send <message>              broadcast to team (explicit)')
-  console.log('  tag <userId-agent> <msg>    tag a specific agent  e.g. tag sam-agent hello')
-  console.log('  notify <userId> <msg>       notify a human user   e.g. notify sam urgent!')
-  console.log('  roster                      list team members')
-  console.log('  help                        show this message')
-  console.log('  quit                        disconnect\n')
-}
-
 main().catch((err) => {
-  console.error('[Test Agent] Fatal:', err)
+  console.error(`[${USER_NAME}'s Agent] Fatal:`, err)
   process.exit(1)
 })

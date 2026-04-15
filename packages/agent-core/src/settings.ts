@@ -2,23 +2,20 @@
 import { readFile, writeFile, rename, mkdir } from 'fs/promises'
 import { join } from 'path'
 import type { AgentSettings, Autonomy, DayName } from '@coagent/shared'
-import { getEdition } from './edition.js'
-
 export type { AgentSettings, Autonomy, DayName }
 
 const DAY_NAMES: DayName[] = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']
 
 function getDefaultSettings(): AgentSettings {
-  const { preset } = getEdition()
   return {
     name: '',
     email: '',
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Chicago',
-    role: preset.defaultRole,
+    role: '',
     what_you_do: '',
-    active_hours: { ...preset.activeHours },
-    active_days: [...preset.activeDays],
-    autonomy: preset.defaultAutonomy,
+    active_hours: { start: 7, end: 24 },
+    active_days: ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] as DayName[],
+    autonomy: 'ask_first' as Autonomy,
     heartbeat_interval: 0,
     powerModel: 'kimi-k2.5',
     voice_enabled: false,

@@ -6,8 +6,7 @@ import OpenAI from 'openai'
 import type { MCPManager } from './mcp-manager.js'
 import { recordUsage } from './usage-tracker.js'
 import { streamOpenAI } from './openai-provider.js'
-
-const KIMI_MODEL = 'kimi-k2.5'
+import { KIMI_MODEL } from './constants.js'
 const MAX_TOOL_LOOPS = 5
 
 const SEARCH_SYSTEM = `You are a research sub-agent. Cast a wide net and bring back as much raw data as possible. Another AI will deduplicate and filter — you just gather.

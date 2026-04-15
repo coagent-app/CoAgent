@@ -404,7 +404,10 @@ export function useAgent() {
               if (cell.anchorMessageId) {
                 const idx = newMessages.findIndex(m => m.id === cell.anchorMessageId)
                 if (idx >= 0) {
-                  next[id] = { ...cell, anchorIndex: idx + 1 }
+                  // Never move a cell forward — only backward (trim) or stay put.
+                  // Moving forward would push user messages above the cell.
+                  const newAnchor = Math.min(idx + 1, cell.anchorIndex)
+                  next[id] = { ...cell, anchorIndex: newAnchor }
                   continue
                 }
               }
@@ -417,12 +420,13 @@ export function useAgent() {
                   idx = newMessages.findIndex(m => m.content.startsWith(prefix) || target.startsWith(m.content.slice(0, 200)))
                 }
                 if (idx >= 0) {
-                  // Backfill the ID for future re-anchors
-                  next[id] = { ...cell, anchorIndex: idx + 1, anchorMessageId: newMessages[idx].id }
+                  const newAnchor = Math.min(idx + 1, cell.anchorIndex)
+                  next[id] = { ...cell, anchorIndex: newAnchor, anchorMessageId: newMessages[idx].id }
                   continue
                 }
               }
-              // 3. No match — anchor message was trimmed from history, drop the cell
+              // 3. No match — keep at current position clamped to array length
+              next[id] = { ...cell, anchorIndex: Math.min(cell.anchorIndex, newMessages.length) }
               continue
             }
             return next
@@ -1049,14 +1053,15 @@ export function useAgent() {
 
     send({ type: 'team_send', message, to } as any)
     // Optimistic echo — relay doesn't send back to sender
+    const myUserId = teamInfo?.selfUserId ? String(teamInfo.selfUserId) : 'default'
     setTeamMessages(prev => [...prev, {
       id: `msg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       teamId: '',
       timestamp: new Date().toISOString(),
-      from: { userId: 'default', name: settings?.name || 'Me', role: '', isAgent: false },
+      from: { userId: myUserId, name: settings?.name || 'Me', role: '', isAgent: false },
       visible: message, agentContext: '', to: to || null, attachments: []
     }])
-  }, [send, settings?.name])
+  }, [send, settings?.name, teamInfo?.selfUserId])
 
   const getTeamInfo = useCallback(() => {
     send({ type: 'get_team_info' } as any)

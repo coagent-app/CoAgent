@@ -5,8 +5,8 @@ import { createHash } from 'crypto'
 import { connect, Table } from '@lancedb/lancedb'
 import { getOpenAIProxy } from './auth.js'
 import { recordUsageGlobal } from './usage-tracker.js'
+import { EMBED_DIM, EMBEDDING_MODEL } from './constants.js'
 
-const EMBED_DIM = 512
 const EMBED_CACHE_MAX = 2000
 
 /** In-memory LRU cache: SHA-256(text) → embedding vector */
@@ -33,6 +33,7 @@ export function resetToolEmbeddingsState(): void {
   paramTable = null
   cachedToolHash = null
   dataDir = null
+  embedCache.clear()
 }
 
 export async function embed(texts: string[]): Promise<number[][]> {
@@ -49,7 +50,7 @@ export async function embed(texts: string[]): Promise<number[][]> {
     const res = await fetch(`${proxy.baseUrl}/v1/embeddings`, {
       method: 'POST',
       headers: { Authorization: proxy.authHeader, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ input: missTexts, model: 'text-embedding-3-small', dimensions: EMBED_DIM })
+      body: JSON.stringify({ input: missTexts, model: EMBEDDING_MODEL, dimensions: EMBED_DIM })
     })
     if (!res.ok) throw new Error(`Embedding error: ${res.status}`)
     const data = await res.json() as { data: { embedding: number[] }[]; usage?: { total_tokens?: number } }
@@ -57,7 +58,7 @@ export async function embed(texts: string[]): Promise<number[][]> {
     // Track embedding usage — total_tokens from API response
     if (data.usage?.total_tokens) {
       recordUsageGlobal({
-        category: 'embedding', model: 'text-embedding-3-small', embeddingTokens: data.usage.total_tokens,
+        category: 'embedding', model: EMBEDDING_MODEL, embeddingTokens: data.usage.total_tokens,
         inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0,
         timestamp: new Date().toISOString(),
       }).catch(err => console.error('[Embed] Usage tracking failed:', err.message))
@@ -170,7 +171,11 @@ async function loadToolHash(): Promise<void> {
   if (!dataDir) return
   try {
     cachedToolHash = await readFile(join(dataDir, 'tool-embeddings-db', 'hash.txt'), 'utf-8')
-  } catch { /* no hash file yet */ }
+  } catch (err: any) {
+    if (err?.code !== 'ENOENT') {
+      console.warn('[ToolEmbed] Could not read hash file (will re-embed):', err?.message ?? err)
+    }
+  }
 }
 
 async function saveToolHash(hash: string): Promise<void> {
@@ -296,15 +301,20 @@ export async function purgeTools(names: string[]): Promise<void> {
 
   try {
     await Promise.all([t.optimize(), p.optimize()])
-  } catch { /* non-critical */ }
+  } catch (err) {
+    console.warn('[ToolEmbed] optimize() after purge failed (non-critical):', (err as Error).message)
+  }
 
   // Invalidate hash so next embedTools call re-checks
   cachedToolHash = null
   console.log(`[ToolEmbed] Purged ${names.length} tools from index`)
 }
 
-/** Score helper: L2 squared distance → cosine similarity */
-function distToScore(d: number): number { return 1 - (d ?? 999) / 2 }
+/** Score helper: L2 squared distance → cosine similarity. Returns 0 when distance is undefined/null. */
+function distToScore(d: number | undefined | null): number {
+  if (d == null) return 0
+  return 1 - d / 2
+}
 
 /**
  * Combined tool + schema search in ONE embed API call.
@@ -469,7 +479,7 @@ export async function searchToolsAndSchema(
 
       if (matched.length > 0) return { matches: matched, schemas }
     } catch (err) {
-      console.warn('[ToolEmbed] Search failed, falling back to keywords:', (err as Error).message)
+      console.warn(`[ToolEmbed] Search failed (${(err as Error)?.name ?? 'Error'}), falling back to keywords: ${(err as Error).message}`)
     }
   }
 
@@ -497,9 +507,3 @@ export async function searchToolsAndSchema(
   return { matches, schemas: [] }
 }
 
-/** Clear caches (e.g. when integrations change) */
-export function clearToolEmbeddings(): void {
-  table = null
-  paramTable = null
-  cachedToolHash = null
-}

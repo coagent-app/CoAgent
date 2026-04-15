@@ -29,6 +29,7 @@ interface TeamInfo {
   teamId: string
   name: string
   members: TeamMember[]
+  selfUserId?: string
 }
 
 const STATUS_WORDS = [
@@ -44,11 +45,12 @@ interface TeamPaneProps {
   onSendMessage: (message: string, to?: string) => void
   relayUrl?: string
   relayToken?: string
+  userName?: string
 }
 
 type Channel = { type: 'main' } | { type: 'dm'; userId: string; name: string } | { type: 'notes' }
 
-export function TeamPane({ team, messages, teamStatus, onSendMessage, relayUrl, relayToken }: TeamPaneProps) {
+export function TeamPane({ team, messages, teamStatus, onSendMessage, relayUrl, relayToken, userName }: TeamPaneProps) {
   const [input, setInput] = useState('')
   const [channel, setChannel] = useState<Channel>({ type: 'main' })
   const [mentionQuery, setMentionQuery] = useState<string | null>(null)
@@ -97,10 +99,27 @@ export function TeamPane({ team, messages, teamStatus, onSendMessage, relayUrl, 
   }, [relayUrl, relayToken, notesDraft])
 
   const [statusWord, setStatusWord] = useState(0)
+  const [waitingForReply, setWaitingForReply] = useState(false)
+  const lastSentCountRef = useRef(0)
+
+  // Show typing indicator when we send a DM, hide when a response arrives
+  useEffect(() => {
+    if (!waitingForReply || channel.type !== 'dm') return
+    // Check if a new message from the other party arrived
+    const dmId = channel.userId
+    const dmBase = dmId.replace('-agent', '')
+    const hasReply = messages.some(m =>
+      (String(m.from.userId) === dmBase || String(m.from.userId) === dmId) &&
+      new Date(m.timestamp).getTime() > lastSentCountRef.current
+    )
+    if (hasReply) setWaitingForReply(false)
+  }, [messages, waitingForReply, channel])
+
+  const isTyping = waitingForReply || !!teamStatus
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, teamStatus])
+  }, [messages, isTyping])
 
   useEffect(() => {
     requestAnimationFrame(() => {
@@ -110,24 +129,24 @@ export function TeamPane({ team, messages, teamStatus, onSendMessage, relayUrl, 
 
   // Rotate status words while processing
   useEffect(() => {
-    if (!teamStatus) return
+    if (!isTyping) return
     setStatusWord(Math.floor(Math.random() * STATUS_WORDS.length))
     const interval = setInterval(() => {
       setStatusWord(prev => (prev + 1) % STATUS_WORDS.length)
     }, 2500)
     return () => clearInterval(interval)
-  }, [teamStatus])
+  }, [isTyping])
 
   // Build mention targets from team members: each person + their agent
   const mentionTargets = useMemo(() => {
     if (!team) return []
     const targets: { id: string; label: string; isAgent: boolean }[] = []
     for (const m of team.members) {
-      if (m.userId === 'default') continue
+      if (m.userId === 'default' || (team?.selfUserId && String(m.userId) === String(team.selfUserId))) continue
       targets.push({ id: `${m.userId}-agent`, label: `${m.name}'s Agent`, isAgent: true })
     }
     return targets
-  }, [team])
+  }, [team, userName])
 
   const filteredMentions = useMemo(() => {
     if (mentionQuery === null) return []
@@ -178,6 +197,10 @@ export function TeamPane({ team, messages, teamStatus, onSendMessage, relayUrl, 
     onSendMessage(input.trim(), to as any)
     setInput('')
     setMentionQuery(null)
+    if (channel.type === 'dm') {
+      lastSentCountRef.current = Date.now()
+      setWaitingForReply(true)
+    }
   }, [input, channel, mentionTargets, onSendMessage])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -202,14 +225,19 @@ export function TeamPane({ team, messages, teamStatus, onSendMessage, relayUrl, 
     }
     const dmId = channel.userId
     const dmBase = dmId.replace('-agent', '')
+    const myId = team?.selfUserId ? String(team.selfUserId) : 'default'
+    const myAgentId = `${myId}-agent`
     return messages.filter(m => {
       const to = m.to
-      if (!to) return false
+      const fromMe = String(m.from.userId) === myId
+      const fromThem = String(m.from.userId) === dmBase || String(m.from.userId) === dmId
+      if (!to) {
+        // Show broadcasts from the DM partner in this conversation
+        return fromThem
+      }
       const targets = Array.isArray(to) ? to : [to]
-      const fromMe = m.from.userId === 'default'
-      const fromThem = m.from.userId === dmBase || m.from.userId === dmId
-      const toMe = targets.some(t => t === 'default' || t === 'default-agent' || t === dmBase || t === dmId)
-      const toThem = targets.some(t => t === dmId || t === dmBase || t.toLowerCase().includes(dmBase))
+      const toMe = targets.some(t => t === myId || t === myAgentId)
+      const toThem = targets.some(t => t === dmId || t === dmBase)
       return (fromMe && toThem) || (fromThem && toMe)
     })
   }, [messages, channel])
@@ -272,7 +300,7 @@ export function TeamPane({ team, messages, teamStatus, onSendMessage, relayUrl, 
 
         <ScrollArea className="flex-1">
           <div className="flex flex-col gap-0.5">
-            {team.members.filter(m => m.userId !== 'default').map(m => (
+            {team.members.filter(m => m.userId !== 'default' && (!team.selfUserId || String(m.userId) !== String(team.selfUserId))).map(m => (
               <button
                 key={m.userId}
                 onClick={() => setChannel({ type: 'dm', userId: `${m.userId}-agent`, name: `${m.name}'s Agent` })}
@@ -399,7 +427,8 @@ export function TeamPane({ team, messages, teamStatus, onSendMessage, relayUrl, 
             )}
 
             {channelMessages.map((msg) => {
-              const isOwnMessage = msg.from.userId === 'default'
+              const myId = team?.selfUserId ? String(team.selfUserId) : 'default'
+              const isOwnMessage = String(msg.from.userId) === myId
               return (
                 <div key={msg.id} className={cn('flex', isOwnMessage ? 'justify-end' : 'justify-start')}>
                   <div className={isOwnMessage ? 'max-w-[560px]' : 'max-w-[620px]'}>
@@ -459,7 +488,7 @@ export function TeamPane({ team, messages, teamStatus, onSendMessage, relayUrl, 
               )
             })}
 
-            {teamStatus && channel.type === 'dm' && (
+            {isTyping && channel.type === 'dm' && (
               <div className="flex justify-start">
                 <div className="flex items-center gap-2 px-2 py-3">
                   <span className="w-1.5 h-1.5 bg-neutral-400 dark:bg-neutral-500 rounded-full animate-bounce [animation-delay:0ms]" />

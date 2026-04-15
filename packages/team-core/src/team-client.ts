@@ -22,6 +22,7 @@ export class TeamClient {
   private roster: TeamMember[] = []
   public teamId: string | null = null
   public teamName: string | null = null
+  public selfUserId: string | null = null
   public get userId(): string { return this.options.userId }
 
   constructor(options: TeamClientOptions) {
@@ -68,6 +69,7 @@ export class TeamClient {
         this.teamId = team.teamId
         this.teamName = team.name || null
         this.roster = data.members || []
+        this.selfUserId = data.selfUserId || null
         console.log(`[Team] Connected to team "${this.teamName}" with ${this.roster.length} members`)
       }
     } catch (err) {

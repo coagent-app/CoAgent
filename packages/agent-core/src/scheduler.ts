@@ -10,6 +10,38 @@ import { readSettings, isActiveNow } from './settings.js'
 import { extractInsights } from './service-logger.js'
 import { pruneOldEntries } from './usage-tracker.js'
 
+// ── Persisted event-ID sets (brief + recap deduplication) ───────────────────
+// These are stored to disk so that a restart does not cause duplicate briefs
+// or recaps for events that were already processed in a previous session.
+
+function eventIdsPath(dataDir: string): string {
+  return join(dataDir, 'scheduler-event-ids.json')
+}
+
+interface PersistedEventIds {
+  briefed: string[]
+  recapped: string[]
+}
+
+function loadEventIds(dataDir: string): PersistedEventIds {
+  try {
+    return JSON.parse(readFileSync(eventIdsPath(dataDir), 'utf8'))
+  } catch {
+    return { briefed: [], recapped: [] }
+  }
+}
+
+function saveEventIds(dataDir: string, briefed: Set<string>, recapped: Set<string>): void {
+  try {
+    writeFileSync(
+      eventIdsPath(dataDir),
+      JSON.stringify({ briefed: [...briefed], recapped: [...recapped] }, null, 2)
+    )
+  } catch (err: any) {
+    console.error('[Scheduler] Failed to persist event IDs:', err.message)
+  }
+}
+
 // ── Platform wake scheduling ────────────────────────────────────────────────
 // Instead of preventing sleep 24/7, we let the machine sleep and schedule it
 // to wake briefly for heartbeats.
@@ -444,7 +476,9 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
   // ── Meeting brief timer: fires N minutes before calendar events ─────────────
 
   let briefTimer: ReturnType<typeof setTimeout> | null = null
-  const briefedEvents = new Set<string>()
+  const persistedIds = loadEventIds(dataDir)
+  const briefedEvents = new Set<string>(persistedIds.briefed)
+  const recappedEvents = new Set<string>(persistedIds.recapped)
 
   async function fireMeetingBrief(): Promise<void> {
     const settings = await readSettings(dataDir)
@@ -465,6 +499,7 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
       // Fire if we're within 2 minutes of the brief time (tolerance for sleep/wake drift)
       if (now >= briefTime && now < startTime && (now - briefTime) < 2 * 60 * 1000) {
         briefedEvents.add(event.id)
+        saveEventIds(dataDir, briefedEvents, recappedEvents)
         const minsUntil = Math.round((startTime - now) / 60000)
         console.log(`[Scheduler] Meeting brief firing: "${event.label}" in ${minsUntil}min`)
         callbacks?.onTodoStream?.('start', { task: `Meeting brief: ${event.label}`, due: event.start })
@@ -538,7 +573,6 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
   // ── Meeting recap timer: fires N minutes after calendar events end ──────────
 
   let recapTimer: ReturnType<typeof setTimeout> | null = null
-  const recappedEvents = new Set<string>()
 
   async function fireMeetingRecap(): Promise<void> {
     const settings = await readSettings(dataDir)
@@ -557,6 +591,7 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
       // Fire if we're within 2 minutes of the recap time (tolerance for sleep/wake drift)
       if (now >= recapTime && (now - recapTime) < 2 * 60 * 1000) {
         recappedEvents.add(event.id)
+        saveEventIds(dataDir, briefedEvents, recappedEvents)
         const minsAgo = Math.round((now - endTime) / 60000)
         console.log(`[Scheduler] Meeting recap firing: "${event.label}" ended ${minsAgo}min ago`)
         callbacks?.onTodoStream?.('start', { task: `Meeting recap: ${event.label}`, due: event.end })

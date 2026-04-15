@@ -6,45 +6,9 @@ import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Separator } from '@/components/ui/separator'
 import { cn } from '@/lib/utils'
+import { BADGE_VARIANTS_COMBINED } from '@/lib/badge-variants'
+import { markdownComponents } from '@/lib/markdown-components'
 import type { ApprovalItem } from '@coagent/shared'
-
-const BADGE_VARIANTS: Record<string, string> = {
-  contract: 'bg-violet-50 text-violet-700 border-violet-100 dark:bg-violet-950 dark:text-violet-300 dark:border-violet-800',
-  analysis: 'bg-emerald-50 text-emerald-700 border-emerald-100 dark:bg-emerald-950 dark:text-emerald-300 dark:border-emerald-800',
-  cma:      'bg-amber-50 text-amber-700 border-amber-100 dark:bg-amber-950 dark:text-amber-300 dark:border-amber-800',
-  email:    'bg-sky-50 text-sky-700 border-sky-100 dark:bg-sky-950 dark:text-sky-300 dark:border-sky-800',
-  task:     'bg-violet-50 text-violet-700 border-violet-100 dark:bg-violet-950 dark:text-violet-300 dark:border-violet-800',
-  message:  'bg-sky-50 text-sky-700 border-sky-100 dark:bg-sky-950 dark:text-sky-300 dark:border-sky-800',
-  request:  'bg-emerald-50 text-emerald-700 border-emerald-100 dark:bg-emerald-950 dark:text-emerald-300 dark:border-emerald-800',
-  other:    'bg-neutral-100 text-neutral-600 border-neutral-200 dark:bg-neutral-800 dark:text-neutral-300 dark:border-neutral-700',
-}
-
-const markdownComponents: React.ComponentProps<typeof ReactMarkdown>['components'] = {
-  h1: ({ children }) => <h1 style={{ fontSize: '1em', fontWeight: 700, marginBottom: '0.4em', marginTop: '0.75em' }}>{children}</h1>,
-  h2: ({ children }) => <h2 style={{ fontSize: '1em', fontWeight: 600, marginBottom: '0.35em', marginTop: '0.75em' }}>{children}</h2>,
-  h3: ({ children }) => <h3 style={{ fontSize: '1em', fontWeight: 600, marginBottom: '0.3em', marginTop: '0.6em' }}>{children}</h3>,
-  p: ({ children }) => <p style={{ marginBottom: '0.5em', lineHeight: '1.6' }}>{children}</p>,
-  strong: ({ children }) => <strong style={{ fontWeight: 600 }}>{children}</strong>,
-  em: ({ children }) => <em style={{ fontStyle: 'italic' }}>{children}</em>,
-  ul: ({ children }) => <ul style={{ paddingLeft: '1.25em', marginBottom: '0.5em', listStyleType: 'disc' }}>{children}</ul>,
-  ol: ({ children }) => <ol style={{ paddingLeft: '1.25em', marginBottom: '0.5em', listStyleType: 'decimal' }}>{children}</ol>,
-  li: ({ children }) => <li style={{ marginBottom: '0.2em', lineHeight: '1.6' }}>{children}</li>,
-  hr: ({}) => <hr className="border-none border-t border-neutral-200 dark:border-neutral-700 my-3" />,
-  code: ({ children, className }) => {
-    const isBlock = className?.startsWith('language-')
-    if (isBlock) {
-      return (
-        <pre className="bg-neutral-100 dark:bg-neutral-800 rounded px-3 py-2.5 overflow-x-auto mb-2" style={{ fontFamily: 'monospace', fontSize: '0.85em' }}>
-          <code>{children}</code>
-        </pre>
-      )
-    }
-    return <code className="bg-neutral-100 dark:bg-neutral-800 rounded px-1" style={{ fontFamily: 'monospace', fontSize: '0.85em', padding: '0 0.3em' }}>{children}</code>
-  },
-  blockquote: ({ children }) => (
-    <blockquote className="border-l-[3px] border-neutral-300 dark:border-neutral-600 pl-3 text-neutral-500 dark:text-neutral-400 my-2">{children}</blockquote>
-  ),
-}
 
 interface QueueDrawerProps {
   open: boolean
@@ -149,7 +113,7 @@ export function QueueDrawer({ open, queue, onClose, onApprove, onReject, onAppro
                       <span
                         className={cn(
                           'inline-block text-[10px] font-semibold uppercase tracking-wider border rounded px-1.5 py-0.5 mt-0.5 flex-shrink-0',
-                          BADGE_VARIANTS[item.type] ?? BADGE_VARIANTS.other
+                          BADGE_VARIANTS_COMBINED[item.type] ?? BADGE_VARIANTS_COMBINED.other
                         )}
                       >
                         {item.type}

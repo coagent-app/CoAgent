@@ -4,17 +4,14 @@ import { readFile, writeFile, mkdir, unlink, rename, readdir, rm, rmdir } from '
 import { existsSync } from 'fs'
 import { join, extname, basename, dirname } from 'path'
 import type { FileEntry } from '@coagent/shared'
-import { getRelayConfig } from './auth.js'
+import { getRelayConfig, getOpenAIProxy } from './auth.js'
 import { recordUsage, recordUsageGlobal } from './usage-tracker.js'
 import { transcribeFile } from './transcribe.js'
+import { KIMI_MODEL, MOONSHOT_BASE_URL, EMBED_DIM, EMBEDDING_MODEL } from './constants.js'
 
 const INDEX_FILE = 'file-index.json'
 const FILES_DIR = 'files'
 const FOLDER_ORDER_FILE = 'folder-order.json'
-import { getOpenAIProxy } from './auth.js'
-
-const KIMI_MODEL = 'kimi-k2.5'
-const MOONSHOT_BASE_URL = 'https://api.moonshot.cn/v1'
 
 function createAnthropicClient(): Anthropic {
   const relay = getRelayConfig()
@@ -296,7 +293,7 @@ async function embedText(text: string): Promise<number[]> {
   const res = await fetch(`${proxy.baseUrl}/v1/embeddings`, {
     method: 'POST',
     headers: { Authorization: proxy.authHeader, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ input: [text], model: 'text-embedding-3-small', dimensions: 512 })
+    body: JSON.stringify({ input: [text], model: EMBEDDING_MODEL, dimensions: EMBED_DIM })
   })
   if (!res.ok) throw new Error(`Embedding error: ${res.status} ${res.statusText}`)
   const data = await res.json() as { data: { embedding: number[] }[]; usage?: { total_tokens?: number } }
@@ -305,7 +302,7 @@ async function embedText(text: string): Promise<number[]> {
   // Track embedding usage — total_tokens from API response
   if (data.usage?.total_tokens) {
     recordUsageGlobal({
-      category: 'embedding', model: 'text-embedding-3-small', embeddingTokens: data.usage.total_tokens,
+      category: 'embedding', model: EMBEDDING_MODEL, embeddingTokens: data.usage.total_tokens,
       inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0,
       timestamp: new Date().toISOString(),
     }).catch(err => console.error('[FileStore] Embed usage tracking failed:', err.message))

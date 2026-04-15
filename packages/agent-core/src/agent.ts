@@ -18,20 +18,19 @@ import { logToolCall, extractIntegration, searchToolLogs } from './service-logge
 import { recordUsage } from './usage-tracker.js'
 import { getRelayConfig } from './auth.js'
 import { runResearch } from './research.js'
-import { runSubAgents, spawnSubAgents, messageSubAgent, getRunningAgents, type SubAgentTask, type SubAgentProgress, type SubAgentHandle } from './sub-agent.js'
+import { runSubAgents, spawnSubAgents, messageSubAgent, getRunningAgents, ALLOWED_MEMORY_ACTIONS, WRITE_ACTION_PATTERNS, type SubAgentTask, type SubAgentProgress, type SubAgentHandle } from './sub-agent.js'
 import { streamOpenAI } from './openai-provider.js'
 import {
   createCanvas,
   updateCanvas,
   readCanvas,
 } from './canvas-store.js'
+import { MOONSHOT_BASE_URL } from './constants.js'
 
 /** Returns true if the model should use the Anthropic SDK */
 function isAnthropicModel(model: string): boolean {
   return model.startsWith('claude-')
 }
-
-const MOONSHOT_BASE_URL = 'https://api.moonshot.ai/v1'
 
 const HISTORY_CAP = 200          // hard in-memory cap — trim from front when exceeded
 
@@ -731,16 +730,12 @@ const HEARTBEAT_BLOCKED_PATTERNS = [
   'ADD_', 'SUBSCRIBE_', 'UNSUBSCRIBE_', 'CANCEL_', 'APPROVE_', 'REJECT_',
 ]
 
-// Tools gated behind a skill — only included when the skill has been activated
-const SKILL_GATED_TOOLS = new Set<string>()
-
 // Team-only tools — excluded when agent has no team connection
 const TEAM_ONLY_TOOLS = new Set(['send_team_message', 'read_team', 'team_notes'])
 
 export function getInternalTools(context: ToolContext, activeSkillTools?: Set<string>, hasTeam?: boolean): Anthropic.Tool[] {
   if (context === 'heartbeat') return INTERNAL_TOOLS.filter(t => HEARTBEAT_TOOLS.has(t.name))
   return INTERNAL_TOOLS.filter(t => {
-    if (SKILL_GATED_TOOLS.has(t.name) && !activeSkillTools?.has(t.name)) return false
     if (TEAM_ONLY_TOOLS.has(t.name) && !hasTeam) return false
     return true
   })
@@ -881,6 +876,10 @@ export class Agent {
   private activeStream: { abort: () => void } | null = null
   private stopped = false
   private stopping = false
+  /** Per-invocation stop tokens — each runLoop iteration owns one symbol; stop() only signals the foreground token */
+  private stoppedLoops = new Set<symbol>()
+  /** Token for the currently active foreground (chat/webhook/trigger) run loop */
+  private foregroundLoopToken: symbol | null = null
   /** Running background sub-agents */
   private backgroundAgents: SubAgentHandle[] = []
   /** Callback when a background sub-agent completes */
@@ -963,6 +962,11 @@ export class Agent {
 
   stop(): void {
     this.stopped = true
+    // Also signal the per-loop token so only the foreground loop sees the stop,
+    // leaving the heartbeat loop unaffected.
+    if (this.foregroundLoopToken) {
+      this.stoppedLoops.add(this.foregroundLoopToken)
+    }
     if (this.activeStream) {
       this.activeStream.abort()
       console.log('[Agent] Stop requested')
@@ -1512,12 +1516,18 @@ Rules:
     // Dedup search_tools calls within this turn — same query+schema returns cached result
     const searchCache = new Map<string, { matches: Anthropic.Tool[]; schemas: { tool: string; params: string[]; score: number }[] }>()
 
-    this.stopped = false
-
+    // Per-invocation stop token — isolates stop signals so stopping one loop doesn't affect others.
+    // Foreground loops (chat/webhook/trigger) register their token so stop() can target them directly.
+    // The heartbeat loop gets its own token that stop() never touches.
+    const loopToken = Symbol()
+    const isForeground = context !== 'heartbeat' && context !== 'team'
+    if (isForeground) {
+      this.foregroundLoopToken = loopToken
+    }
 
     while (true) {
       // Check for stop
-      if (this.stopped) {
+      if (this.stoppedLoops.has(loopToken)) {
         this.stopping = true
         console.log('[Agent] Stopped by user')
         this.activeStream = null
@@ -1555,6 +1565,10 @@ Rules:
         // Persist so cancelled results survive process restart
         await saveHistory()
         this.stopping = false
+        this.stoppedLoops.delete(loopToken)
+        if (isForeground && this.foregroundLoopToken === loopToken) {
+          this.foregroundLoopToken = null
+        }
         return lastText || '_Stopped._'
       }
 
@@ -1583,6 +1597,10 @@ Rules:
         console.error('[Agent] Max turns (200) reached — breaking to prevent infinite loop')
         onChunk?.('\n\n_Reached maximum turn limit. Please start a new message._')
         await saveHistory()
+        this.stoppedLoops.delete(loopToken)
+        if (isForeground && this.foregroundLoopToken === loopToken) {
+          this.foregroundLoopToken = null
+        }
         return lastText || '_Reached maximum turn limit._'
       }
       const t0 = Date.now()
@@ -2448,7 +2466,7 @@ Rules:
                     if (!code.includes(op.find)) {
                       warnings.push(`Op ${i + 1}: text not found: "${op.find.slice(0, 80)}${op.find.length > 80 ? '…' : ''}"`)
                     } else {
-                      code = code.replace(op.find, op.replace)
+                      code = code.replace(op.find, () => op.replace)
                     }
                   }
                   const updated = await updateCanvas(this.dataDir, canvasId, {
@@ -2526,6 +2544,9 @@ Rules:
                 }
                 if (name === 'memory') {
                   const action = inp.action as string
+                  if (!ALLOWED_MEMORY_ACTIONS.has(action)) {
+                    return `Error: sub-agents cannot perform memory action "${action}".`
+                  }
                   const memMcp = MEMORY_MCP_MAP[action]
                   if (!memMcp) return `Unknown memory action: ${action}`
                   return await this.mcpManager.callTool('memory', memMcp, mapMemoryParams(action, inp))
@@ -2616,9 +2637,9 @@ Rules:
                   const extToolName = (inp.tool_name as string) || ''
                   const extParams = (inp.parameters as Record<string, unknown>) || {}
                   // Block write actions — sub-agents are read-only for external integrations
-                  const WRITE_PATTERNS = ['send', 'create', 'delete', 'remove', 'update', 'modify', 'post', 'put', 'patch', 'archive', 'trash', 'draft', 'reply', 'forward', 'cancel', 'invite']
+                  // WRITE_ACTION_PATTERNS is the single source of truth, imported from sub-agent.ts
                   const upper = extToolName.toUpperCase()
-                  if (WRITE_PATTERNS.some(p => upper.includes(p.toUpperCase()))) {
+                  if (WRITE_ACTION_PATTERNS.some(p => upper.includes(p.toUpperCase()))) {
                     return `Error: sub-agents cannot perform write actions. "${extToolName}" is a write operation. Only read/search/list/get operations are allowed.`
                   }
                   const { serverMap } = await this.mcpManager.getAllTools()
@@ -3034,6 +3055,11 @@ Rules:
     }
 
     this.stopping = false
+    // Clean up the per-invocation stop token on normal exit
+    this.stoppedLoops.delete(loopToken)
+    if (isForeground && this.foregroundLoopToken === loopToken) {
+      this.foregroundLoopToken = null
+    }
     return finalText
   }
 

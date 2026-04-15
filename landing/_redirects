@@ -1,3 +1,0 @@
-# Cloudflare Pages redirects
-# All /join/* routes serve index.html for client-side routing
-/join/*  /index.html  200

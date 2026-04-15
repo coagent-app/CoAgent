@@ -53,7 +53,7 @@ function ConnectingOverlay({ visible }: { visible: boolean }) {
 }
 
 export default function App() {
-  const { queue, done, newQueueIds, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, hydrated, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, error, chat, approve, reject, editQueueItem, dismissQueueToast, connectIntegration, disconnectIntegration, settings, updateSettings, authStatus, updateAuth, verifyAuth, files, folders, searchResults, transcribingFiles, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, relayActive, relayModel, setRelayModel, relayUsage, activateRelay, refreshRelayStatus, pendingFields, setPendingFields, setModel, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, triggerPrompt, setTriggerPrompt, canvas, canvasVisible, canvasStreaming, canvasStreamingCode, openCanvas, closeCanvas, canvasesList, getCanvases, codeCells, codeCellOrder, cancelCodeCell, exportPdf, enableWakeScheduling } = useAgent()
+  const { queue, done, newQueueIds, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, hydrated, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, error, chat, approve, reject, editQueueItem, dismissQueueToast, connectIntegration, disconnectIntegration, settings, updateSettings, authStatus, updateAuth, verifyAuth, files, folders, searchResults, transcribingFiles, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, relayActive, relayModel, setRelayModel, relayUsage, activateRelay, refreshRelayStatus, pendingFields, setPendingFields, setModel, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, getTeamInfo, triggerPrompt, setTriggerPrompt, canvas, canvasVisible, canvasStreaming, canvasStreamingCode, openCanvas, closeCanvas, canvasesList, getCanvases, codeCells, codeCellOrder, cancelCodeCell, exportPdf, enableWakeScheduling } = useAgent()
   const { dark, toggle: toggleTheme } = useTheme()
   const updater = useUpdater()
   const [view, setView] = useState<View>('chat')
@@ -345,6 +345,9 @@ export default function App() {
             tier={partnerStats?.tier === 'founder' ? 'Founder' : partnerStats?.tier === 'early_access' ? 'Early Access' : partnerStats?.tier === 'standard' ? 'Standard' : undefined}
             stripeConnectId={partnerStats?.stripeConnectId}
             onSetupPayouts={handleSetupPayouts}
+            teamInfo={teamInfo}
+            onTeamChanged={getTeamInfo}
+            relayToken={relayCredentials?.token}
           />
         )}
 
@@ -364,6 +367,7 @@ export default function App() {
             onSendMessage={sendTeamMessage}
             relayUrl={relayCredentials?.relayUrl}
             relayToken={relayCredentials?.token}
+            userName={settings?.name}
           />
         )}
 

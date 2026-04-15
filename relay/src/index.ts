@@ -8,7 +8,6 @@ export interface Env {
   TUNNEL_SECRET: string
   ANTHROPIC_API_KEY: string
   OPENAI_API_KEY: string
-  OPENROUTER_API_KEY: string  // legacy — kept for backward compat
   MOONSHOT_API_KEY: string
   COMPOSIO_API_KEY: string
   STRIPE_WEBHOOK_SECRET: string
@@ -17,7 +16,6 @@ export interface Env {
   EXA_WEBHOOK_SECRET?: string       // Shared secret for Exa monitor webhooks — optional, warns if unset
   GOOGLE_TTS_API_KEY?: string       // Google Cloud TTS — cheaper than OpenAI ($4/1M vs $15/1M)
   GOOGLE_CLIENT_ID?: string         // Google OAuth — served to desktop apps on activation
-  GOOGLE_CLIENT_SECRET?: string
   TOKENS: KVNamespace
   BACKUPS: R2Bucket
   USER_SESSION: DurableObjectNamespace
@@ -45,7 +43,7 @@ interface UsageData {
 }
 
 interface TokenData {
-  userId: number
+  userId: string
   stripeCustomerId: string
   model: string
   usage: UsageData
@@ -235,8 +233,13 @@ async function stripeApiCall(env: Env, method: string, path: string, body?: Reco
 
 // ── Per-token rate limiting ─────────────────────────────────────────────────
 // In-memory sliding window — resets when the Worker isolate recycles (~30s idle).
-// This is a first line of defense, not bulletproof. For persistent limits,
-// use Cloudflare Rate Limiting rules on the zone.
+// LIMITATION: Because each Cloudflare Worker isolate has its own memory space,
+// counters are NOT shared across isolates. Under load, multiple isolates run
+// simultaneously and each starts with a fresh counter, allowing well above the
+// configured limits through in aggregate. This is a first line of defence only.
+// TODO: Replace with Durable Objects or KV-backed counters (keyed by token +
+// category with a TTL equal to windowMs) to get correct cross-isolate limiting.
+// Until then, rely on Cloudflare Zone-level Rate Limiting rules as the hard cap.
 
 const RATE_LIMITS = {
   api: { windowMs: 60_000, max: 120 },       // 120 chat/completion requests/min
@@ -655,7 +658,7 @@ async function proxyComposio(request: Request, env: Env, token: string, data: To
   const forwardSearch = new URLSearchParams(url.search)
   if (request.method === 'GET' || request.method === 'HEAD') {
     forwardSearch.delete('user_ids')
-    forwardSearch.append('user_ids', String(data.userId))
+    forwardSearch.append('user_ids', data.userId)
   }
   const searchString = forwardSearch.toString() ? `?${forwardSearch.toString()}` : ''
 
@@ -677,7 +680,7 @@ async function proxyComposio(request: Request, env: Env, token: string, data: To
     if (bodyText) {
       try {
         const bodyJson = JSON.parse(bodyText)
-        bodyJson.user_id = String(data.userId)
+        bodyJson.user_id = data.userId
         bodyText = JSON.stringify(bodyJson)
       } catch {
         // Not JSON — pass through as-is
@@ -796,10 +799,8 @@ async function handleStripeWebhook(request: Request, env: Env): Promise<Response
       const token = generateToken()
       const referralCode = generateReferralCode()
 
-      // Assign a numeric user ID (atomic increment via KV)
-      const prevId = parseInt(await env.TOKENS.get('_next_user_id') || '0')
-      const userId = prevId + 1
-      await env.TOKENS.put('_next_user_id', String(userId))
+      // Assign a unique user ID using UUID (collision-free, no coordination needed)
+      const userId = crypto.randomUUID()
 
       // Determine tier from the Price ID
       const { tier, rate } = tierFromSession(session)
@@ -848,7 +849,7 @@ async function handleStripeWebhook(request: Request, env: Env): Promise<Response
 
           // Force-close the user's WebSocket connections
           try {
-            const doId = env.USER_SESSION.idFromName(String(revokedData.userId))
+            const doId = env.USER_SESSION.idFromName(revokedData.userId)
             const stub = env.USER_SESSION.get(doId)
             await stub.fetch(new Request('https://internal/revoke', { method: 'POST' }))
           } catch (e) {
@@ -1680,7 +1681,7 @@ export default {
       const teamRateCheck = checkRateLimit(token, 'general')
       if (teamRateCheck) return teamRateCheck
       const tokenData = authResult.data
-      const userId = String((tokenData as any).userId)
+      const userId = tokenData.userId
 
       // POST /team/create — create a new team
       if (request.method === 'POST' && url.pathname === '/team/create') {
@@ -1721,7 +1722,7 @@ export default {
         const members: { userId: string; name: string; role: string; handles: string; joinedAt: string }[] = membersJson ? JSON.parse(membersJson) : []
 
         // Avoid duplicate membership
-        if (!members.find(m => m.userId === memberUserId)) {
+        if (!members.find(m => String(m.userId) === memberUserId)) {
           members.push({ userId: memberUserId, name: body.memberName || 'Member', role: body.memberRole || 'member', handles: body.memberHandles || '', joinedAt: new Date().toISOString() })
           await env.TOKENS.put(`team:${teamId}:members`, JSON.stringify(members))
         }
@@ -1750,7 +1751,7 @@ export default {
         if (!members.some((m: any) => String(m.userId) === String(tokenData.userId))) {
           return jsonResponse({ error: 'Not a member of this team' }, 403)
         }
-        return jsonResponse({ team: meta, members })
+        return jsonResponse({ team: meta, members, selfUserId: String(tokenData.userId) })
       }
 
       // POST /team/invite — generate a new invite code
@@ -1761,6 +1762,20 @@ export default {
         const inviteCode = generateToken().slice(0, 16)
         await env.TOKENS.put(`team:invite:${inviteCode}`, teamId)
         return jsonResponse({ ok: true, inviteCode })
+      }
+
+      // POST /team/remove-member — remove a member from the team (admin only)
+      if (request.method === 'POST' && url.pathname === '/team/remove-member') {
+        const teamId = (tokenData as any).teamId
+        if (!teamId) return jsonResponse({ error: 'No team associated with this token' }, 404)
+        const body = await request.json() as { userId: string }
+        if (!body.userId) return jsonResponse({ error: 'Missing userId' }, 400)
+        const membersJson = await env.TOKENS.get(`team:${teamId}:members`)
+        const members: { userId: string; name: string; role: string }[] = membersJson ? JSON.parse(membersJson) : []
+        const filtered = members.filter(m => String(m.userId) !== String(body.userId))
+        if (filtered.length === members.length) return jsonResponse({ error: 'Member not found' }, 404)
+        await env.TOKENS.put(`team:${teamId}:members`, JSON.stringify(filtered))
+        return jsonResponse({ ok: true, members: filtered })
       }
 
       // GET /team/ws — WebSocket upgrade to TeamChannel DO
@@ -1776,10 +1791,17 @@ export default {
 
         const doId = env.TEAM_CHANNEL.idFromName(teamId)
         const stub = env.TEAM_CHANNEL.get(doId)
-        // Always use the server-resolved userId from the validated token
+        // Always use the server-resolved userId from the validated token.
+        // We rebuild the request explicitly so the Upgrade/Connection headers
+        // are preserved — passing the original Request as RequestInit can drop
+        // them in some CF Workers builds.
         const doUrl = new URL(request.url)
         doUrl.searchParams.set('userId', String(tokenData.userId))
-        return stub.fetch(new Request(doUrl.toString(), request))
+        const wsForwardReq = new Request(doUrl.toString(), {
+          method: request.method,
+          headers: request.headers,
+        })
+        return stub.fetch(wsForwardReq)
       }
 
       // POST /team/message — send message via REST to TeamChannel DO
@@ -1879,6 +1901,10 @@ export default {
       if (!token) return new Response('Missing token', { status: 401 })
       const data = await getToken(env, token)
       if (!data || !data.active) return new Response('Invalid token', { status: 401 })
+      // Bug fix: reject WebSocket upgrades for expired tokens (expiresAt check was missing)
+      if ((data as any).expiresAt && new Date((data as any).expiresAt) < new Date()) {
+        return new Response('Token expired — visit coagent.ai to subscribe', { status: 401 })
+      }
 
       // Version negotiation — warn on missing header, allow through for backward compat
       const clientVersion = request.headers.get('X-CoAgent-Version') || url.searchParams.get('v')
@@ -1886,7 +1912,7 @@ export default {
         console.warn(`[WS] Client user #${data.userId} connected without X-CoAgent-Version header`)
       }
       // Use the token's userId — the URL path userId is for backwards compat only
-      const resolvedUserId = String(data.userId)
+      const resolvedUserId = data.userId
       const doId = env.USER_SESSION.idFromName(resolvedUserId)
       const stub = env.USER_SESSION.get(doId)
       return stub.fetch(request)
@@ -1903,7 +1929,10 @@ export default {
           return jsonResponse({ error: 'Forbidden' }, 403)
         }
       } else {
-        console.warn('[Relay] EXA_WEBHOOK_SECRET not set — Exa webhook auth skipped (dev mode)')
+        // Bug fix: fail-closed when secret is not configured — never allow unauthenticated
+        // webhook requests through, even in environments where the secret wasn't set.
+        console.error('[Relay] EXA_WEBHOOK_SECRET not configured — rejecting webhook request (fail-closed)')
+        return jsonResponse({ error: 'Webhook secret not configured' }, 500)
       }
 
       const userId = exaMatch[1]
@@ -1939,7 +1968,10 @@ export default {
           return jsonResponse({ error: 'Invalid webhook signature' }, 401)
         }
       } else {
-        console.warn('[Relay] COMPOSIO_WEBHOOK_SECRET not set — webhook signature verification skipped (dev mode)')
+        // Bug fix: fail-closed when secret is not configured — never allow unauthenticated
+        // webhook requests through, even in environments where the secret wasn't set.
+        console.error('[Relay] COMPOSIO_WEBHOOK_SECRET not configured — rejecting webhook request (fail-closed)')
+        return jsonResponse({ error: 'Webhook secret not configured' }, 500)
       }
 
       const payload = JSON.parse(body) as Record<string, any>
@@ -1986,7 +2018,7 @@ export default {
       const rateCheck = checkRateLimit(result.token, 'general')
       if (rateCheck) return rateCheck
       const body = await request.json() as { composioUserId?: string; connectedAccountId?: string }
-      const relayUserId = String(result.data.userId)
+      const relayUserId = result.data.userId
       if (body.composioUserId) {
         // Prevent a user from overwriting another user's existing mapping
         const existingOwner = await env.TOKENS.get(`composio_user:${body.composioUserId}`)
@@ -2099,9 +2131,7 @@ export default {
       const body = await request.json() as { label?: string; days?: number; tier?: TokenData['tier'] }
       const token = generateToken()
       const referralCode = generateReferralCode()
-      const prevId = parseInt(await env.TOKENS.get('_next_user_id') || '0')
-      const userId = prevId + 1
-      await env.TOKENS.put('_next_user_id', String(userId))
+      const userId = crypto.randomUUID()
 
       const tier = body.tier || 'standard'
       const rateMap: Record<TokenData['tier'], number> = { founder: 0.25, early_access: 0.15, standard: 0.10 }
@@ -2245,7 +2275,7 @@ export default {
       const account = await stripeApiCall(env, 'POST', '/accounts', {
         type: 'express',
         capabilities: { transfers: { requested: 'true' } },
-        metadata: { coagent_user_id: String(data.userId), referral_code: data.referralCode },
+        metadata: { coagent_user_id: data.userId, referral_code: data.referralCode },
       })
 
       // Store reverse lookup
@@ -2397,9 +2427,7 @@ export default {
       // Generate token + referral code for new user
       const token = generateToken()
       const referralCode = generateReferralCode()
-      const prevId = parseInt(await env.TOKENS.get('_next_user_id') || '0')
-      const userId = prevId + 1
-      await env.TOKENS.put('_next_user_id', String(userId))
+      const userId = crypto.randomUUID()
 
       const commissionRate = (() => {
         for (const [, pInfo] of Object.entries(PRICE_TO_TIER)) {
@@ -2438,13 +2466,20 @@ export default {
       const body = await request.json() as { sessionId?: string }
       if (!body.sessionId) return jsonResponse({ error: 'Missing sessionId' }, 400)
 
-      // Check if already exchanged (idempotent)
+      // Check if already exchanged (idempotent) or currently being processed (race guard)
       const existingToken = await env.TOKENS.get(`checkout:${body.sessionId}`)
+      if (existingToken === 'processing') {
+        return jsonResponse({ error: 'Checkout already processed' }, 409)
+      }
       if (existingToken) {
         const tokenData = await getToken(env, existingToken)
         const info = TIER_INFO[tokenData?.tier || 'standard'] || TIER_INFO.standard
         return jsonResponse({ token: existingToken, tier: tokenData?.tier, referralCode: tokenData?.referralCode, ...info })
       }
+
+      // Atomically claim this session before any async work to prevent TOCTOU race conditions.
+      // Any concurrent request that reads the key after this point will see 'processing' and bail out.
+      await env.TOKENS.put(`checkout:${body.sessionId}`, 'processing', { expirationTtl: 300 })
 
       // Verify session with Stripe
       const session = await stripeApiCall(env, 'GET', `/checkout/sessions/${body.sessionId}`)
@@ -2461,9 +2496,7 @@ export default {
       // Create token
       const token = generateToken()
       const referralCode = generateReferralCode()
-      const prevId = parseInt(await env.TOKENS.get('_next_user_id') || '0')
-      const userId = prevId + 1
-      await env.TOKENS.put('_next_user_id', String(userId))
+      const userId = crypto.randomUUID()
 
       const tokenData: TokenData = {
         userId,
@@ -2508,7 +2541,7 @@ export default {
       // Create Stripe Connect Express onboarding link
       const account = await stripeApiCall(env, 'POST', '/accounts', {
         type: 'express',
-        'metadata[coagent_user_id]': String(result.data.userId),
+        'metadata[coagent_user_id]': result.data.userId,
         'metadata[coagent_ref]': result.data.referralCode,
       })
       if (account.error) {

@@ -31,7 +31,14 @@ function composioUserId(): string {
 import { RelayClient } from './relay-client.js'
 import { TeamClient } from '@coagent/team-core'
 import { WhatsAppClient, WhatsAppMedia } from './whatsapp-client.js'
-import { getEdition } from './edition.js'
+// edition.ts removed — inline
+function getEdition() {
+  return {
+    vertical: process.env.COAGENT_VERTICAL || 'personal',
+    team: process.env.COAGENT_TEAM !== 'false',
+    preset: { suggestedIntegrations: ['gmail', 'googlecalendar', 'googledrive'] as string[] },
+  }
+}
 import type { WSClientMessage, WSServerMessage } from '@coagent/shared'
 import { join, delimiter as pathDelimiter } from 'path'
 import { homedir } from 'os'
@@ -1936,7 +1943,10 @@ try {
       }
     })
     agent.teamClient = teamClient
-    teamClient.init().then(() => teamClient!.connect()).catch(err => {
+    teamClient.init().then(async () => {
+      await teamClient!.connect()
+      if (!process.env.COAGENT_TEAMMATE) spawnTeammateAgents()
+    }).catch(err => {
       console.warn('[Team] Failed to initialize team client:', err)
       teamClient = null
       agent.teamClient = null
@@ -1946,8 +1956,68 @@ try {
   console.warn('[Team] Failed to initialize team client:', err)
 }
 
+// ── Teammate agents ──────────────────────────────────────────────────────────
+const teammateProcs: import('child_process').ChildProcess[] = []
+
+function spawnTeammateAgents(): void {
+  if (!teamClient?.teamId) return
+  const roster = teamClient.getRoster()
+  const selfId = String(teamClient.selfUserId || process.env.RELAY_USER_ID || '')
+
+  for (const member of roster) {
+    if (String(member.userId) === selfId) continue
+
+    const safeName = member.name.toLowerCase().replace(/[^a-z0-9]/g, '-')
+    const dataDir = join(homedir(), `.coagent-${safeName}`)
+    const credPath = join(dataDir, '.relay-credentials')
+
+    let creds: { relayUrl: string; token: string; userId: string }
+    try {
+      creds = JSON.parse(readFileSync(credPath, 'utf-8'))
+    } catch {
+      console.log(`[Teammate:${member.name}] No credentials at ${credPath} — skipping`)
+      continue
+    }
+
+    const port = 7831 + teammateProcs.length
+    const { spawn } = require('child_process') as typeof import('child_process')
+    // __dirname is dist/ at runtime — resolve to src/server.ts for tsx
+    const srcDir = __dirname.replace(/\/dist$/, '/src')
+    const serverFile = join(srcDir, 'server.ts')
+
+    const child = spawn('tsx', [serverFile], {
+      env: {
+        ...process.env,
+        COAGENT_PORT: String(port),
+        COAGENT_DATA_DIR: dataDir,
+        COAGENT_TEAMMATE: 'true',
+        COAGENT_TEAM: 'true',
+        RELAY_URL: creds.relayUrl,
+        RELAY_TOKEN: creds.token,
+        RELAY_USER_ID: creds.userId,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: false,
+    })
+
+    const tag = `[${member.name}]`
+    child.stdout?.on('data', (d: Buffer) => {
+      for (const l of d.toString().split('\n').filter(Boolean)) console.log(`${tag} ${l}`)
+    })
+    child.stderr?.on('data', (d: Buffer) => {
+      for (const l of d.toString().split('\n').filter(Boolean)) console.warn(`${tag} ${l}`)
+    })
+    child.on('exit', (code) => console.log(`${tag} exited (${code})`))
+
+    teammateProcs.push(child)
+    console.log(`[Teammate:${member.name}] Spawned on port ${port} (PID ${child.pid})`)
+  }
+}
+
 function shutdown(signal: string): void {
   console.log(`[Server] ${signal} received — shutting down gracefully`)
+  for (const p of teammateProcs) { try { p.kill('SIGTERM') } catch {} }
+  teammateProcs.length = 0
   relay.stop()
   if (teamClient) { teamClient.stop(); teamClient = null }
   agent.stop()
