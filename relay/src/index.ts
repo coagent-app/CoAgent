@@ -16,6 +16,7 @@ export interface Env {
   EXA_WEBHOOK_SECRET?: string       // Shared secret for Exa monitor webhooks — optional, warns if unset
   GOOGLE_TTS_API_KEY?: string       // Google Cloud TTS — cheaper than OpenAI ($4/1M vs $15/1M)
   GOOGLE_CLIENT_ID?: string         // Google OAuth — served to desktop apps on activation
+  GOOGLE_CLIENT_SECRET?: string     // Google OAuth secret — served to desktop apps on activation
   TOKENS: KVNamespace
   BACKUPS: R2Bucket
   USER_SESSION: DurableObjectNamespace
@@ -2079,6 +2080,7 @@ export default {
         createdAt: data.createdAt,
         admin: data.admin || false,
         googleClientId: env.GOOGLE_CLIENT_ID || undefined,
+        googleClientSecret: env.GOOGLE_CLIENT_SECRET || undefined,
       })
     }
 

@@ -2016,11 +2016,13 @@ function spawnTeammateAgents(): void {
 
     const port = 7831 + teammateProcs.length
     const { spawn } = require('child_process') as typeof import('child_process')
-    // __dirname is dist/ at runtime — resolve to src/server.ts for tsx
-    const srcDir = __dirname.replace(/\/dist$/, '/src')
-    const serverFile = join(srcDir, 'server.ts')
 
-    const child = spawn('tsx', [serverFile], {
+    // In production (Bun-compiled binary), re-run ourselves; in dev, use tsx
+    const isBunBinary = process.execPath.includes('coagent-server')
+    const cmd = isBunBinary ? process.execPath : 'tsx'
+    const args = isBunBinary ? [] : [join(__dirname.replace(/\/dist$/, '/src'), 'server.ts')]
+
+    const child = spawn(cmd, args, {
       env: {
         ...process.env,
         COAGENT_PORT: String(port),
