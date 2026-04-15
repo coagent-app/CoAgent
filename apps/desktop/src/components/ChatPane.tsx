@@ -57,69 +57,33 @@ function getWelcomeMessage(userName?: string, userRole?: string): string {
 
 // ── Time-aware greeting & subtitle ──────────────────────────────────────────
 
-type TimeSlot = 'lateNight' | 'earlyBird' | 'morning' | 'midday' | 'afternoon' | 'evening' | 'night'
+// Universal greetings — work at any time of day
+const GREETINGS: ((n: string) => string)[] = [
+  () => `What's The Move?`,
+  () => `What Are We Working On?`,
+  () => `Let's Get To It`,
+  () => `Right Where You Left Off`,
+  () => `Ready To Work?`,
+  (n) => `Back at It, ${n}`,
+  () => `What's The Play?`,
+  () => `What Do You Need?`,
+  () => `Go Time`,
+  (n) => `Your Move, ${n}`,
+  () => `Say The Word`,
+  (n) => `Talk To Me, ${n}`,
+  (n) => `Ready When You Are, ${n}`,
+  () => `What's First?`,
+  () => `Where Were We?`,
+]
 
-function getTimeSlot(hour: number): TimeSlot {
-  if (hour >= 0 && hour < 4) return 'lateNight'
-  if (hour >= 4 && hour < 7) return 'earlyBird'
-  if (hour >= 7 && hour < 11) return 'morning'
-  if (hour >= 11 && hour < 13) return 'midday'
-  if (hour >= 13 && hour < 17) return 'afternoon'
-  if (hour >= 17 && hour < 21) return 'evening'
-  return 'night'
-}
-
-const GREETINGS: Record<TimeSlot, ((n: string) => string)[]> = {
-  lateNight: [
-    () => `The Midnight Office`,
-    () => `After Hours`,
-    () => `Night Shift`,
-    () => `The Graveyard Shift`,
-    () => `Overtime`,
-  ],
-  earlyBird: [
-    () => `Dawn Patrol`,
-    () => `Early Bird Edition`,
-    () => `First Light`,
-    () => `Head Start`,
-    () => `Sunrise Edition`,
-  ],
-  morning: [
-    (n) => `Morning, ${n}`,
-    () => `Rise and Shine`,
-    () => `Fresh Start`,
-    () => `New Day`,
-    (n) => `Good Morning, ${n}`,
-  ],
-  midday: [
-    () => `Halftime`,
-    () => `Round Two`,
-    (n) => `Afternoon, ${n}`,
-    () => `Midday Edition`,
-    () => `Back at It`,
-  ],
-  afternoon: [
-    () => `The Home Stretch`,
-    () => `Second Wind`,
-    (n) => `Afternoon, ${n}`,
-    () => `Afternoon Edition`,
-    () => `Back at It`,
-  ],
-  evening: [
-    () => `Golden Hour`,
-    (n) => `Evening, ${n}`,
-    () => `After Hours`,
-    () => `Evening Edition`,
-    () => `Sundown`,
-  ],
-  night: [
-    () => `Night Mode`,
-    () => `After Dark`,
-    () => `The Late Show`,
-    () => `Lights Low`,
-    () => `Night Edition`,
-  ],
-}
+// Simple time-of-day salutations that override sometimes
+const TIME_GREETINGS: ((n: string, hour: number) => string | null)[] = [
+  (n, h) => h >= 5 && h < 12 ? `Morning, ${n}` : null,
+  (n, h) => h >= 5 && h < 12 ? `Good Morning, ${n}` : null,
+  (n, h) => h >= 12 && h < 17 ? `Afternoon, ${n}` : null,
+  (n, h) => h >= 17 && h < 22 ? `Evening, ${n}` : null,
+  (n, h) => h >= 17 && h < 22 ? `Good Evening, ${n}` : null,
+]
 
 const SUBTITLES: string[] = [
   "What do you need?",
@@ -159,15 +123,21 @@ function getDailyGreeting(name: string): { greeting: string; subtitle: string } 
   const hour = now.getHours()
   const day = now.getDay()
   const doy = getDayOfYear()
-  const slot = getTimeSlot(hour)
-
-  const greetingPool = GREETINGS[slot]
 
   // Day-specific greeting ~50% of the time on Mondays/Fridays
   const useDayGreeting = DAY_GREETINGS[day] && doy % 2 === 0
+
+  // ~30% chance of a simple time salutation, otherwise universal pool
+  const useTimeSalutation = !useDayGreeting && doy % 3 === 1
+  const timeGreeting = useTimeSalutation
+    ? TIME_GREETINGS[doy % TIME_GREETINGS.length](name, hour)
+    : null
+
   const greeting = useDayGreeting
     ? DAY_GREETINGS[day](name)
-    : greetingPool[doy % greetingPool.length](name)
+    : timeGreeting
+      ? timeGreeting
+      : GREETINGS[doy % GREETINGS.length](name)
 
   // Alternate between subtitles and tips based on day
   const showTip = doy % 3 === 0

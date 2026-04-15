@@ -346,10 +346,12 @@ export async function searchToolsAndSchema(
       const [queryEmb, schemaEmb] = await embed([query, schema])
 
       // ── Tool-level search (query embedding) ──
-      // Fetch a larger candidate pool — stale tools in LanceDB eat slots
+      // Fetch a large candidate pool — stale tools in LanceDB eat slots.
+      // With 900+ indexed tools but only ~140 live, we need enough candidates
+      // to ensure live tools aren't pushed out by stale embeddings.
       const toolResults = await activeTable
         .vectorSearch(queryEmb)
-        .limit(Math.max(toolLimit * 10, 50))
+        .limit(Math.max(toolLimit * 10, 200))
         .toArray()
 
       // Detect integration name in query for boosting (e.g. "slack" in "slack send message")
@@ -390,7 +392,8 @@ export async function searchToolsAndSchema(
         toolScored.set(name, score)
       }
       if (staleHits.length > 0) {
-        console.warn(`[ToolEmbed] "${query}" — ${staleHits.length} high-scoring LanceDB hits filtered (not in live session): ${staleHits.slice(0, 5).join(', ')}`)
+        console.warn(`[ToolEmbed] "${query}" — ${staleHits.length} high-scoring LanceDB hits filtered (not in live session): ${staleHits.join(', ')}`)
+        console.warn(`[ToolEmbed] Live tool count: ${toolMap.size}, LanceDB results: ${toolResults.length}`)
       }
 
       // ── Param-level search (schema embedding) ──

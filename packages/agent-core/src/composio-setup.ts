@@ -32,24 +32,60 @@ export async function setupComposioMcp(
 
   // List existing MCP configs — SDK uses /mcp/servers (plural)
   const listRes = await fetch(`${getComposioBase()}/mcp/servers?name=${encodeURIComponent(MCP_CONFIG_NAME)}`, {
-    headers: { 'X-API-KEY': apiKey }
+    headers: { 'X-API-KEY': apiKey },
+    signal: AbortSignal.timeout(15_000)
   })
   const listData = await listRes.json() as any
   const existing = (listData?.items ?? []).find((s: any) => s.name === MCP_CONFIG_NAME)
 
-  let mcpBaseUrl: string
+  let mcpBaseUrl = ''
 
   if (existing) {
-    // Always update toolkits so newly connected integrations are available
-    if (toolkits.length > 0) {
-      await fetch(`${getComposioBase()}/mcp/${existing.id}`, {
+    const existingToolkits: string[] = existing.toolkits ?? existing.apps ?? []
+
+    // MERGE with existing toolkits — never shrink. Multiple agents share this
+    // MCP server; a sub-agent with fewer integrations must not clobber the
+    // primary agent's toolkit list.
+    const mergedToolkits = [...new Set([...existingToolkits, ...toolkits])]
+    console.log(`[Composio] Existing MCP server ${existing.id} has ${existingToolkits.length} toolkits: ${JSON.stringify(existingToolkits)}`)
+    console.log(`[Composio] Requested: ${toolkits.length}, merged: ${mergedToolkits.length}`)
+
+    // Only PATCH if we're actually adding new toolkits
+    const needsPatch = mergedToolkits.length > existingToolkits.length
+    if (needsPatch && mergedToolkits.length > 0) {
+      const patchRes = await fetch(`${getComposioBase()}/mcp/${existing.id}`, {
         method: 'PATCH',
         headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ toolkits })
+        body: JSON.stringify({ toolkits: mergedToolkits }),
+        signal: AbortSignal.timeout(15_000)
       })
-      console.log(`[Composio] Updated MCP toolkits: ${toolkits.join(', ')}`)
+      if (patchRes.ok) {
+        console.log(`[Composio] Updated MCP toolkits (${mergedToolkits.length}): ${mergedToolkits.join(', ')}`)
+      } else {
+        const errText = await patchRes.text().catch(() => '')
+        console.error(`[Composio] PATCH failed (${patchRes.status}): ${errText.slice(0, 300)} — recreating MCP server`)
+
+        // Delete and recreate if PATCH fails
+        await fetch(`${getComposioBase()}/mcp/${existing.id}`, {
+          method: 'DELETE',
+          headers: { 'X-API-KEY': apiKey },
+          signal: AbortSignal.timeout(15_000)
+        }).catch(() => {})
+
+        const createRes = await fetch(`${getComposioBase()}/mcp/servers`, {
+          method: 'POST',
+          headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: MCP_CONFIG_NAME, toolkits: mergedToolkits, manuallyManageConnections: false }),
+          signal: AbortSignal.timeout(15_000)
+        })
+        const created = await createRes.json() as any
+        mcpBaseUrl = created.mcp_url
+        console.log(`[Composio] Recreated MCP config: ${created.id} with ${mergedToolkits.length} toolkits`)
+      }
+    } else if (!needsPatch) {
+      console.log(`[Composio] Toolkits already up to date (${existingToolkits.length})`)
     }
-    mcpBaseUrl = existing.mcp_url
+    if (!mcpBaseUrl) mcpBaseUrl = existing.mcp_url
   } else {
     const createRes = await fetch(`${getComposioBase()}/mcp/servers`, {
       method: 'POST',
@@ -58,7 +94,8 @@ export async function setupComposioMcp(
         name: MCP_CONFIG_NAME,
         toolkits: toolkits.length > 0 ? toolkits : ['gmail', 'googlecalendar'],
         manuallyManageConnections: false,
-      })
+      }),
+      signal: AbortSignal.timeout(15_000)
     })
     const created = await createRes.json() as any
     mcpBaseUrl = created.mcp_url

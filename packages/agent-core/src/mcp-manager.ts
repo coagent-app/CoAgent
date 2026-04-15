@@ -111,12 +111,21 @@ export class MCPManager {
    * up and fire scheduled tasks before Composio finished connecting. The loop
    * ensures we also wait for pendings registered while we were already awaiting.
    */
-  async ready(): Promise<void> {
+  async ready(timeoutMs = 30_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
     let prevSize = -1
     while (this.pendingInits.size !== prevSize) {
       prevSize = this.pendingInits.size
       if (prevSize === 0) return
-      await Promise.all([...this.pendingInits.values()])
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) {
+        console.warn(`[MCP] ready() timed out after ${timeoutMs}ms — proceeding with available tools`)
+        return
+      }
+      await Promise.race([
+        Promise.all([...this.pendingInits.values()]),
+        new Promise<void>(resolve => setTimeout(resolve, remaining))
+      ])
     }
   }
 
@@ -183,7 +192,10 @@ export class MCPManager {
       { name: 'coagent-core', version: '0.0.1' },
       { capabilities: {} }
     )
-    await client.connect(transport)
+    await Promise.race([
+      client.connect(transport),
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`Stdio connect timed out for ${config.name}`)), 15_000))
+    ])
     this.attachReconnectHooks(config.name, client)
     this.clients.set(config.name, client)
     this.reconnectAttempts.delete(config.name)
@@ -310,14 +322,16 @@ export class MCPManager {
 
     for (const result of results) {
       if (result.status === 'fulfilled') {
-        for (const tool of result.value.tools) {
+        const { serverName, tools: serverTools } = result.value
+        console.log(`[MCP] ${serverName} returned ${serverTools.length} tools: ${serverTools.map(t => t.name).join(', ')}`)
+        for (const tool of serverTools) {
           const append = TOOL_DESCRIPTION_APPENDS[tool.name]
           tools.push({
             name: tool.name,
             description: append ? `${tool.description ?? ''} ${append}` : (tool.description ?? ''),
             input_schema: sanitizeSchema(tool.inputSchema) as Anthropic.Tool['input_schema']
           })
-          serverMap.set(tool.name, result.value.serverName)
+          serverMap.set(tool.name, serverName)
         }
       } else {
         console.error(`[MCP] Failed to list tools:`, (result.reason as Error).message)
@@ -430,7 +444,10 @@ export class MCPManager {
       { name: 'coagent-core', version: '0.0.1' },
       { capabilities: {} }
     )
-    await client.connect(transport)
+    await Promise.race([
+      client.connect(transport),
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`HTTP connect timed out for ${name}`)), 15_000))
+    ])
     this.attachReconnectHooks(name, client)
     this.clients.set(name, client)
     this.reconnectAttempts.delete(name)

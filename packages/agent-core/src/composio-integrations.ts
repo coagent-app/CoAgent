@@ -18,7 +18,7 @@ async function fetchConnectedAccounts(apiKey: string, userId: string, forceRefre
     return _accountsCache.data
   }
   const url = `${getComposioBase()}/connected_accounts?limit=100&user_ids=${encodeURIComponent(userId)}`
-  const res = await fetch(url, { headers: { 'X-API-KEY': apiKey } })
+  const res = await fetch(url, { headers: { 'X-API-KEY': apiKey }, signal: AbortSignal.timeout(15_000) })
   const data = await res.json() as { items?: any[] }
   const items = data.items ?? []
   _accountsCache = { data: items, ts: Date.now() }

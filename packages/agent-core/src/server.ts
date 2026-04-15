@@ -485,6 +485,24 @@ Write profile.md with everything you learned:
 
 Silently set: update_settings({ heartbeat_interval: 30, onboarded: true })
 
+Write heartbeat.md based on what they connected and what they said they need help with. This tells you what to check during background heartbeats. Example:
+
+# Heartbeat
+
+## Every heartbeat
+- Check Gmail for new unread emails — flag anything from known contacts, ignore spam
+- Review calendar for meetings in the next 2 hours
+- If anything is actionable, queue it with queue_approval
+
+## Morning
+- Summarize overnight emails
+- List today's meetings
+
+## Evening
+- Recap what happened today
+
+Tailor this to the user. If they connected Slack, add "Check Slack for unread messages." If they care about leads, add "Flag new lead inquiries." If they do scheduling, add "Check for scheduling conflicts." Only include integrations they actually connected.
+
 "You're all set, [name]. I'll check your email and calendar every 30 minutes in the background — anything that needs your attention goes to the Queue on the left.
 
 A few things to know:
@@ -492,6 +510,7 @@ A few things to know:
 - Upload files anytime and I'll read and remember them
 - Say @skill-name in chat to run a specific automation
 - I have long-term memory, so the more we work together the better I get
+- You can customize what I check in the background by editing heartbeat.md in your memory files
 
 What can I help you with first?"
 
@@ -501,15 +520,17 @@ Delete this file (onboarding.md) — onboarding is complete.
   'heartbeat.md': `# Heartbeat
 
 <!--
-The agent reads this file during background heartbeats to know what to check.
-Heartbeats are off by default — the user configures them during onboarding or
-in settings. If these sections are empty, the agent has nothing to do and
-exits quickly.
+This file controls what the agent checks during background heartbeats.
+Add items under each section. The agent will follow these instructions.
 
-Add items under the appropriate section. Examples:
-  - Check Gmail for new unread messages from clients
-  - Review today's calendar and flag any conflicts
-  - Check schedule for tasks due in the next hour
+Suggestions:
+  - Check email for new messages from clients
+  - Review calendar for upcoming meetings
+  - Flag scheduling conflicts
+  - Check Slack for unread messages
+  - Monitor for replies to outbound emails
+  - Summarize overnight activity (morning)
+  - Recap the day's events (evening)
 -->
 
 ## Every heartbeat
