@@ -1078,8 +1078,10 @@ export class Agent {
       await mkdir(join(this.historyPath, '..'), { recursive: true })
       // Cap history to HISTORY_CAP messages — both in memory and on disk
       this.capHistory(this.conversationHistory)
+      // Strip non-standard fields before persisting — keep only role + content
+      const clean = this.conversationHistory.map(msg => ({ role: msg.role, content: msg.content }))
       const tmp = this.historyPath + '.tmp'
-      await writeFile(tmp, JSON.stringify(this.conversationHistory))
+      await writeFile(tmp, JSON.stringify(clean))
       await rename(tmp, this.historyPath)
     } catch (err: any) {
       console.error('[Agent] Failed to save history:', err.message)
@@ -3477,6 +3479,10 @@ Rules:
       if (trimmed.length !== result.length) changed = true
       result = trimmed
     }
+
+    // Strip non-standard fields from messages — providers reject extra keys
+    // (e.g. Anthropic rejects `docs`, `_docs`, `timestamp`, etc.)
+    result = result.map(msg => ({ role: msg.role, content: msg.content })) as typeof this.conversationHistory
 
     return result
   }

@@ -60,7 +60,9 @@ export async function readSettings(dataDir: string): Promise<AgentSettings> {
       active_days: parsed.active_days ?? DEFAULT_SETTINGS.active_days,
       autonomy: parsed.autonomy ?? DEFAULT_SETTINGS.autonomy,
       heartbeat_interval: parsed.heartbeat_interval ?? DEFAULT_SETTINGS.heartbeat_interval,
-      powerModel: (parsed.powerModel === 'moonshotai/kimi-k2.5' ? 'kimi-k2.5' : parsed.powerModel) ?? DEFAULT_SETTINGS.powerModel,
+      powerModel: (parsed.powerModel?.startsWith('claude-') || parsed.powerModel === 'moonshotai/kimi-k2.5')
+        ? 'kimi-k2.5'
+        : parsed.powerModel ?? DEFAULT_SETTINGS.powerModel,
       voice_enabled: parsed.voice_enabled ?? DEFAULT_SETTINGS.voice_enabled,
       voice_response: parsed.voice_response ?? DEFAULT_SETTINGS.voice_response,
       voice_hotkey: parsed.voice_hotkey ?? DEFAULT_SETTINGS.voice_hotkey,

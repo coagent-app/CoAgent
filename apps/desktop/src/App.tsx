@@ -230,6 +230,12 @@ export default function App() {
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 bg-neutral-900 dark:bg-neutral-100 text-white dark:text-neutral-900 text-[12.5px] px-4 py-2.5 rounded-xl shadow-lg flex items-center gap-3">
           {updater.downloading ? (
             <span>Updating... {updater.progress}%</span>
+          ) : updater.progress === 100 ? (
+            <>
+              <span>v{updater.version} installed</span>
+              <button onClick={() => { import('@tauri-apps/plugin-process').then(p => p.relaunch()) }} className="px-2.5 py-0.5 rounded-md bg-white/20 dark:bg-black/10 hover:bg-white/30 dark:hover:bg-black/20 font-medium transition-colors">Restart</button>
+              <button onClick={updater.dismiss} className="text-white/50 dark:text-neutral-400 hover:text-white dark:hover:text-neutral-900 transition-colors">&times;</button>
+            </>
           ) : (
             <>
               <span>v{updater.version} available</span>

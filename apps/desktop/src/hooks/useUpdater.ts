@@ -22,10 +22,10 @@ export function useUpdater() {
   })
   const [update, setUpdate] = useState<Update | null>(null)
 
-  // Check for updates on mount (with a short delay to not block startup)
+  // Check for updates on mount and auto-install
   useEffect(() => {
     const timer = setTimeout(() => {
-      check().then(u => {
+      check().then(async (u) => {
         if (u) {
           setUpdate(u)
           setState(prev => ({
@@ -33,7 +33,28 @@ export function useUpdater() {
             available: true,
             version: u.version,
             notes: u.body ?? null,
+            downloading: true,
           }))
+          // Auto-download and install in the background
+          try {
+            let downloaded = 0
+            let total = 0
+            await u.downloadAndInstall((event) => {
+              if (event.event === 'Started' && event.data.contentLength) {
+                total = event.data.contentLength
+              }
+              if (event.event === 'Progress') {
+                downloaded += event.data.chunkLength
+                const pct = total > 0 ? Math.round((downloaded / total) * 100) : 0
+                setState(prev => ({ ...prev, progress: pct }))
+              }
+            })
+            // Update is installed — it takes effect on next app launch
+            setState(prev => ({ ...prev, downloading: false, progress: 100 }))
+          } catch (err: any) {
+            console.error('[Updater] Auto-install failed:', err)
+            setState(prev => ({ ...prev, downloading: false, error: err?.message ?? 'Update failed' }))
+          }
         }
       }).catch(err => {
         console.error('[Updater] Check failed:', err)
