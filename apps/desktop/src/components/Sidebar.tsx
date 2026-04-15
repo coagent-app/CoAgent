@@ -129,13 +129,42 @@ function IntegrationItem({
   )
 }
 
+function useAgencyEasterEgg(hasTeam: boolean) {
+  const [display, setDisplay] = React.useState('Co-Agent')
+  const animating = React.useRef(false)
+
+  React.useEffect(() => {
+    if (!hasTeam) return
+    const trigger = () => {
+      if (animating.current) return
+      animating.current = true
+      // Delete 't', then type 'cy'
+      setTimeout(() => setDisplay('Co-Agen'), 100)
+      setTimeout(() => setDisplay('Co-Agenc'), 300)
+      setTimeout(() => setDisplay('Co-Agency'), 500)
+      // Hold, then revert
+      setTimeout(() => setDisplay('Co-Agenc'), 3500)
+      setTimeout(() => setDisplay('Co-Agen'), 3700)
+      setTimeout(() => setDisplay('Co-Agent'), 3900)
+      setTimeout(() => { animating.current = false }, 4000)
+    }
+    // First trigger after 30-60s, then every 2-5 min
+    const initial = setTimeout(trigger, 30000 + Math.random() * 30000)
+    const interval = setInterval(trigger, 120000 + Math.random() * 180000)
+    return () => { clearTimeout(initial); clearInterval(interval) }
+  }, [hasTeam])
+
+  return display
+}
+
 export function Sidebar({ view, onViewChange, queueCount, integrations, onConnect, onDisconnect, onOpenModal, userName, dark, toggleTheme, hasTeam, onQueueBadgeClick }: SidebarProps) {
+  const brandName = useAgencyEasterEgg(!!hasTeam)
 
   return (
     <div className="w-52 bg-[#FAFAFA] dark:bg-neutral-900 border-r border-neutral-200 dark:border-neutral-800 flex flex-col py-4 px-3 flex-shrink-0">
       <div className="px-2 mb-5">
         <span className="text-[15px] font-semibold tracking-tight text-neutral-900 dark:text-neutral-100">
-          Co-Agent
+          {brandName}
         </span>
       </div>
 

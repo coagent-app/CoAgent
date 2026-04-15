@@ -364,7 +364,7 @@ export function useAgent() {
           // Dismiss voice pill if it was active (covers both normal completion and stop)
           if (isVoiceActive()) {
             setVoiceActive(false)
-            import('@/lib/voice').then(v => v.showVoiceSummary(''))
+            import('@/lib/voice').then(v => v.showVoiceSummary())
           }
         }
         if (msg.type === 'agent_stopped') {
@@ -376,7 +376,7 @@ export function useAgent() {
           setProcessing(false)
           if (isVoiceActive()) {
             setVoiceActive(false)
-            import('@/lib/voice').then(v => { v.cancelTts(); v.showVoiceSummary('') })
+            import('@/lib/voice').then(v => { v.cancelTts(); v.showVoiceSummary() })
           }
         }
         if (msg.type === 'chat_history') {
@@ -510,16 +510,16 @@ export function useAgent() {
         if (msg.type === 'voice_summary') {
           setVoiceSummary(msg.summary)
           // Show summary in pill, then auto-hide after delay
-          import('@/lib/voice').then(v => v.showVoiceSummary(msg.summary))
+          import('@/lib/voice').then(v => v.showVoiceSummary())
         }
         if (msg.type === 'voice_tts_audio') {
           import('@/lib/voice').then(v => v.playTtsAudio(msg.data))
         }
         if (msg.type === 'voice_tts_chunk') {
-          import('@/lib/voice').then(v => v.handleTtsChunk(msg.data, msg.seq, (msg as any).format))
+          import('@/lib/voice').then(v => v.handleTtsChunk(msg.data, msg.seq))
         }
         if (msg.type === 'voice_tts_done') {
-          import('@/lib/voice').then(v => v.handleTtsDone((msg as any).format))
+          import('@/lib/voice').then(v => v.handleTtsDone())
         }
         if (msg.type === 'voice_tts_cancel') {
           import('@/lib/voice').then(v => v.cancelTts())
@@ -879,7 +879,7 @@ export function useAgent() {
     // Always reset voice pill state
     if (isVoiceActive()) {
       setVoiceActive(false)
-      import('@/lib/voice').then(v => { v.cancelTts(); v.showVoiceSummary('') })
+      import('@/lib/voice').then(v => { v.cancelTts(); v.showVoiceSummary() })
     }
   }, [send])
 
@@ -1052,15 +1052,20 @@ export function useAgent() {
     lastSentRef.current = { text: message, time: now }
 
     send({ type: 'team_send', message, to } as any)
-    // Optimistic echo — relay doesn't send back to sender
+    // Optimistic echo — relay doesn't echo back to sender, so we add it locally
     const myUserId = teamInfo?.selfUserId ? String(teamInfo.selfUserId) : 'default'
-    setTeamMessages(prev => [...prev, {
-      id: `msg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-      teamId: '',
-      timestamp: new Date().toISOString(),
-      from: { userId: myUserId, name: settings?.name || 'Me', role: '', isAgent: false },
-      visible: message, agentContext: '', to: to || null, attachments: []
-    }])
+    const echoId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
+    setTeamMessages(prev => {
+      // Prevent duplicates from StrictMode double-renders
+      if (prev.some(m => m.visible === message && m.from.userId === myUserId && Date.now() - new Date(m.timestamp).getTime() < 2000)) return prev
+      return [...prev, {
+        id: echoId,
+        teamId: '',
+        timestamp: new Date().toISOString(),
+        from: { userId: myUserId, name: settings?.name || 'Me', role: '', isAgent: false },
+        visible: message, agentContext: '', to: to || null, attachments: []
+      }]
+    })
   }, [send, settings?.name, teamInfo?.selfUserId])
 
   const getTeamInfo = useCallback(() => {

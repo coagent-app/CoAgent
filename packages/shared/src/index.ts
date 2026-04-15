@@ -409,5 +409,12 @@ export interface TeamMessage {
   visible: string
   agentContext: string
   to: string | string[] | null
-  attachments: string[]
+  attachments: TeamAttachment[]
+}
+
+export interface TeamAttachment {
+  name: string
+  data: string  // base64-encoded file content
+  type: string  // mime type
+  size: number  // original byte size
 }

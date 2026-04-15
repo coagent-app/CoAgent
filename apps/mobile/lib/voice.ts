@@ -6,6 +6,7 @@ let ttsSound: Audio.Sound | null = null
 let ttsChunks: Uint8Array[] = []
 let onTtsDoneCallback: (() => void) | null = null
 let cleaningUp = false
+let ttsActive = false
 
 // --- Recording ---
 
@@ -18,7 +19,10 @@ async function cleanupRecording(): Promise<void> {
       try { await recording.stopAndUnloadAsync() } catch (_) {}
       recording = null
     }
-    await Audio.setAudioModeAsync({ allowsRecordingIOS: false })
+    await Audio.setAudioModeAsync({
+      allowsRecordingIOS: false,
+      playsInSilentModeIOS: true,
+    })
   } finally {
     cleaningUp = false
   }
@@ -111,12 +115,14 @@ export function setTtsDoneCallback(cb: (() => void) | null) {
 }
 
 export async function handleTtsChunk(base64Chunk: string, _seq: number) {
+  if (!ttsActive) return  // Discard chunks after cancel
   const bytes = Uint8Array.from(atob(base64Chunk), c => c.charCodeAt(0))
   ttsChunks.push(bytes)
 }
 
 export async function handleTtsDone() {
   if (ttsChunks.length === 0) {
+    ttsActive = false
     onTtsDoneCallback?.()
     return
   }
@@ -160,7 +166,9 @@ async function playTtsFromChunks() {
     sound.setOnPlaybackStatusUpdate((status) => {
       if (status.isLoaded && status.didJustFinish) {
         sound.setOnPlaybackStatusUpdate(null)
-        onTtsDoneCallback?.()
+        ttsActive = false
+        const cb = onTtsDoneCallback  // capture before potential null from unregisterTtsHandlers
+        if (cb) cb()
       }
     })
 
@@ -188,6 +196,7 @@ function uint8ArrayToBase64(bytes: Uint8Array): string {
 }
 
 export async function stopTts() {
+  ttsActive = false  // Reject any in-flight chunks for this session
   if (ttsSound) {
     await ttsSound.stopAsync().catch(() => {})
     await ttsSound.unloadAsync().catch(() => {})
@@ -199,6 +208,8 @@ export async function stopTts() {
 // --- Wire up global handlers for useAgent hook ---
 
 export function registerTtsHandlers(onDone?: () => void) {
+  ttsActive = true  // New TTS session — accept incoming chunks
+  ttsChunks = []   // Clear any stale chunks from a prior cancelled session
   if (onDone) setTtsDoneCallback(onDone)
   ;(globalThis as any).__ttsChunkHandler = handleTtsChunk
   ;(globalThis as any).__ttsDoneHandler = handleTtsDone

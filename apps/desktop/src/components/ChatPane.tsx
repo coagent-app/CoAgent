@@ -50,23 +50,136 @@ function getWelcomeMessage(userName?: string, userRole?: string): string {
   if (!userName) {
     return "Hey — I'm your personal AI assistant, running right here on your machine. I handle your email, calendar, research, follow-ups, and pretty much anything you throw at me. Send me a message to get started."
   }
-  const name = `, ${userName.split(/\s+/)[0]}`
-  const hour = new Date().getHours()
-  const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening'
-  return `${greeting}${name}. What can I help you with?`
+  const name = userName.split(/\s+/)[0]
+  const { greeting } = getDailyGreeting(name)
+  return `${greeting}. What can I help you with?`
 }
 
-// ── Default subtitles (replaced by heartbeat when it runs) ──────────────────
+// ── Time-aware greeting & subtitle ──────────────────────────────────────────
 
-const DEFAULT_SUBTITLES: Record<string, string> = {
-  morning: "Coffee's ready. What's first?",
-  afternoon: "What are we working on?",
-  evening: "Wrapping up or getting ahead?",
+type TimeSlot = 'lateNight' | 'earlyBird' | 'morning' | 'midday' | 'afternoon' | 'evening' | 'night'
+
+function getTimeSlot(hour: number): TimeSlot {
+  if (hour >= 0 && hour < 4) return 'lateNight'
+  if (hour >= 4 && hour < 7) return 'earlyBird'
+  if (hour >= 7 && hour < 11) return 'morning'
+  if (hour >= 11 && hour < 13) return 'midday'
+  if (hour >= 13 && hour < 17) return 'afternoon'
+  if (hour >= 17 && hour < 21) return 'evening'
+  return 'night'
+}
+
+const GREETINGS: Record<TimeSlot, ((n: string) => string)[]> = {
+  lateNight: [
+    () => `The Midnight Office`,
+    () => `After Hours`,
+    () => `Night Shift`,
+    () => `The Graveyard Shift`,
+    () => `Overtime`,
+  ],
+  earlyBird: [
+    () => `Dawn Patrol`,
+    () => `Early Bird Edition`,
+    () => `First Light`,
+    () => `Head Start`,
+    () => `Sunrise Edition`,
+  ],
+  morning: [
+    (n) => `Morning, ${n}`,
+    () => `Rise and Shine`,
+    () => `Fresh Start`,
+    () => `New Day`,
+    (n) => `Good Morning, ${n}`,
+  ],
+  midday: [
+    () => `Halftime`,
+    () => `Round Two`,
+    (n) => `Afternoon, ${n}`,
+    () => `Midday Edition`,
+    () => `Back at It`,
+  ],
+  afternoon: [
+    () => `The Home Stretch`,
+    () => `Second Wind`,
+    (n) => `Afternoon, ${n}`,
+    () => `Afternoon Edition`,
+    () => `Back at It`,
+  ],
+  evening: [
+    () => `Golden Hour`,
+    (n) => `Evening, ${n}`,
+    () => `After Hours`,
+    () => `Evening Edition`,
+    () => `Sundown`,
+  ],
+  night: [
+    () => `Night Mode`,
+    () => `After Dark`,
+    () => `The Late Show`,
+    () => `Lights Low`,
+    () => `Night Edition`,
+  ],
+}
+
+const SUBTITLES: string[] = [
+  "What do you need?",
+  "I'm ready.",
+  "What's the plan?",
+  "What's next?",
+  "What's on your mind?",
+  "Let's go.",
+]
+
+const TIPS: string[] = [
+  "Try dragging a file into the chat.",
+  "You can ask me to check your email.",
+  "I can manage your calendar for you.",
+  "Ask me to research anything — I'll dig deep.",
+  "I can write and send emails for you.",
+  "Try asking me to summarize a document.",
+  "I can set reminders and follow-ups.",
+  "You can attach files for me to analyze.",
+  "Ask me to draft a response to any email.",
+  "I can search your files and notes.",
+]
+
+const DAY_GREETINGS: Record<number, (n: string) => string> = {
+  1: (n) => `Happy Monday, ${n}`,
+  5: (n) => `Happy Friday, ${n}`,
+}
+
+function getDayOfYear(): number {
+  const now = new Date()
+  const start = new Date(now.getFullYear(), 0, 0)
+  return Math.floor((now.getTime() - start.getTime()) / 86400000)
+}
+
+function getDailyGreeting(name: string): { greeting: string; subtitle: string } {
+  const now = new Date()
+  const hour = now.getHours()
+  const day = now.getDay()
+  const doy = getDayOfYear()
+  const slot = getTimeSlot(hour)
+
+  const greetingPool = GREETINGS[slot]
+
+  // Day-specific greeting ~50% of the time on Mondays/Fridays
+  const useDayGreeting = DAY_GREETINGS[day] && doy % 2 === 0
+  const greeting = useDayGreeting
+    ? DAY_GREETINGS[day](name)
+    : greetingPool[doy % greetingPool.length](name)
+
+  // Alternate between subtitles and tips based on day
+  const showTip = doy % 3 === 0
+  const subtitle = showTip
+    ? TIPS[doy % TIPS.length]
+    : SUBTITLES[doy % SUBTITLES.length]
+
+  return { greeting, subtitle }
 }
 
 function getDefaultSubtitle(): string {
-  const h = new Date().getHours()
-  return h < 12 ? DEFAULT_SUBTITLES.morning : h < 17 ? DEFAULT_SUBTITLES.afternoon : DEFAULT_SUBTITLES.evening
+  return getDailyGreeting('').subtitle
 }
 
 // ── Heartbeat indicator with popover ─────────────────────────────────────────
@@ -974,11 +1087,9 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
       )}
       <div className="px-7 py-5 border-b border-neutral-100 dark:border-neutral-800 flex items-center justify-between">
         <div>
-          <h1 className="text-[19px] font-bold tracking-tight text-neutral-900 dark:text-neutral-100">{(() => {
-            const hour = new Date().getHours()
-            const greeting = hour < 12 ? 'Good Morning' : hour < 17 ? 'Good Afternoon' : 'Good Evening'
-            return userName ? `${greeting}, ${userName.split(/\s+/)[0]}` : greeting
-          })()}</h1>
+          <h1 className="text-[19px] font-bold tracking-tight text-neutral-900 dark:text-neutral-100">{
+            userName ? getDailyGreeting(userName.split(/\s+/)[0]).greeting : (new Date().getHours() < 12 ? 'Good Morning' : new Date().getHours() < 17 ? 'Good Afternoon' : 'Good Evening')
+          }</h1>
           <p className="text-[12px] text-neutral-400 dark:text-neutral-500 mt-0.5 transition-opacity duration-400">
             {lastHeartbeat?.status === 'started'
               ? 'Checking in...'

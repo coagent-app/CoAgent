@@ -22,7 +22,7 @@ interface TeamMessage {
   visible: string
   agentContext: string
   to: string | string[] | null
-  attachments: string[]
+  attachments: { name: string; data: string; type: string; size: number }[]
 }
 
 interface TeamInfo {
@@ -125,7 +125,7 @@ export function TeamPane({ team, messages, teamStatus, onSendMessage, relayUrl, 
     requestAnimationFrame(() => {
       messagesEndRef.current?.scrollIntoView({ behavior: 'instant' })
     })
-  }, [])
+  }, [channel])
 
   // Rotate status words while processing
   useEffect(() => {
@@ -503,8 +503,13 @@ export function TeamPane({ team, messages, teamStatus, onSendMessage, relayUrl, 
           </div>
         </ScrollArea>}
 
-        {/* Input — hidden when viewing notes */}
-        {channel.type !== 'notes' && <div className="relative px-7 py-4 border-t border-neutral-100 dark:border-neutral-800">
+        {/* Input — hidden for notes and general (general is read-only feed) */}
+        {channel.type === 'main' && (
+          <div className="px-7 py-4 border-t border-neutral-100 dark:border-neutral-800">
+            <p className="text-[12px] text-neutral-400 dark:text-neutral-500 text-center">Team activity feed — use DMs to message agents directly.</p>
+          </div>
+        )}
+        {channel.type === 'dm' && <div className="relative px-7 py-4 border-t border-neutral-100 dark:border-neutral-800">
           {mentionQuery !== null && filteredMentions.length > 0 && (
             <div className="absolute bottom-full left-7 right-7 mb-1 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg shadow-lg overflow-hidden z-10">
               {filteredMentions.map((target, i) => (

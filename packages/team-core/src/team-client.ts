@@ -147,7 +147,7 @@ export class TeamClient {
     this.teamLog.append(message).catch(console.warn)
   }
 
-  async sendMessage(visible: string, agentContext: string = '', to: string | string[] | null = null): Promise<void> {
+  async sendMessage(visible: string, agentContext: string = '', to: string | string[] | null = null, attachments: import('@coagent/shared').TeamAttachment[] = []): Promise<void> {
     if (!this.teamId) return
 
     const me = this.roster.find(m => m.userId === this.options.userId)
@@ -164,7 +164,7 @@ export class TeamClient {
       visible,
       agentContext,
       to,
-      attachments: []
+      attachments,
     }
 
     try {

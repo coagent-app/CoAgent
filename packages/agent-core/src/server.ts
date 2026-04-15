@@ -92,8 +92,8 @@ async function streamTts(text: string, voice: string | undefined, sendFn: (msg: 
       headers: { 'Authorization': proxy.authHeader, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: 'tts-1', input: clean, voice: ttsVoice, response_format: 'mp3', speed: 1.10 }),
     })
-    if (!res.ok) { console.error('[TTS] Relay error:', res.status, await res.text().catch(() => '')); return }
-    if (!res.body) { console.error('[TTS] No response body'); return }
+    if (!res.ok) { console.error('[TTS] Relay error:', res.status, await res.text().catch(() => '')); sendFn({ type: 'voice_tts_done', format: 'mp3' }); return }
+    if (!res.body) { console.error('[TTS] No response body'); sendFn({ type: 'voice_tts_done', format: 'mp3' }); return }
     const reader = res.body.getReader()
     let seq = 0
     while (true) {
@@ -106,6 +106,7 @@ async function streamTts(text: string, voice: string | undefined, sendFn: (msg: 
     sendFn({ type: 'voice_tts_done', format: 'mp3' })
   } catch (err: any) {
     console.error('[TTS] Stream failed:', err.message)
+    sendFn({ type: 'voice_tts_done', format: 'mp3' })
   }
 }
 
@@ -1849,8 +1850,33 @@ try {
       dataDir: DATA_DIR,
       onTaggedMessage: async (message) => {
         try {
-          // If this is a reply from an agent we messaged, resolve the waiting tool call
-          const pendingCallback = message.from.isAgent ? agent.pendingAgentReplies.get(message.from.userId) : undefined
+          // Save any attachments to local files
+          if (message.attachments && message.attachments.length > 0) {
+            const filesDir = join(DATA_DIR, 'files', 'team-shared')
+            mkdirSync(filesDir, { recursive: true })
+            for (const att of message.attachments) {
+              const safeName = att.name.replace(/[^a-zA-Z0-9._-]/g, '_')
+              const filePath = join(filesDir, safeName)
+              writeFileSync(filePath, Buffer.from(att.data, 'base64'))
+              console.log(`[Team] Saved attachment: ${safeName} (${att.size} bytes) from ${message.from.name}`)
+            }
+          }
+
+          // If this is from an agent, check for pending callback or just show in UI (don't auto-respond to avoid loops)
+          if (message.from.isAgent) {
+            const pendingCallback = agent.pendingAgentReplies.get(message.from.userId)
+            if (pendingCallback) {
+              console.log(`[Team] Resolving pending reply from ${message.from.userId}`)
+              agent.pendingAgentReplies.delete(message.from.userId)
+              pendingCallback(message.visible)
+            } else {
+              console.log(`[Team] Agent message from ${message.from.name} — shown in team pane (no auto-response)`)
+            }
+            return
+          }
+
+          // Human message — resolve pending callback if one exists
+          const pendingCallback = agent.pendingAgentReplies.get(message.from.userId)
           if (pendingCallback) {
             console.log(`[Team] Resolving pending reply from ${message.from.userId}`)
             agent.pendingAgentReplies.delete(message.from.userId)
@@ -1922,15 +1948,24 @@ try {
           const teamContext = parts.length > 0 ? parts.join('\n\n') : ''
 
           const senderLabel = message.from.isAgent ? `${message.from.name}'s Agent` : message.from.name
-          const replyTo = message.from.isAgent
-            ? `Reply to @${message.from.userId}-agent so their agent receives your response.`
-            : `Reply to @${message.from.name} to notify the human.`
-          const teamPrompt = `[TEAM MESSAGE from ${senderLabel} (${message.from.role})]\n${message.visible}${message.agentContext ? `\n\n[Agent Context]: ${message.agentContext}` : ''}\n\nRespond to this team message. Use the send_team_message tool to reply. ${replyTo}`
+          const isBroadcast = message.to === null
+          const replyTo = isBroadcast
+            ? 'Reply to the general channel (omit the "to" field).'
+            : message.from.isAgent
+              ? `Reply to @${message.from.userId}-agent so their agent receives your response.`
+              : `Reply to @${message.from.userId} to notify the human.`
+          const attachmentInfo = message.attachments?.length
+            ? `\n\n[Attachments: ${message.attachments.map(a => `${a.name} (${a.type}, ${a.size} bytes) — saved to files/team-shared/${a.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`).join('; ')}]`
+            : ''
+          const teamPrompt = `[TEAM MESSAGE from ${senderLabel} (${message.from.role})]\n${message.visible}${message.agentContext ? `\n\n[Agent Context]: ${message.agentContext}` : ''}${attachmentInfo}\n\nRespond to this team message. Use the send_team_message tool to reply. ${replyTo}`
 
+          agent.currentTeamMessageSender = { userId: message.from.userId, isAgent: message.from.isAgent, name: message.from.name, isBroadcast: message.to === null }
           const response = await agent.teamChat(teamPrompt, teamContext, (text) => broadcast({ type: 'chat_chunk', text }), (tool, label) => broadcast({ type: 'tool_start', tool, label } as any))
+          agent.currentTeamMessageSender = null
           broadcast({ type: 'chat_response', message: { role: 'assistant', content: response, timestamp: new Date().toISOString() } })
           broadcast({ type: 'team_status', status: 'idle' } as any)
         } catch (err) {
+          agent.currentTeamMessageSender = null
           console.warn('[Team] Failed to process tagged message:', err)
           broadcast({ type: 'team_status', status: 'idle' } as any)
         }
@@ -2260,7 +2295,7 @@ function attachWssHandlers(server: WebSocketServer): void {
 function handleAuthenticatedConnection(ws: WebSocket): void {
     sendFullState(ws).catch(console.error)
 
-  ws.on('close', () => { console.log('[Server] Client disconnected') })
+  ws.on('close', () => { console.log('[Server] Client disconnected'); voiceProcessing = false })
   ws.on('error', (err) => { console.error('[Server] WS error:', err.message); ws.close() })
 
   ws.on('message', async (raw) => {
@@ -2526,12 +2561,31 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
         form.append('temperature', '0.2')
         form.append('response_format', 'verbose_json')
 
-        const res = await fetch(`${voiceProxy.baseUrl}/v1/audio/transcriptions`, {
-          method: 'POST',
-          headers: { 'Authorization': voiceProxy.authHeader },
-          body: form,
-        })
-        const data = await res.json() as { text?: string; duration?: number; error?: { message: string } }
+        const whisperController = new AbortController()
+        const whisperTimeout = setTimeout(() => whisperController.abort(), 30_000)
+        let data: { text?: string; duration?: number; error?: { message: string } }
+        try {
+          const res = await fetch(`${voiceProxy.baseUrl}/v1/audio/transcriptions`, {
+            method: 'POST',
+            headers: { 'Authorization': voiceProxy.authHeader },
+            body: form,
+            signal: whisperController.signal,
+          })
+          data = await res.json() as { text?: string; duration?: number; error?: { message: string } }
+        } catch (fetchErr: any) {
+          clearTimeout(whisperTimeout)
+          if (fetchErr.name === 'AbortError') {
+            console.error('[Voice] Transcription timed out after 30s')
+          } else {
+            console.error('[Voice] Transcription fetch failed:', fetchErr.message)
+          }
+          voiceProcessing = false
+          agentBusy = false
+          drainPendingSubAgentResults()
+          send(ws, { type: 'voice_summary', summary: '' })
+          return
+        }
+        clearTimeout(whisperTimeout)
         const text = data.text?.trim()
 
         // Track Whisper usage — duration from API verbose_json response
@@ -3664,8 +3718,19 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
     // Handle team messages from desktop client
     if (msg.type === 'team_send') {
       if (teamClient && teamClient.teamId) {
-        console.log(`[Team] Sending human message to: ${(msg as any).to || 'broadcast'}`)
-        await teamClient.sendHumanMessage((msg as any).message, (msg as any).to || null)
+        const to = (msg as any).to || null
+        console.log(`[Team] Sending human message to: ${to || 'broadcast'}`)
+        await teamClient.sendHumanMessage((msg as any).message, to)
+        // Register a no-op pending reply so the agent reply doesn't trigger teamChat
+        if (to) {
+          const targetUserId = String(to).replace(/-agent$/, '')
+          const timeout = setTimeout(() => { agent.pendingAgentReplies.delete(targetUserId) }, 60000)
+          agent.pendingAgentReplies.set(targetUserId, (_response: string) => {
+            clearTimeout(timeout)
+            // Reply already shows in team pane via onMessage — nothing else needed
+            console.log(`[Team] Human DM reply from ${targetUserId} received (shown in team pane)`)
+          })
+        }
       } else {
         console.warn('[Team] Cannot send — teamClient not connected or no teamId')
       }

@@ -1320,7 +1320,7 @@ function TeamTab({ teamInfo, relayUrl, relayToken, userName, onTeamChanged }: {
 const BASE_TABS: { id: SettingsTab; label: string }[] = [
   { id: 'general', label: 'General' },
   { id: 'brand', label: 'Brand' },
-  { id: 'team', label: 'Team' },
+  { id: 'team', label: 'Team \u00b7 Experimental' },
   { id: 'account', label: 'Account' },
 ]
 
