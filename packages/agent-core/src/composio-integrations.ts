@@ -683,7 +683,8 @@ export async function generateAuthUrl(
   const auth = await getToolkitAuth(apiKey, slug)
 
   // Check if user needs to provide fields (API keys, subdomains, etc.)
-  if (auth.connectionFields.length > 0) {
+  // Skip for managed OAuth integrations — Composio handles auth, fields are optional
+  if (auth.connectionFields.length > 0 && !auth.managed) {
     const userRequired = auth.connectionFields.filter(f => !f.default)
     const missing = userRequired.filter(f => !params?.[f.name]?.trim())
     if (missing.length > 0) {
@@ -720,7 +721,8 @@ export async function generateAuthUrl(
   }
 
   // Include connection data if user provided fields (API keys, subdomains, etc.)
-  if (auth.connectionFields.length > 0) {
+  // Skip for managed OAuth — let Composio handle auth without extra fields
+  if (auth.connectionFields.length > 0 && !auth.managed) {
     const connectionData: Record<string, string> = {}
     for (const f of auth.connectionFields) connectionData[f.name] = params?.[f.name]?.trim() || f.default || ''
     linkBody.connection = connectionData
