@@ -81,7 +81,7 @@ function buildDescriptors(db: CoAgentDB): StoreDescriptor[] {
       filename: 'folder-order.json',
       read: (raw) => {
         const order = FolderOrderSchema.parse(raw)
-        db.setFolderOrder(order)
+        db.setFolderOrder(order as any)
       },
     },
     {

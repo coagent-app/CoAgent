@@ -63,6 +63,58 @@ export interface MCPServerConfig {
 
 const MAX_STDERR_LINES = 50
 
+/** Default hard ceiling for a single tool call before we consider it hung. */
+export const DEFAULT_TOOL_TIMEOUT_MS = 60_000
+
+/** Per-tool overrides — longer for known-slow operations (web search, research, sub-agents). */
+const TOOL_TIMEOUT_OVERRIDES: Record<string, number> = {
+  // Web search / research can legitimately take a while
+  'web_search_exa': 90_000,
+  'research_paper_search': 90_000,
+  'company_research': 90_000,
+  // Deep-research style tools
+  'deep_research': 180_000,
+  // Sub-agents do their own multi-step work
+  'spawn_agents': 300_000,
+}
+
+export function timeoutForTool(toolName: string): number {
+  return TOOL_TIMEOUT_OVERRIDES[toolName] ?? DEFAULT_TOOL_TIMEOUT_MS
+}
+
+export class ToolTimeoutError extends Error {
+  readonly serverName: string
+  readonly toolName: string
+  readonly timeoutMs: number
+  constructor(serverName: string, toolName: string, timeoutMs: number) {
+    super(`Tool "${toolName}" on server "${serverName}" timed out after ${timeoutMs}ms`)
+    this.name = 'ToolTimeoutError'
+    this.serverName = serverName
+    this.toolName = toolName
+    this.timeoutMs = timeoutMs
+  }
+}
+
+/**
+ * Race a promise against a timeout. If the timer fires first, rejects with the
+ * result of errorFactory(). The underlying promise is NOT cancelled — it may
+ * still complete in the background. Callers should phrase user-facing errors
+ * accordingly ("the operation may still be running").
+ */
+export function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  errorFactory: () => Error
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(errorFactory()), timeoutMs)
+  })
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timer) clearTimeout(timer)
+  }) as Promise<T>
+}
+
 export interface LocalHandler {
   tools: Anthropic.Tool[]
   handler: (toolName: string, args: Record<string, unknown>) => Promise<string>
@@ -363,10 +415,13 @@ export class MCPManager {
   }
 
   async callTool(serverName: string, toolName: string, args: Record<string, unknown>): Promise<string> {
+    const timeoutMs = timeoutForTool(toolName)
+    const mkTimeout = () => new ToolTimeoutError(serverName, toolName, timeoutMs)
+
     // Check local handlers first — these run in-process, no subprocess needed
     const local = this.localHandlers.get(serverName)
     if (local) {
-      return local.handler(toolName, args)
+      return withTimeout(local.handler(toolName, args), timeoutMs, mkTimeout)
     }
 
     // On-demand reconnect: if the client is missing but we know how to connect it, try now.
@@ -376,7 +431,11 @@ export class MCPManager {
     const client = this.clients.get(serverName)
     if (!client) throw new Error(`MCP server not found: ${serverName}`)
     try {
-      const result = await client.callTool({ name: toolName, arguments: args })
+      const result = await withTimeout(
+        client.callTool({ name: toolName, arguments: args }),
+        timeoutMs,
+        mkTimeout
+      )
       const content = result.content as Array<{ type: string; text?: string }>
       const text = content
         .filter(c => c.type === 'text')
@@ -384,6 +443,8 @@ export class MCPManager {
         .join('\n')
       return text
     } catch (err: any) {
+      // Timeouts bubble straight up — reconnecting a slow-but-alive server makes things worse.
+      if (err instanceof ToolTimeoutError) throw err
       const code = err?.code
       const isPipeError = code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED' || err?.message?.includes('EPIPE')
       if (isPipeError) {
@@ -397,7 +458,11 @@ export class MCPManager {
           await this.ensureConnected(serverName)
           const retryClient = this.clients.get(serverName)
           if (retryClient) {
-            const result = await retryClient.callTool({ name: toolName, arguments: args })
+            const result = await withTimeout(
+              retryClient.callTool({ name: toolName, arguments: args }),
+              timeoutMs,
+              mkTimeout
+            )
             const content = result.content as Array<{ type: string; text?: string }>
             return content.filter(c => c.type === 'text').map(c => c.text ?? '').join('\n')
           }

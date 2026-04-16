@@ -4,7 +4,7 @@ import { readFile, readdir, writeFile, rename, mkdir } from 'fs/promises'
 import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { createHash } from 'crypto'
-import { MCPManager, MCPServerConfig } from './mcp-manager.js'
+import { MCPManager, MCPServerConfig, ToolTimeoutError } from './mcp-manager.js'
 import { ApprovalQueue } from './queue.js'
 import { CalendarStore } from './calendar-store.js'
 import type { TeamClient } from '@coagent/team-core'
@@ -3061,6 +3061,11 @@ Rules:
 
           return result
           } catch (err: unknown) {
+            if (err instanceof ToolTimeoutError) {
+              const secs = Math.round(err.timeoutMs / 1000)
+              console.warn(`[Agent] Tool "${block.name}" timed out after ${err.timeoutMs}ms`)
+              return `[Tool "${block.name}" timed out after ${secs}s. The underlying operation may still complete in the background. Try a different approach, retry, or ask the user if they want to wait.]`
+            }
             const msg = err instanceof Error ? err.message : String(err)
             console.error(`[Agent] Tool "${block.name}" threw unexpectedly:`, msg)
             return `Tool error: ${msg}`
