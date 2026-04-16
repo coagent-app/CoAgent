@@ -889,6 +889,8 @@ export class Agent {
   public onSubAgentComplete?: (agentId: string, label: string, result: string) => void
   isProcessing = false
   private missedEvents: { source: string; payload: unknown; time: string }[] = []
+  /** Number of triggers currently queued (running or waiting) — caps runaway chaining */
+  private pendingTriggerCount = 0
   private steeringQueue: string[] = []
   /** Index of the last scheduled-task message — pinned in selectHistory so it doesn't scroll out */
   private pinnedTaskIdx: number | null = null
@@ -1227,8 +1229,14 @@ export class Agent {
       return
     }
 
-    // Non-heartbeat triggers: queue if agent is busy
-    if (this.runLoopPromise) {
+    const context: ToolContext = isTodoDue ? 'chat'
+      : trigger.source === 'webhook' ? 'webhook'
+      : 'chat'
+
+    // Cap pending triggers to guard against runaway queuing (e.g. a misconfigured
+    // every-minute routine stacking up behind a long-running chat). Overflowed
+    // triggers are surfaced to the next heartbeat via missedEvents instead of running.
+    if (this.pendingTriggerCount >= 20) {
       if (this.missedEvents.length < 50) {
         this.missedEvents.push({
           source: trigger.source,
@@ -1236,27 +1244,40 @@ export class Agent {
           time: new Date().toISOString()
         })
       }
-      console.log(`[Agent] Queued missed event (${trigger.source}) — ${this.missedEvents.length} pending`)
+      console.warn(`[Agent] Pending trigger cap reached — dropping ${trigger.source} to missedEvents`)
       return
     }
 
-    const context: ToolContext = isTodoDue ? 'chat'
-      : trigger.source === 'webhook' ? 'webhook'
-      : 'chat'
+    // Chain behind any in-flight run loop so triggers execute sequentially instead of
+    // being silently dropped. Two routines firing at the same cron time, or a routine
+    // firing during an active chat, will each run to completion in arrival order.
+    // Heartbeat has its own loop (handled above) and bypasses this chain.
+    const prev = this.runLoopPromise ?? Promise.resolve('')
+    this.pendingTriggerCount++
+    const next: Promise<string> = prev
+      .catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error('[Agent] Previous run failed before trigger:', msg)
+        // Swallow — allow the queued trigger to proceed regardless of prior failure
+      })
+      .then(async () => {
+        if (this.heartbeatRunLoop) {
+          await this.heartbeatRunLoop.catch((err: unknown) =>
+            console.error('[Agent] Heartbeat error (awaited in trigger):', err instanceof Error ? err.message : err)
+          )
+        }
+        const message = trigger.content ?? this.buildTriggerMessage(trigger)
+        this.conversationHistory.push({ role: 'user', content: message })
+        if (isTodoDue) this.pinnedTaskIdx = this.conversationHistory.length - 1
+        return this.runLoop(onChunk, context, onToolCall)
+      })
 
-    const message = trigger.content ?? this.buildTriggerMessage(trigger)
-    this.conversationHistory.push({ role: 'user', content: message })
-
-    // Pin scheduled-task messages so they stay in the context window
-    if (isTodoDue) {
-      this.pinnedTaskIdx = this.conversationHistory.length - 1
-    }
-
-    this.runLoopPromise = this.runLoop(onChunk, context, onToolCall)
+    this.runLoopPromise = next
     try {
-      await this.runLoopPromise
+      await next
     } finally {
-      this.runLoopPromise = null
+      this.pendingTriggerCount--
+      if (this.runLoopPromise === next) this.runLoopPromise = null
       if (isTodoDue) this.pinnedTaskIdx = null
     }
   }
