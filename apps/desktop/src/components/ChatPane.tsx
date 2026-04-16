@@ -787,13 +787,18 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
     for (const id of codeCellOrder) {
       const cell = codeCells[id]
       if (!cell) continue
-      // Clamp anchor to valid range so cells never render past the last message
-      const idx = Math.min(cell.anchorIndex, messages.length)
+      // Dynamically resolve position from anchor message — don't rely on stored index
+      let idx = cell.anchorIndex
+      if (cell.anchorMessageId) {
+        const msgIdx = messages.findIndex(m => m.id === cell.anchorMessageId)
+        if (msgIdx >= 0) idx = msgIdx + 1
+      }
+      idx = Math.min(idx, messages.length)
       if (!map[idx]) map[idx] = []
       map[idx].push(cell)
     }
     return map
-  }, [codeCells, codeCellOrder, messages.length])
+  }, [codeCells, codeCellOrder, messages])
   const [input, setInput] = useState('')
   const [skillQuery, setSkillQuery] = useState<string | null>(null)
   const [selectedSkillIdx, setSelectedSkillIdx] = useState(0)
@@ -940,7 +945,7 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
         clearTimeout(timeout)
       }
     }
-    if (!isNearBottomRef.current && !streamingText && !thinking) return
+    if (!isNearBottomRef.current) return
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'instant' as ScrollBehavior, block: 'end' })

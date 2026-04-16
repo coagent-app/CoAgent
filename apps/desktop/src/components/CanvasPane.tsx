@@ -2,11 +2,10 @@
 //
 // The agent writes markdown via write_canvas / patch_canvas. We render it
 // with react-markdown + remark-gfm, inject branded CSS, and display inside
-// a same-origin iframe for style isolation and PDF export (window.print).
+// a same-origin iframe for style isolation and PDF export.
 //
-// Scroll-preservation strategy: srcdoc is set ONCE on mount (CSS + empty
-// structure only). Subsequent content updates are written directly into the
-// iframe's #content div via contentDocument to avoid iframe reloads.
+// Content updates are written directly into the iframe's #content div via
+// contentDocument to avoid iframe reloads and postMessage timing issues.
 
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { X, Download, Save, Loader2, History, CheckCircle, AlertCircle } from 'lucide-react'
@@ -97,7 +96,6 @@ export function CanvasPane({ canvas, streaming = false, streamingCode, settings,
 
   // Stable base srcdoc — CSS + structure only, no content. Rebuilt only when
   // brand CSS changes (which causes a full reload anyway).
-  // Content updates are sent via postMessage to avoid needing allow-same-origin.
   const srcdoc = useMemo(() => {
     return `<!DOCTYPE html>
 <html lang="en">
@@ -151,46 +149,6 @@ try {
     mermaidReady = true;
   }
 } catch(e) { console.warn('[mermaid] init failed:', e); }
-
-// Render mermaid blocks after content is set. react-markdown renders
-// \`\`\`mermaid blocks as <pre><code class="language-mermaid">...</code></pre>.
-// We convert those into <div class="mermaid"> for mermaid.run().
-var mermaidCounter = 0;
-function renderMermaid() {
-  if (!mermaidReady) return;
-  var codes = document.querySelectorAll('code.language-mermaid');
-  if (!codes.length) return;
-  var nodes = [];
-  codes.forEach(function(code) {
-    var pre = code.parentElement;
-    if (!pre || pre.tagName !== 'PRE') return;
-    var div = document.createElement('div');
-    div.className = 'mermaid';
-    div.id = 'mermaid-' + (++mermaidCounter);
-    div.textContent = code.textContent || '';
-    pre.replaceWith(div);
-    nodes.push(div);
-  });
-  if (nodes.length) {
-    mermaid.run({ nodes: nodes }).catch(function(err) {
-      console.warn('[mermaid] render error:', err);
-    });
-  }
-}
-
-window.addEventListener('message', function(e) {
-  if (!e.data || typeof e.data !== 'object') return;
-  if (e.data.type === 'set_content') {
-    var el = document.getElementById('content');
-    if (el) {
-      el.innerHTML = e.data.html;
-      if (!e.data.streaming) renderMermaid();
-    }
-  } else if (e.data.type === 'set_logo') {
-    var el = document.getElementById('logo');
-    if (el) el.innerHTML = e.data.html;
-  }
-});
 </script>
 </body>
 </html>`
@@ -227,14 +185,43 @@ window.addEventListener('message', function(e) {
     }
   }, [debouncedCode])
 
-  // Write content into the iframe via postMessage (no allow-same-origin needed)
+  // Write content directly into iframe's contentDocument (no postMessage)
   const updateIframeContent = useCallback((html: string, isStreaming: boolean) => {
-    iframeRef.current?.contentWindow?.postMessage({ type: 'set_content', html, streaming: isStreaming }, '*')
+    const doc = iframeRef.current?.contentDocument
+    if (!doc) return
+    const el = doc.getElementById('content')
+    if (el) {
+      el.innerHTML = html
+      // Render mermaid blocks after content is set (non-streaming only)
+      if (!isStreaming) {
+        try {
+          const codes = doc.querySelectorAll('code.language-mermaid')
+          if (codes.length && (iframeRef.current?.contentWindow as any)?.mermaidReady) {
+            const nodes: Element[] = []
+            codes.forEach((code) => {
+              const pre = code.parentElement
+              if (!pre || pre.tagName !== 'PRE') return
+              const div = doc.createElement('div')
+              div.className = 'mermaid'
+              div.id = `mermaid-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+              div.textContent = code.textContent || ''
+              pre.replaceWith(div)
+              nodes.push(div)
+            })
+            if (nodes.length) {
+              ;(iframeRef.current?.contentWindow as any)?.mermaid?.run({ nodes }).catch(() => {})
+            }
+          }
+        } catch {}
+      }
+    }
   }, [])
 
-  // Populate logo once iframe is ready; update when brand changes
   const updateIframeLogo = useCallback((html: string) => {
-    iframeRef.current?.contentWindow?.postMessage({ type: 'set_logo', html }, '*')
+    const doc = iframeRef.current?.contentDocument
+    if (!doc) return
+    const el = doc.getElementById('logo')
+    if (el) el.innerHTML = html
   }, [])
 
   // After iframe loads, seed both logo and content
@@ -414,7 +401,7 @@ window.addEventListener('message', function(e) {
           ref={iframeRef}
           srcDoc={srcdoc}
           onLoad={handleLoad}
-          sandbox="allow-scripts allow-popups"
+          sandbox="allow-scripts allow-same-origin allow-popups"
           title={canvas.title || 'Canvas'}
           className="border-0 block bg-white shadow-sm rounded-md w-full min-h-full"
         />

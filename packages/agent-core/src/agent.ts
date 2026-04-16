@@ -394,7 +394,7 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'call_external_tool',
-    description: 'Execute an external tool discovered via search_tools. Pass exact tool name and parameters from the schema. Before any action that sends, replies, modifies, or deletes — verify you have the correct target and information by fetching the full item first. Never assume IDs, recipients, or content from partial or truncated results.',
+    description: 'Execute an external tool discovered via search_tools. Pass exact tool name and parameters from the schema. Before any action that sends, replies, modifies, or deletes — verify you have the correct target and information by fetching the full item first. Never assume IDs, recipients, or content from partial or truncated results. All text content must be plain text, never markdown.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -444,7 +444,7 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'spawn_agents',
-    description: 'Launch background sub-agents for independent tasks. Agents run asynchronously — this tool returns IMMEDIATELY and you must continue talking to the user without waiting. Results are delivered automatically via chat when agents finish. Sub-agents can search, read memory/files, create documents, and update memory — but cannot send emails, queue approvals, or perform external actions. Use message_agent to check on or redirect running agents.',
+    description: 'Launch background sub-agents for independent tasks. Returns IMMEDIATELY — continue talking to the user, don\'t wait. Results appear in chat when done.\n\nWhen to use: 2+ independent tasks (research competitors AND draft email), deep research while you keep talking, tasks that don\'t need each other\'s output.\nWhen NOT to use: single quick tasks, anything requiring back-and-forth with the user, tasks that depend on each other.\n\nCan: search, read memory/files, create documents, update memory.\nCannot: send emails, queue approvals, call external tools, or talk to the user.\n\nWrite instructions as if briefing someone with no context — include all names, dates, goals, and where to save output.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -848,7 +848,7 @@ ${settings.heartbeat_interval > 0 ? `\n<heartbeat>\nEvery ${settings.heartbeat_i
 ${googleCalendarConnected ? '\nGoogle Calendar is synced into schedule(list). To modify Google events, use GOOGLECALENDAR_UPDATE_EVENT or GOOGLECALENDAR_DELETE_EVENT through call_external_tool.' : ''}${imessageConnected ? '\nYou have direct access to iMessage. Use the built-in iMessage tools to list conversations (with unread counts), search messages by keyword/date/contact, read full conversation threads, and send texts by phone number, email, or contact name. These are built-in tools — call them directly, no need for search_tools.' : ''}
 
 Keep responses short and direct. No emojis. Have personality — be warm, sharp, and human.
-Use plain text inside emails and messages — markdown renders literally in Gmail.
+Never use markdown (**, ##, [](), bullets) in emails, messages, or any external tool content — it renders as raw text.
 Before sending, replying, or modifying anything external, make sure you have the correct information — don't guess.
 When sharing documents via email, attach or link the actual file — never paste the document content into the email body.
 ${memoryFiles.length > 0 ? `\nRecent memories (read relevant ones before responding): ${memoryFiles.join(', ')}.` : ''}
