@@ -227,7 +227,6 @@ export const INTEGRATIONS = [
   // Email & Communication
   { slug: 'gmail', name: 'Gmail', category: 'Email & Communication', description: 'Email', capabilities: 'Send and reply to emails, search inbox, manage drafts, handle attachments, read labels' },
   { slug: 'outlook', name: 'Outlook', category: 'Email & Communication', description: 'Email and calendar', capabilities: 'Send and reply to emails, read inbox, search messages, manage folders, handle attachments' },
-  { slug: 'zoho_mail', name: 'Zoho Mail', category: 'Email & Communication', description: 'Business email', capabilities: 'Send and read emails, search inbox, manage folders, handle attachments' },
   { slug: 'slack', name: 'Slack', category: 'Email & Communication', description: 'Team messaging', capabilities: 'Send messages to channels or DMs, read conversations, search messages, post replies in threads' },
   { slug: 'microsoft_teams', name: 'Microsoft Teams', category: 'Email & Communication', description: 'Team chat and calls', capabilities: 'Send messages to channels, read conversations, post replies, search message history' },
   { slug: 'discord', name: 'Discord', category: 'Email & Communication', description: 'Community chat', capabilities: 'Send messages to channels, read channel history, post to threads, manage server content' },
@@ -250,15 +249,12 @@ export const INTEGRATIONS = [
   { slug: 'capsule_crm', name: 'Capsule CRM', category: 'CRM & Sales', description: 'Small business CRM', capabilities: 'Create contacts and opportunities, log notes and tasks, search records, update stages' },
   { slug: 'folk', name: 'Folk', category: 'CRM & Sales', description: 'Relationship CRM', capabilities: 'Create and update contacts, manage pipelines, add notes, search records' },
   { slug: 'follow_up_boss', name: 'Follow Up Boss', category: 'CRM & Sales', description: 'Real estate CRM', capabilities: 'Add and update leads, log notes, assign follow-up tasks, search contacts' },
-  { slug: 'zoho', name: 'Zoho', category: 'CRM & Sales', description: 'CRM', capabilities: 'Create leads and contacts, update deals, log activities, search records' },
-  { slug: 'zoho_bigin', name: 'Zoho Bigin', category: 'CRM & Sales', description: 'Lightweight CRM', capabilities: 'Manage pipelines, create contacts, log notes, update deal stages' },
   { slug: 'dynamics365', name: 'Dynamics 365', category: 'CRM & Sales', description: 'Enterprise CRM', capabilities: 'Create and update contacts, manage opportunities, log activities, search accounts' },
   { slug: 'freshdesk', name: 'Freshdesk', category: 'CRM & Sales', description: 'Support tickets', capabilities: 'Create and reply to tickets, search conversations, add notes, update status' },
   { slug: 'gorgias', name: 'Gorgias', category: 'CRM & Sales', description: 'Ecommerce support', capabilities: 'Reply to tickets, search conversations, add internal notes, update ticket status' },
   { slug: 'help_scout', name: 'Help Scout', category: 'CRM & Sales', description: 'Shared inbox support', capabilities: 'Reply to conversations, search contacts, add notes, manage mailbox' },
   { slug: 'salesflare', name: 'Salesflare', category: 'CRM & Sales', description: 'Automated B2B CRM', capabilities: 'Create contacts and opportunities, log emails, track pipeline, manage tasks' },
   { slug: 'zendesk', name: 'Zendesk', category: 'CRM & Sales', description: 'Support tickets', capabilities: 'Create and reply to tickets, search conversations, add notes, update ticket status' },
-  { slug: 'zoho_desk', name: 'Zoho Desk', category: 'CRM & Sales', description: 'Help desk', capabilities: 'Create and reply to tickets, search issues, add comments, update ticket status' },
 
   // Sales Outreach
   { slug: 'instantly', name: 'Instantly', category: 'Sales Outreach', description: 'Cold email outreach', capabilities: 'Create campaigns, add leads to sequences, check reply stats, manage sending accounts' },
@@ -310,9 +306,6 @@ export const INTEGRATIONS = [
   { slug: 'ko_fi', name: 'Ko-fi', category: 'Finance & Payments', description: 'Donations and memberships', capabilities: 'List supporters, check donations, manage memberships, retrieve payment data' },
   { slug: 'lemon_squeezy', name: 'Lemon Squeezy', category: 'Finance & Payments', description: 'SaaS payments', capabilities: 'List products and orders, manage subscriptions, retrieve customer data' },
   { slug: 'wave_accounting', name: 'Wave', category: 'Finance & Payments', description: 'Invoicing', capabilities: 'Create and send invoices, track expenses, manage customers, record payments' },
-  { slug: 'zoho_books', name: 'Zoho Books', category: 'Finance & Payments', description: 'Accounting', capabilities: 'Create invoices and bills, manage contacts, record payments, pull reports' },
-  { slug: 'zoho_invoice', name: 'Zoho Invoice', category: 'Finance & Payments', description: 'Invoicing', capabilities: 'Create and send invoices, manage clients, record payments, apply discounts' },
-  { slug: 'zoho_inventory', name: 'Zoho Inventory', category: 'Finance & Payments', description: 'Inventory management', capabilities: 'Manage products and stock, create orders, track shipments, update inventory levels' },
   { slug: 'ynab', name: 'YNAB', category: 'Finance & Payments', description: 'Budgeting', capabilities: 'Read budget categories, add transactions, check account balances, review spending reports' },
 
   // Documents & E-Sign
