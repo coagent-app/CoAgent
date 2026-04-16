@@ -11,6 +11,8 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.30.0",
+    "better-sqlite3": "^12.9.0",
+    "zod": "^4.3.6",
     "@coagent/mcp-contacts": "workspace:*",
     "@coagent/mcp-exa": "workspace:*",
     "@coagent/mcp-imessage": "workspace:*",
@@ -42,6 +44,7 @@
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
     "@types/hapi__boom": "^9.0.1",
     "@types/node": "^20.0.0",
     "@types/node-cron": "^3.0.0",
