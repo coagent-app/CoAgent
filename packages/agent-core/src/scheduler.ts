@@ -406,20 +406,30 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
 
   cron.schedule('0 3 * * *', async () => {
     console.log('[Scheduler] 3 AM job starting...')
-    try {
-      const { tools: allTools, serverMap } = await agent.mcpManager.getAllTools()
-      const memoryTools = allTools.filter(t => serverMap.get(t.name) === 'memory')
-      const callMemoryTool = (tool: string, args: Record<string, unknown>) =>
-        agent.mcpManager.callTool('memory', tool, args)
-      const summary = await keepAwakeDuring(extractInsights(dataDir, memoryTools, callMemoryTool))
-      await pruneOldEntries(dataDir)
-      writeNightlyRun(dataDir, 'success')
-      console.log('[Scheduler] 3 AM job complete (memory updates + cleanup)')
-      callbacks?.onNightly?.('success', summary)
-    } catch (err: any) {
-      writeNightlyRun(dataDir, 'failed', err.message)
-      console.error('[Scheduler] 3 AM job failed:', err.message)
-      callbacks?.onNightly?.('failed', err.message)
+    const maxRetries = 3
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const { tools: allTools, serverMap } = await agent.mcpManager.getAllTools()
+        const memoryTools = allTools.filter(t => serverMap.get(t.name) === 'memory')
+        const callMemoryTool = (tool: string, args: Record<string, unknown>) =>
+          agent.mcpManager.callTool('memory', tool, args)
+        const summary = await keepAwakeDuring(extractInsights(dataDir, memoryTools, callMemoryTool))
+        await pruneOldEntries(dataDir)
+        writeNightlyRun(dataDir, 'success')
+        console.log('[Scheduler] 3 AM job complete (memory updates + cleanup)')
+        callbacks?.onNightly?.('success', summary)
+        break
+      } catch (err: any) {
+        if (attempt < maxRetries && err.message?.includes('429')) {
+          const delay = attempt * 60_000
+          console.log(`[Scheduler] 3 AM job got 429, retrying in ${delay / 1000}s (attempt ${attempt}/${maxRetries})`)
+          await new Promise(r => setTimeout(r, delay))
+          continue
+        }
+        writeNightlyRun(dataDir, 'failed', err.message)
+        console.error('[Scheduler] 3 AM job failed:', err.message)
+        callbacks?.onNightly?.('failed', err.message)
+      }
     }
     // Schedule tomorrow's wake
     scheduleNightlyWake()
