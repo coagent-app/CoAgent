@@ -1047,7 +1047,9 @@ const scheduler = startScheduler(agent, DATA_DIR, {
     // Surface heartbeat summary in chat so users see the agent is alive
     if (status === 'done' && summary) {
       const timeStr = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
-      broadcast({ type: 'chat_response', message: { role: 'assistant', content: `**[Heartbeat · ${timeStr}]**\n${summary}`, timestamp: new Date().toISOString() } })
+      const content = `**[Heartbeat · ${timeStr}]**\n${summary}`
+      broadcast({ type: 'chat_response', message: { role: 'assistant', content, timestamp: new Date().toISOString() } })
+      agent.persistBackgroundMessage(content)
     }
   },
   onNightly: (status, summary) => {
@@ -1057,6 +1059,7 @@ const scheduler = startScheduler(agent, DATA_DIR, {
       ? `**[Nightly · ${timeStr}]**\n${summary || 'Nothing to update.'}`
       : `**[Nightly · ${timeStr}]** ❌ Failed: ${summary || 'unknown error'}`
     broadcast({ type: 'chat_response', message: { role: 'assistant', content, timestamp: new Date().toISOString() } })
+    agent.persistBackgroundMessage(content)
   },
   onRoutine: (status, label, summary) => {
     if (status === 'started') return // only surface completion in chat
@@ -1066,6 +1069,7 @@ const scheduler = startScheduler(agent, DATA_DIR, {
       ? `**[Routine · ${timeStr}] ${label}**${summary ? `\n${summary}` : ''}`
       : `**[Routine · ${timeStr}] ${label}** ❌ Failed: ${summary || 'unknown error'}`
     broadcast({ type: 'chat_response', message: { role: 'assistant', content, timestamp: new Date().toISOString() } })
+    agent.persistBackgroundMessage(content)
   },
   onHeartbeatStream: (() => {
     return (type: 'start' | 'chunk' | 'tool' | 'done', data?: any) => {

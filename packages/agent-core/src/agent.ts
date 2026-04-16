@@ -1109,6 +1109,13 @@ export class Agent {
     }
   }
 
+  /** Persist a background message (heartbeat, nightly, routine) into conversation history so it survives restart. */
+  persistBackgroundMessage(content: string): void {
+    this.conversationHistory.push({ role: 'assistant', content })
+    this.capHistory(this.conversationHistory)
+    this.saveHistory().catch(console.error)
+  }
+
   /** Attach canvas doc references to the last assistant message so they persist across restarts. */
   attachDocsToLastMessage(docs: Array<{ id: string; title: string }>): void {
     for (let i = this.conversationHistory.length - 1; i >= 0; i--) {
