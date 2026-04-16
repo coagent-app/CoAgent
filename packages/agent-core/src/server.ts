@@ -43,6 +43,7 @@ import type { WSClientMessage, WSServerMessage } from '@coagent/shared'
 import { join, delimiter as pathDelimiter } from 'path'
 import { homedir } from 'os'
 import { initCustomMcpDir, readRegistry, writeCustomMcpCredentials, disconnectCustomMcp, deleteCustomMcp, getCustomMcpConfigs, getCustomIntegrations, readCustomMcpCode, updateCustomMcpCode, getCustomMcpDir } from './custom-mcp.js'
+import { acquireInstanceLock, InstanceLockError, type InstanceLockHandle } from './instance-lock.js'
 
 // Load from data dir .env — the secure isolated folder on the user's machine.
 // loadApiKeysToEnv runs first so any keys already in process.env (e.g. from the
@@ -241,6 +242,20 @@ function buildMcpConfigs(): MCPServerConfig[] {
 
 const DATA_DIR = process.env.COAGENT_DATA_DIR || join(homedir(), '.coagent')
 mkdirSync(DATA_DIR, { recursive: true })
+
+// Acquire exclusive lock on the data dir BEFORE anything else reads/writes.
+// Prevents two Co-Agent instances (e.g. dev build + installed app) from
+// racing on JSON files and corrupting queue/chat history/file index.
+let instanceLock: InstanceLockHandle
+try {
+  instanceLock = acquireInstanceLock(DATA_DIR)
+} catch (err) {
+  if (err instanceof InstanceLockError) {
+    console.error(err.message)
+    process.exit(1)
+  }
+  throw err
+}
 
 setUsageDataDir(DATA_DIR)
 initCustomMcpDir(DATA_DIR)
@@ -2078,6 +2093,7 @@ function spawnTeammateAgents(): void {
 
 function shutdown(signal: string): void {
   console.log(`[Server] ${signal} received — shutting down gracefully`)
+  try { instanceLock?.release() } catch {}
   for (const p of teammateProcs) { try { p.kill('SIGTERM') } catch {} }
   teammateProcs.length = 0
   relay.stop()
