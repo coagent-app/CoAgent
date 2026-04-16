@@ -21,22 +21,93 @@ function eventIdsPath(dataDir: string): string {
 interface PersistedEventIds {
   briefed: string[]
   recapped: string[]
+  /** id → ISO timestamp of when the id was first added. Optional for back-compat. */
+  seenAt?: Record<string, string>
 }
 
-function loadEventIds(dataDir: string): PersistedEventIds {
+interface EventIdState {
+  briefed: Set<string>
+  recapped: Set<string>
+  seenAt: Record<string, string>
+}
+
+/**
+ * Retention window for brief/recap dedup IDs. Any id whose `seenAt` timestamp is
+ * older than this is dropped on the next save, preventing `scheduler-event-ids.json`
+ * from growing unboundedly over months of calendar use.
+ *
+ * 30 days is well past any brief/recap window (minutes), so pruned IDs will never
+ * be the target of a future brief/recap — safe to drop.
+ */
+export const EVENT_ID_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
+
+function loadEventIds(dataDir: string): EventIdState {
   try {
-    return JSON.parse(readFileSync(eventIdsPath(dataDir), 'utf8'))
+    const raw = JSON.parse(readFileSync(eventIdsPath(dataDir), 'utf8')) as Partial<PersistedEventIds>
+    const briefed = new Set(Array.isArray(raw.briefed) ? raw.briefed : [])
+    const recapped = new Set(Array.isArray(raw.recapped) ? raw.recapped : [])
+    const seenAt =
+      raw.seenAt && typeof raw.seenAt === 'object' && !Array.isArray(raw.seenAt)
+        ? { ...(raw.seenAt as Record<string, string>) }
+        : {}
+    return { briefed, recapped, seenAt }
   } catch {
-    return { briefed: [], recapped: [] }
+    return { briefed: new Set(), recapped: new Set(), seenAt: {} }
   }
 }
 
-function saveEventIds(dataDir: string, briefed: Set<string>, recapped: Set<string>): void {
+/**
+ * Drop IDs whose `seenAt` is older than the retention window. Legacy entries
+ * (no `seenAt` — from the pre-rotation on-disk format) are stamped with `nowMs`
+ * on their first encounter so the clock starts from upgrade time, not epoch.
+ * This is deliberate: we'd rather keep a few extra IDs for 30 more days than
+ * accidentally re-brief a user on an event they already saw.
+ *
+ * Exported for unit testing.
+ */
+export function pruneExpiredEventIds(
+  briefed: Set<string>,
+  recapped: Set<string>,
+  seenAt: Record<string, string>,
+  nowMs: number = Date.now()
+): { pruned: number } {
+  const cutoff = nowMs - EVENT_ID_RETENTION_MS
+  const nowIso = new Date(nowMs).toISOString()
+
+  // Stamp any legacy id missing a timestamp so it gets a real clock started.
+  for (const id of briefed) if (!seenAt[id]) seenAt[id] = nowIso
+  for (const id of recapped) if (!seenAt[id]) seenAt[id] = nowIso
+
+  let pruned = 0
+  // Snapshot the union so we don't mutate while iterating.
+  const allIds = new Set<string>([...briefed, ...recapped])
+  for (const id of allIds) {
+    const ts = Date.parse(seenAt[id] ?? '')
+    if (Number.isFinite(ts) && ts < cutoff) {
+      briefed.delete(id)
+      recapped.delete(id)
+      delete seenAt[id]
+      pruned++
+    }
+  }
+
+  // Drop orphan seenAt entries (id no longer in either set — defensive).
+  for (const id of Object.keys(seenAt)) {
+    if (!briefed.has(id) && !recapped.has(id)) delete seenAt[id]
+  }
+
+  return { pruned }
+}
+
+function saveEventIds(dataDir: string, state: EventIdState): void {
   try {
-    writeFileSync(
-      eventIdsPath(dataDir),
-      JSON.stringify({ briefed: [...briefed], recapped: [...recapped] }, null, 2)
-    )
+    pruneExpiredEventIds(state.briefed, state.recapped, state.seenAt)
+    const payload: PersistedEventIds = {
+      briefed: [...state.briefed],
+      recapped: [...state.recapped],
+      seenAt: state.seenAt,
+    }
+    writeFileSync(eventIdsPath(dataDir), JSON.stringify(payload, null, 2))
   } catch (err: any) {
     console.error('[Scheduler] Failed to persist event IDs:', err.message)
   }
@@ -476,9 +547,9 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
   // ── Meeting brief timer: fires N minutes before calendar events ─────────────
 
   let briefTimer: ReturnType<typeof setTimeout> | null = null
-  const persistedIds = loadEventIds(dataDir)
-  const briefedEvents = new Set<string>(persistedIds.briefed)
-  const recappedEvents = new Set<string>(persistedIds.recapped)
+  const eventIdState = loadEventIds(dataDir)
+  const briefedEvents = eventIdState.briefed
+  const recappedEvents = eventIdState.recapped
 
   async function fireMeetingBrief(): Promise<void> {
     const settings = await readSettings(dataDir)
@@ -499,7 +570,8 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
       // Fire if we're within 2 minutes of the brief time (tolerance for sleep/wake drift)
       if (now >= briefTime && now < startTime && (now - briefTime) < 2 * 60 * 1000) {
         briefedEvents.add(event.id)
-        saveEventIds(dataDir, briefedEvents, recappedEvents)
+        eventIdState.seenAt[event.id] = new Date().toISOString()
+        saveEventIds(dataDir, eventIdState)
         const minsUntil = Math.round((startTime - now) / 60000)
         console.log(`[Scheduler] Meeting brief firing: "${event.label}" in ${minsUntil}min`)
         callbacks?.onTodoStream?.('start', { task: `Meeting brief: ${event.label}`, due: event.start })
@@ -591,7 +663,8 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
       // Fire if we're within 2 minutes of the recap time (tolerance for sleep/wake drift)
       if (now >= recapTime && (now - recapTime) < 2 * 60 * 1000) {
         recappedEvents.add(event.id)
-        saveEventIds(dataDir, briefedEvents, recappedEvents)
+        eventIdState.seenAt[event.id] = new Date().toISOString()
+        saveEventIds(dataDir, eventIdState)
         const minsAgo = Math.round((now - endTime) / 60000)
         console.log(`[Scheduler] Meeting recap firing: "${event.label}" ended ${minsAgo}min ago`)
         callbacks?.onTodoStream?.('start', { task: `Meeting recap: ${event.label}`, due: event.end })

@@ -24,6 +24,12 @@ export interface FileIndexEntry {
 export interface SchedulerEventIds {
   briefed: string[]
   recapped: string[]
+  /**
+   * Optional map of event id → ISO timestamp of when it was first briefed/recapped.
+   * Used by the scheduler to TTL-prune entries. Optional for backward compat with
+   * on-disk files written before this field existed.
+   */
+  seenAt?: Record<string, string>
 }
 
 // Conversation messages follow Anthropic.MessageParam shape: content can be a
