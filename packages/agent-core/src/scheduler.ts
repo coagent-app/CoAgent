@@ -245,6 +245,10 @@ function cancelWindowsWake(): void {
 // ── Cross-platform wrappers ─────────────────────────────────────────────────
 
 function scheduleWake(date: Date): void {
+  // Teammate/team-agent processes must not schedule system wakes — only the
+  // primary process should, otherwise we get duplicate pmset entries.
+  if (process.env.COAGENT_TEAMMATE) return
+
   if (process.platform === 'darwin') scheduleMacWake(date)
   else if (process.platform === 'win32') scheduleWindowsWake(date)
 }
@@ -269,11 +273,12 @@ process.on('exit', cleanupCaffeinates)
 process.on('SIGINT', () => { cleanupCaffeinates(); process.exit(0) })
 process.on('SIGTERM', () => { cleanupCaffeinates(); process.exit(0) })
 
-/** Kill orphaned caffeinate processes from previous CoAgent runs */
+/** Kill orphaned caffeinate processes from previous CoAgent runs.
+ *  We match on the '-t 60' timeout arg to avoid killing other tools' caffeinates. */
 function killOrphanedCaffeinates(): void {
   if (process.platform !== 'darwin') return
   try {
-    const out = execSync('pgrep -f "caffeinate -i"', { encoding: 'utf8', timeout: 3000 }).trim()
+    const out = execSync('pgrep -f "caffeinate -i -t 60"', { encoding: 'utf8', timeout: 3000 }).trim()
     if (!out) return
     const pids = out.split('\n').filter(Boolean)
     if (pids.length > 0) {
@@ -287,7 +292,7 @@ function killOrphanedCaffeinates(): void {
 function keepAwakeDuring<T>(promise: Promise<T>): Promise<T> {
   if (process.platform === 'darwin') {
     // -t 300 = self-destruct after 5 min even if we fail to kill it
-    const proc = spawn('caffeinate', ['-i', '-t', '300'], { stdio: 'ignore', detached: false })
+    const proc = spawn('caffeinate', ['-i', '-t', '60'], { stdio: 'ignore', detached: false })
     proc.on('error', () => {})
     activeCaffeinates.add(proc)
     proc.on('exit', () => activeCaffeinates.delete(proc))
@@ -838,29 +843,44 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
       heartbeatTimer = setTimeout(() => fireHeartbeat(gen), delay)
       callbacks?.onHeartbeat?.('scheduled', undefined, wakeAt)
 
-      // Wake at whichever is sooner: heartbeat, next task, or 3 AM nightly job
+      // Only schedule a system wake if the heartbeat falls within active hours.
+      // This prevents the machine from waking every interval overnight just to
+      // check isActiveNow() and skip — the #1 source of overnight battery drain.
+      const heartbeatInActiveHours = isActiveNow(settings, wakeAt)
+
+      // Wake at whichever is sooner: heartbeat (if in-hours), next task, or 3 AM nightly job
       const nextTask = agent.calendar.getNextTaskTime()
       const now = new Date()
       const next3am = new Date(now)
       next3am.setHours(3, 0, 0, 0)
       if (next3am <= now) next3am.setDate(next3am.getDate() + 1)
-      const candidates = [wakeAt, next3am]
+      const candidates: Date[] = [next3am]
+      if (heartbeatInActiveHours) candidates.push(wakeAt)
       if (nextTask) candidates.push(nextTask)
-      const earliestWake = candidates.reduce((a, b) => a < b ? a : b)
-      scheduleWake(earliestWake)
+      if (candidates.length > 0) {
+        const earliestWake = candidates.reduce((a, b) => a < b ? a : b)
+        scheduleWake(earliestWake)
+      }
     }).catch(() => {})
   }
 
   // ── Exports for external callers (settings change, todo change) ────────────
 
-  // Exposed via onCalendarChanged callback on Agent
+  // Exposed via onCalendarChanged callback on Agent.
+  // Debounce: calendar syncs can fire rapid changes — batch into one reschedule pass
+  // to avoid a burst of pmset exec calls.
+  let calendarDebounce: ReturnType<typeof setTimeout> | null = null
   const origOnCalendarChanged = agent.onCalendarChanged
   agent.onCalendarChanged = () => {
     origOnCalendarChanged?.()
-    scheduleTaskTimer()
-    syncRoutineTimers()
-    scheduleBriefTimer()
-    scheduleRecapTimer()
+    if (calendarDebounce) clearTimeout(calendarDebounce)
+    calendarDebounce = setTimeout(() => {
+      calendarDebounce = null
+      scheduleTaskTimer()
+      syncRoutineTimers()
+      scheduleBriefTimer()
+      scheduleRecapTimer()
+    }, 2000)
   }
 
   // ── Startup: fire any overdue tasks, register routines, then schedule timers ─
