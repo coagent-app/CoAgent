@@ -328,6 +328,36 @@ function keepAwakeDuring<T>(promise: Promise<T>): Promise<T> {
   return promise
 }
 
+// ── Sleep-after-work ─────────────────────────────────────────────────────────
+// After a wake-triggered job completes, check if the user is idle. If they
+// haven't touched keyboard/mouse recently, put the machine back to sleep
+// instead of waiting 10-15 min for macOS's idle timer.
+
+function getUserIdleSeconds(): number {
+  if (process.platform !== 'darwin') return 0
+  try {
+    // HIDIdleTime is in nanoseconds
+    const out = execSync('ioreg -c IOHIDSystem -d 4 | grep HIDIdleTime', {
+      encoding: 'utf8', timeout: 3000,
+    })
+    const match = out.match(/= (\d+)/)
+    return match ? Math.floor(Number(match[1]) / 1_000_000_000) : 0
+  } catch { return 0 }
+}
+
+/** If the user is idle (>5 min), put the machine to sleep so we don't waste
+ *  10-15 min waiting for macOS's idle timer after a wake-triggered job. */
+function sleepIfIdle(): void {
+  if (process.platform !== 'darwin') return
+  const idleSec = getUserIdleSeconds()
+  if (idleSec > 300) { // 5 minutes
+    console.log(`[Scheduler] User idle for ${Math.round(idleSec / 60)}min — putting machine to sleep`)
+    try {
+      execSync('pmset sleepnow', { stdio: 'ignore', timeout: 5000 })
+    } catch {}
+  }
+}
+
 // ── Scheduler ───────────────────────────────────────────────────────────────
 
 export interface SchedulerCallbacks {
@@ -438,6 +468,8 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
     }
     // Schedule tomorrow's wake
     scheduleNightlyWake()
+    // If nobody's at the machine, sleep immediately instead of idling 15 min
+    sleepIfIdle()
   })
 
   // ── Task timer: fires at exact due time, no polling ────────────────────────
@@ -811,6 +843,7 @@ export function startScheduler(agent: Agent, dataDir: string, callbacks?: Schedu
     }
 
     scheduleHeartbeatTimer()
+    sleepIfIdle()
   }
 
   function scheduleHeartbeatTimer(): void {
