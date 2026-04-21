@@ -20,6 +20,8 @@ interface QueuePaneProps {
 }
 
 export function QueuePane({ queue, done, selectedId, onSelect }: QueuePaneProps) {
+  const todayKey = new Date().toDateString()
+  const doneToday = done.filter(d => new Date(d.completedAt).toDateString() === todayKey)
   return (
     <div className="w-72 bg-[#F5F5F4] dark:bg-neutral-900 border-r border-neutral-200 dark:border-neutral-800 flex flex-col flex-shrink-0 overflow-hidden">
       <div className="px-4 py-4 border-b border-neutral-200 dark:border-neutral-800">
@@ -60,7 +62,7 @@ export function QueuePane({ queue, done, selectedId, onSelect }: QueuePaneProps)
             </button>
           ))}
 
-          {done.length > 0 && (
+          {doneToday.length > 0 && (
             <>
               <div className="flex items-center gap-2 px-1 py-2">
                 <Separator className="flex-1 dark:bg-neutral-800" />
@@ -69,7 +71,7 @@ export function QueuePane({ queue, done, selectedId, onSelect }: QueuePaneProps)
                 </span>
                 <Separator className="flex-1 dark:bg-neutral-800" />
               </div>
-              {done.map(item => (
+              {doneToday.map(item => (
                 <div key={item.id} className="flex items-start gap-2 px-1 py-1.5">
                   <span className="text-emerald-500 text-[13px] flex-shrink-0 mt-0.5">&#10003;</span>
                   <span className="text-[12px] text-neutral-500 dark:text-neutral-400 leading-relaxed">{item.description}</span>
@@ -78,7 +80,7 @@ export function QueuePane({ queue, done, selectedId, onSelect }: QueuePaneProps)
             </>
           )}
 
-          {queue.length === 0 && done.length === 0 && (
+          {queue.length === 0 && doneToday.length === 0 && (
             <p className="text-[13px] text-neutral-400 dark:text-neutral-500 px-1 py-6">
               Nothing yet. Co-Agent is watching.
             </p>

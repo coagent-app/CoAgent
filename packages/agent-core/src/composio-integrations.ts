@@ -377,6 +377,14 @@ export const WORKFLOW_EXAMPLES: Record<string, string[]> = {
     'Draft a follow-up to my last meeting',
     'Find emails from clients I haven\'t replied to',
   ],
+  'coagent:imessage': [
+    'On every heartbeat, scan new iMessages and update my memory with anything important',
+    'Catch me up on client messages I missed today',
+    'Which leads haven\'t I replied to yet?',
+    'Summarize this week\'s conversations with my top client',
+    'Draft a follow-up to the last message from my hottest lead',
+    'Flag any new messages that mention pricing, contracts, or commission',
+  ],
   slack: [
     'What did I miss in Slack today?',
     'Post an update to my team channel',

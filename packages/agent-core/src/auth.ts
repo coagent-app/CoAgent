@@ -19,9 +19,11 @@ async function readEnvLines(dataDir: string): Promise<string[]> {
 }
 
 async function writeEnvLines(dataDir: string, lines: string[]): Promise<void> {
-  await mkdir(dataDir, { recursive: true })
+  await mkdir(dataDir, { recursive: true, mode: 0o700 })
   const filePath = join(dataDir, ENV_FILE)
-  await writeFile(filePath, lines.join('\n'), 'utf-8')
+  // Pass mode on create so the file isn't briefly world-readable between write and chmod.
+  // (mode is ignored by writeFile if the file already exists — the chmod below covers that case.)
+  await writeFile(filePath, lines.join('\n'), { encoding: 'utf-8', mode: 0o600 })
   if (process.platform !== 'win32') await chmod(filePath, 0o600)
 }
 

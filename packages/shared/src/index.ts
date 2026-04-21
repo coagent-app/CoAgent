@@ -45,6 +45,8 @@ export interface AgentSettings {
   auto_recap_minutes: number   // minutes after meeting to fire recap (default 5)
   agent_name: string           // user-chosen name for their agent (e.g. "Jarvis")
   autonomy_notes: string       // freeform autonomy rules written during onboarding, injected into system prompt
+  imessage_can_send: boolean   // when false, iMessage integration is read-only (SEND tool hidden from agent)
+  imessage_denylist: string[]  // phone/email identifiers to hide from agent (privacy filter applied in SQL)
 }
 
 export type TriggerSource = 'heartbeat' | 'webhook' | 'manual' | 'memory_cleanup' | 'todo_due' | 'routine' | 'task_due' | 'meeting_brief' | 'meeting_recap'
@@ -237,6 +239,7 @@ export type WSClientMessage =
   | { type: 'python_error'; requestId: string; errorType: string; message: string; traceback: string; stdout: string; stderr: string }
   | { type: 'python_cancelled'; requestId: string; reason: 'user' | 'timeout' }
   | { type: 'enable_wake_scheduling' }
+  | { type: 'list_imessage_senders' }
 
 export type WSServerMessage =
   | { type: 'queue_update'; items: ApprovalItem[] }
@@ -257,6 +260,7 @@ export type WSServerMessage =
   | { type: 'research_progress'; agents: { query: string; status: 'searching' | 'branching' | 'enriching' | 'done' | 'error'; detail?: string }[] }
   | { type: 'agent_stopped' }
   | { type: 'settings_update'; settings: AgentSettings }
+  | { type: 'imessage_senders'; contacts: { name: string; identifiers: string[]; last_message_date: string | null; is_denied: boolean }[]; error?: string }
   | { type: 'files_update'; files: FileEntry[] }
   | { type: 'folders_update'; folders: string[] }
   | { type: 'files_search_result'; files: FileEntry[] }

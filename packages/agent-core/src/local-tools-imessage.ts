@@ -289,6 +289,179 @@ function openDb(): any {
   return new (getDatabase())(CHAT_DB, { readonly: true })
 }
 
+/**
+ * Denylist provider. server.ts injects a getter that returns the current
+ * `imessage_denylist` from settings. The filter is applied in SQL so excluded
+ * messages never enter process memory.
+ */
+let _getDenylist: () => string[] = () => []
+export function setDenylistProvider(fn: () => string[]) { _getDenylist = fn }
+
+function normalizeId(id: string): string {
+  const trimmed = id.trim()
+  if (trimmed.includes('@')) return trimmed.toLowerCase()
+  const digits = normalizeDigits(trimmed)
+  return digits.length >= 7 ? digits : trimmed
+}
+
+/** Returns the denylist in normalized form (lowercase email or last-10-digit phone). */
+function currentDenyNormalized(): Set<string> {
+  const out = new Set<string>()
+  for (const id of _getDenylist()) {
+    const n = normalizeId(id)
+    if (n) out.add(n)
+  }
+  return out
+}
+
+function isDenied(identifier: string | null | undefined, deny: Set<string>): boolean {
+  if (!identifier || deny.size === 0) return false
+  return deny.has(normalizeId(identifier))
+}
+
+/**
+ * Full contacts list for the denylist picker UI. Sources:
+ *   1. Every contact from the AddressBook SQLite DBs (all phone/email identifiers
+ *      grouped by person — one row per contact, not per number).
+ *   2. Plus any 1:1 iMessage sender whose identifier is not yet saved in Contacts
+ *      (unknown numbers you've still texted with). These appear as single-id rows
+ *      so users can deny spam/unsaved numbers too.
+ *
+ * Sorted by most-recent iMessage activity (contacts with no iMessage history
+ * appear after those who have messaged you, alphabetically).
+ */
+export interface DenyPickerContact {
+  name: string
+  identifiers: string[]
+  last_message_date: string | null
+  is_denied: boolean  // true if ANY of the contact's identifiers is in the denylist
+}
+export function listContactsForDenyPicker(): DenyPickerContact[] {
+  // --- 1. Collect all contacts from AddressBook, grouped by person ---
+  const dbPaths = findAddressBookDbs()
+  const contactsByName = new Map<string, Set<string>>()  // display name → identifiers
+
+  for (const dbPath of dbPaths) {
+    try {
+      const db = new (getDatabase())(dbPath, { readonly: true })
+      try {
+        const rows = db.query(`
+          SELECT r.Z_PK, r.ZFIRSTNAME, r.ZLASTNAME, r.ZORGANIZATION
+          FROM ZABCDRECORD r
+        `).all() as Array<{
+          Z_PK: number
+          ZFIRSTNAME: string | null
+          ZLASTNAME: string | null
+          ZORGANIZATION: string | null
+        }>
+
+        for (const row of rows) {
+          const name = [row.ZFIRSTNAME, row.ZLASTNAME].filter(Boolean).join(' ') || row.ZORGANIZATION
+          if (!name) continue
+          if (!contactsByName.has(name)) contactsByName.set(name, new Set())
+          const ids = contactsByName.get(name)!
+
+          const phones = db.query(
+            'SELECT ZFULLNUMBER FROM ZABCDPHONENUMBER WHERE ZOWNER = ? AND ZFULLNUMBER IS NOT NULL'
+          ).all(row.Z_PK) as Array<{ ZFULLNUMBER: string }>
+          for (const p of phones) ids.add(p.ZFULLNUMBER)
+
+          const emails = db.query(
+            'SELECT ZADDRESS FROM ZABCDEMAILADDRESS WHERE ZOWNER = ? AND ZADDRESS IS NOT NULL'
+          ).all(row.Z_PK) as Array<{ ZADDRESS: string }>
+          for (const e of emails) ids.add(e.ZADDRESS.toLowerCase())
+        }
+      } finally {
+        db.close()
+      }
+    } catch (e: any) {
+      console.log(`[iMessage] Skipping ${dbPath} for picker: ${e.message}`)
+    }
+  }
+
+  // --- 2. Build an identifier → last-message-date map from chat.db ---
+  const idToLastDate = new Map<string, number>()  // raw chat_identifier → coredata ts
+  try {
+    const db = openDb()
+    try {
+      const rows = db.query(`
+        SELECT c.chat_identifier, MAX(m.date) AS last_date
+        FROM chat c
+        LEFT JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
+        LEFT JOIN message m ON m.ROWID = cmj.message_id
+        WHERE c.chat_identifier NOT LIKE 'chat%'
+        GROUP BY c.chat_identifier
+      `).all() as Array<{ chat_identifier: string; last_date: number | null }>
+      for (const r of rows) {
+        if (r.chat_identifier && r.last_date) {
+          idToLastDate.set(r.chat_identifier, r.last_date)
+        }
+      }
+    } finally {
+      db.close()
+    }
+  } catch (e: any) {
+    console.log(`[iMessage] Picker: could not read chat.db for last-message dates: ${e.message}`)
+  }
+
+  // Helper: max coredata date across a contact's identifiers (normalized matching).
+  const lastDateForIdentifiers = (identifiers: string[]): number | null => {
+    let best: number | null = null
+    for (const id of identifiers) {
+      // Try exact match first, then normalized digits.
+      const direct = idToLastDate.get(id)
+      if (direct && (best === null || direct > best)) best = direct
+      const normId = normalizeId(id)
+      for (const [chatId, date] of idToLastDate) {
+        if (normalizeId(chatId) === normId) {
+          if (best === null || date > best) best = date
+        }
+      }
+    }
+    return best
+  }
+
+  // --- 3. Build the contact list ---
+  const deny = currentDenyNormalized()
+  const contacts: DenyPickerContact[] = []
+  const normalizedIdsSeen = new Set<string>()
+
+  for (const [name, idSet] of contactsByName) {
+    const identifiers = Array.from(idSet)
+    for (const id of identifiers) normalizedIdsSeen.add(normalizeId(id))
+    contacts.push({
+      name,
+      identifiers,
+      last_message_date: coreDataToISO(lastDateForIdentifiers(identifiers)),
+      is_denied: identifiers.some(id => isDenied(id, deny)),
+    })
+  }
+
+  // --- 4. Add unknown 1:1 senders not already covered by a contact ---
+  for (const [chatId] of idToLastDate) {
+    if (normalizedIdsSeen.has(normalizeId(chatId))) continue
+    contacts.push({
+      name: chatId,
+      identifiers: [chatId],
+      last_message_date: coreDataToISO(idToLastDate.get(chatId) ?? null),
+      is_denied: isDenied(chatId, deny),
+    })
+  }
+
+  // --- 5. Sort: contacts with recent iMessage activity first (newest → oldest),
+  //        then the rest alphabetically by name. ---
+  contacts.sort((a, b) => {
+    if (a.last_message_date && b.last_message_date) {
+      return b.last_message_date.localeCompare(a.last_message_date)
+    }
+    if (a.last_message_date) return -1
+    if (b.last_message_date) return 1
+    return a.name.localeCompare(b.name)
+  })
+
+  return contacts
+}
+
 export const IMESSAGE_TOOLS: Anthropic.Tool[] = [
   {
     name: 'IMESSAGE_LIST_CONVERSATIONS',
@@ -393,6 +566,9 @@ export async function handleImessageTool(name: string, args: Record<string, unkn
     if (name === 'IMESSAGE_LIST_CONVERSATIONS') {
       const limit = (args?.limit as number) ?? 20
       const unreadOnly = (args?.unread_only as boolean) ?? false
+      const deny = currentDenyNormalized()
+      // Over-fetch when a denylist is active so the final count still approaches `limit`.
+      const fetchLimit = deny.size > 0 ? limit * 3 : limit
       const db = openDb()
       try {
         const rows = db.query(`
@@ -427,7 +603,7 @@ export async function handleImessageTool(name: string, args: Record<string, unkn
           ${unreadOnly ? 'AND m.is_from_me = 0 AND m.is_read = 0' : ''}
           ORDER BY m.date DESC
           LIMIT ?
-        `).all(limit) as Array<{
+        `).all(fetchLimit) as Array<{
           chat_id: number
           chat_identifier: string
           display_name: string | null
@@ -440,19 +616,26 @@ export async function handleImessageTool(name: string, args: Record<string, unkn
           unread_count: number
         }>
 
-        const conversations = rows.map((row) => {
-          const id = row.handle_id || row.chat_identifier
-          const contactName = row.display_name || lookupContactName(id) || id
-          return {
-            chat_identifier: row.chat_identifier,
-            display_name: contactName,
-            last_message: row.last_text ?? parseAttributedBody(row.last_attributed_body),
-            last_message_sender: row.is_from_me === 1 ? 'me' : contactName,
-            last_message_date: coreDataToISO(row.last_date),
-            unread_count: row.unread_count,
-            is_from_me: row.is_from_me === 1,
-          }
-        })
+        const conversations = rows
+          // Hide 1:1 chats where the other party is denied. Group chats have a
+          // chat_identifier starting with "chat" (GUID) that never matches the
+          // denylist, so they're always kept — denied senders inside a group
+          // are filtered at message level in IMESSAGE_GET_CONVERSATION.
+          .filter(row => !isDenied(row.chat_identifier, deny))
+          .slice(0, limit)
+          .map((row) => {
+            const id = row.handle_id || row.chat_identifier
+            const contactName = row.display_name || lookupContactName(id) || id
+            return {
+              chat_identifier: row.chat_identifier,
+              display_name: contactName,
+              last_message: row.last_text ?? parseAttributedBody(row.last_attributed_body),
+              last_message_sender: row.is_from_me === 1 ? 'me' : contactName,
+              last_message_date: coreDataToISO(row.last_date),
+              unread_count: row.unread_count,
+              is_from_me: row.is_from_me === 1,
+            }
+          })
 
         return JSON.stringify(conversations, null, 2)
       } finally {
@@ -465,6 +648,10 @@ export async function handleImessageTool(name: string, args: Record<string, unkn
       const limit = (args?.limit as number) ?? 50
       const since = args?.since as string | undefined
       const before = args?.before as string | undefined
+      const deny = currentDenyNormalized()
+      if (isDenied(identifier, deny)) {
+        return JSON.stringify({ error: 'This contact is on the iMessage denylist and cannot be read.' })
+      }
       const db = openDb()
       try {
         const dateConditions: string[] = []
@@ -503,13 +690,18 @@ export async function handleImessageTool(name: string, args: Record<string, unkn
           sender_handle: string | null
         }>
 
-        const messages = rows.reverse().map((row) => ({
-          id: row.ROWID,
-          text: row.text ?? parseAttributedBody(row.attributedBody),
-          date: coreDataToISO(row.date),
-          is_from_me: row.is_from_me === 1,
-          sender: row.is_from_me === 1 ? 'me' : (lookupContactName(row.sender_handle ?? '') || row.sender_handle || 'unknown'),
-        }))
+        const messages = rows
+          // Filter messages from denied senders (e.g. a denied participant in a group chat).
+          // Your own messages (is_from_me=1) always pass through.
+          .filter(row => row.is_from_me === 1 || !isDenied(row.sender_handle, deny))
+          .reverse()
+          .map((row) => ({
+            id: row.ROWID,
+            text: row.text ?? parseAttributedBody(row.attributedBody),
+            date: coreDataToISO(row.date),
+            is_from_me: row.is_from_me === 1,
+            sender: row.is_from_me === 1 ? 'me' : (lookupContactName(row.sender_handle ?? '') || row.sender_handle || 'unknown'),
+          }))
 
         return JSON.stringify(messages, null, 2)
       } finally {
@@ -521,6 +713,10 @@ export async function handleImessageTool(name: string, args: Record<string, unkn
       const query = args?.query as string
       const contact = args?.contact as string | undefined
       const limit = (args?.limit as number) ?? 30
+      const deny = currentDenyNormalized()
+      if (contact && isDenied(contact, deny)) {
+        return JSON.stringify({ error: 'This contact is on the iMessage denylist and cannot be searched.' })
+      }
       const db = openDb()
       try {
         let sql: string
@@ -577,6 +773,9 @@ export async function handleImessageTool(name: string, args: Record<string, unkn
         for (const row of rows) {
           const text = row.text ?? parseAttributedBody(row.attributedBody)
           if (!text || !text.toLowerCase().includes(needle)) continue
+          // Drop matches in denied 1:1 threads and messages sent by denied senders in group chats.
+          if (isDenied(row.chat_identifier, deny)) continue
+          if (row.is_from_me !== 1 && isDenied(row.sender_handle, deny)) continue
           results.push({
             id: row.ROWID,
             text,

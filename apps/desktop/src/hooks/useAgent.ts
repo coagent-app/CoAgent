@@ -139,6 +139,7 @@ export function useAgent() {
   const [calendarEntries, setCalendarEntries] = useState<CalendarEntry[]>([])
   const [capabilityCard, setCapabilityCard] = useState<{ name: string; capabilities: { name: string; description: string; checked: boolean }[]; authFields?: { name: string; displayName: string; description: string; helpUrl?: string; helpText?: string }[] } | null>(null)
   const [whatsappQr, setWhatsappQr] = useState<string | null>(null)
+  const [imessageSenders, setImessageSenders] = useState<{ name: string; identifiers: string[]; last_message_date: string | null; is_denied: boolean }[] | null>(null)
   const [relayCredentials, setRelayCredentials] = useState<RelayCredentials | null>(null)
   const [isAdmin, setIsAdmin] = useState(false)
   const [adminUsers, setAdminUsers] = useState<AdminUser[]>([])
@@ -460,6 +461,9 @@ export function useAgent() {
           setIntegrations(msg.integrations); saveCache({ integrations: msg.integrations })
           const wa = msg.integrations.find((i: any) => i.slug === 'coagent:whatsapp')
           if (wa?.connected) setWhatsappQr(null)
+        }
+        if (msg.type === 'imessage_senders') {
+          setImessageSenders(msg.contacts)
         }
         if (msg.type === 'settings_update') {
           setSettings(msg.settings); settingsRef.current = msg.settings; saveCache({ settings: msg.settings })
@@ -903,6 +907,10 @@ export function useAgent() {
     send({ type: 'update_settings', patch })
   }, [send])
 
+  const listImessageSenders = useCallback(() => {
+    send({ type: 'list_imessage_senders' })
+  }, [send])
+
   const activateRelay = useCallback((token: string, relayUrl: string) => {
     send({ type: 'relay_activate', token, relayUrl })
   }, [send])
@@ -1130,6 +1138,7 @@ export function useAgent() {
     getRelayCredentials, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken,
     sendTeamMessage, getTeamInfo, getTeamHistory, setTriggerPrompt, openCanvas, closeCanvas,
     getCanvases, cancelCodeCell, exportPdf, dismissQueueToast, enableWakeScheduling,
+    listImessageSenders,
   }), [
     triggerHeartbeat, updateSkill, deleteSkill, steer, stopAgent,
     handleSetRelayModel, setPendingFields, setModel, chat, approve, reject,
@@ -1142,6 +1151,7 @@ export function useAgent() {
     getRelayCredentials, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken,
     sendTeamMessage, getTeamInfo, getTeamHistory, setTriggerPrompt, openCanvas, closeCanvas,
     getCanvases, cancelCodeCell, exportPdf, dismissQueueToast, enableWakeScheduling,
+    listImessageSenders,
   ])
 
   return {
@@ -1151,7 +1161,7 @@ export function useAgent() {
     queue, done, newQueueIds, messages, connected, hydrated, lastHeartbeat, heartbeatLog, statusLine, skills,
     integrations, settings, authStatus, files, folders, searchResults, transcribingFiles,
     error, relayActive, relayModel, relayUsage, pendingFields, voiceSummary, usage,
-    organizing, calendarEntries, googleCalendarStatus, capabilityCard, whatsappQr,
+    organizing, calendarEntries, googleCalendarStatus, capabilityCard, whatsappQr, imessageSenders,
     relayCredentials, isAdmin, adminUsers, adminNewToken, teamInfo, teamMessages, teamStatus,
     triggerPrompt, canvas, canvasVisible, canvasStreaming, canvasStreamingCode,
     canvasesList, codeCells, codeCellOrder,

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { X, ArrowLeft } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import type { Integration } from '@coagent/shared'
+import type { Integration, AgentSettings } from '@coagent/shared'
 import QRCode from 'qrcode'
 
 interface PendingFields {
@@ -28,15 +28,28 @@ interface IntegrationsModalProps {
   relayCredentials?: RelayCredentials | null
   onToggleTrigger?: (triggerSlug: string, appSlug: string, enabled: boolean) => void
   onChat?: (message: string) => void
+  settings?: AgentSettings | null
+  onUpdateSettings?: (patch: Partial<AgentSettings>) => void
+  imessageSenders?: { name: string; identifiers: string[]; last_message_date: string | null; is_denied: boolean }[] | null
+  onRequestImessageSenders?: () => void
 }
 
-export function IntegrationsModal({ open, onClose, integrations, onConnect, onDisconnect, onDelete, pendingFields, onClearPendingFields, whatsappQr, relayCredentials, onToggleTrigger, onChat }: IntegrationsModalProps) {
+export function IntegrationsModal({ open, onClose, integrations, onConnect, onDisconnect, onDelete, pendingFields, onClearPendingFields, whatsappQr, relayCredentials, onToggleTrigger, onChat, settings, onUpdateSettings, imessageSenders, onRequestImessageSenders }: IntegrationsModalProps) {
   const [search, setSearch] = useState('')
   const [fieldValues, setFieldValues] = useState<Record<string, string>>({})
   const [detailSlug, setDetailSlug] = useState<string | null>(null)
   const [mobileQrDataUrl, setMobileQrDataUrl] = useState<string | null>(null)
   const [confirmingDisconnect, setConfirmingDisconnect] = useState<string | null>(null)
   const [confirmingDeleteSlug, setConfirmingDeleteSlug] = useState<string | null>(null)
+  const [denyPickerOpen, setDenyPickerOpen] = useState(false)
+  const [denySearch, setDenySearch] = useState('')
+
+  // Fetch recent senders when the picker is opened in the iMessage detail view
+  useEffect(() => {
+    if (detailSlug === 'coagent:imessage' && denyPickerOpen && onRequestImessageSenders) {
+      onRequestImessageSenders()
+    }
+  }, [detailSlug, denyPickerOpen, onRequestImessageSenders])
 
   useEffect(() => {
     if (!relayCredentials?.relayUrl || !relayCredentials.token) {
@@ -300,6 +313,172 @@ export function IntegrationsModal({ open, onClose, integrations, onConnect, onDi
                   </p>
                 </div>
               )}
+
+              {/* iMessage permission toggle — shown before connecting (to set expectations) and after (to change) */}
+              {detailIntegration.slug === 'coagent:imessage' && settings && onUpdateSettings && (
+                <div className="mb-5 p-4 rounded-xl border border-neutral-100 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-800/50">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1">
+                      <p className="text-[13px] font-medium text-neutral-700 dark:text-neutral-300">Allow sending messages</p>
+                      <p className="text-[11px] text-neutral-400 dark:text-neutral-500 mt-1">
+                        {settings.imessage_can_send
+                          ? 'The agent can send iMessages on your behalf.'
+                          : 'Read-only. The agent can read and search messages but cannot send anything.'}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={settings.imessage_can_send}
+                      onClick={() => onUpdateSettings({ imessage_can_send: !settings.imessage_can_send })}
+                      className={cn(
+                        'relative inline-flex h-5 w-9 flex-shrink-0 items-center rounded-full transition-colors mt-0.5',
+                        settings.imessage_can_send ? 'bg-emerald-500' : 'bg-neutral-300 dark:bg-neutral-600'
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          'inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform',
+                          settings.imessage_can_send ? 'translate-x-5' : 'translate-x-1'
+                        )}
+                      />
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* iMessage denylist — contacts the agent will never read */}
+              {detailIntegration.slug === 'coagent:imessage' && settings && onUpdateSettings && (() => {
+                const denylist = settings.imessage_denylist ?? []
+                const contacts = imessageSenders ?? []
+                const needle = denySearch.trim().toLowerCase()
+                const visible = needle
+                  ? contacts.filter(c =>
+                      c.name.toLowerCase().includes(needle) ||
+                      c.identifiers.some(id => id.toLowerCase().includes(needle)))
+                  : contacts
+
+                // Toggle deny for an entire contact — adds or removes ALL their identifiers at once.
+                const toggleDenyContact = (identifiers: string[]) => {
+                  const set = new Set(denylist)
+                  const allDenied = identifiers.every(id => set.has(id))
+                  if (allDenied) {
+                    for (const id of identifiers) set.delete(id)
+                  } else {
+                    for (const id of identifiers) set.add(id)
+                  }
+                  onUpdateSettings({ imessage_denylist: Array.from(set) })
+                }
+
+                // For the chip list, group denied identifiers back into contacts where possible.
+                const deniedChips: { label: string; identifiers: string[] }[] = []
+                const covered = new Set<string>()
+                for (const c of contacts) {
+                  const matched = c.identifiers.filter(id => denylist.includes(id))
+                  if (matched.length > 0) {
+                    deniedChips.push({ label: c.name, identifiers: matched })
+                    for (const id of matched) covered.add(id)
+                  }
+                }
+                // Leftover denylist entries that don't map to any known contact.
+                for (const id of denylist) {
+                  if (!covered.has(id)) deniedChips.push({ label: id, identifiers: [id] })
+                }
+
+                return (
+                  <div className="mb-5 p-4 rounded-xl border border-neutral-100 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-800/50">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex-1">
+                        <p className="text-[13px] font-medium text-neutral-700 dark:text-neutral-300">Excluded from agent</p>
+                        <p className="text-[11px] text-neutral-400 dark:text-neutral-500 mt-1">
+                          The agent will never read messages from these contacts. Use this for family or anyone you don't want included in automations.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setDenyPickerOpen(v => !v)}
+                        className="text-[12px] font-medium text-blue-500 hover:underline shrink-0 mt-0.5"
+                      >
+                        {denyPickerOpen ? 'Done' : 'Edit'}
+                      </button>
+                    </div>
+
+                    {/* Currently-excluded contacts as chips (always visible when non-empty) */}
+                    {deniedChips.length > 0 && (
+                      <div className="mt-3 flex flex-wrap gap-1.5">
+                        {deniedChips.map(chip => (
+                          <span
+                            key={chip.label}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-white dark:bg-neutral-700 text-[11px] text-neutral-700 dark:text-neutral-300 border border-neutral-200 dark:border-neutral-600"
+                          >
+                            {chip.label}
+                            <button
+                              type="button"
+                              aria-label={`Remove ${chip.label} from denylist`}
+                              onClick={() => toggleDenyContact(chip.identifiers)}
+                              className="text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-100"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Picker — search + full contact list */}
+                    {denyPickerOpen && (
+                      <div className="mt-3">
+                        <input
+                          type="text"
+                          value={denySearch}
+                          onChange={e => setDenySearch(e.target.value)}
+                          placeholder="Search contacts..."
+                          className="w-full px-3 py-2 rounded-lg border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 text-[13px] text-neutral-900 dark:text-neutral-100 placeholder:text-neutral-400 dark:placeholder:text-neutral-500 focus:outline-none focus:ring-2 focus:ring-neutral-300 dark:focus:ring-neutral-600"
+                        />
+                        <div className="mt-2 max-h-64 overflow-y-auto rounded-lg border border-neutral-100 dark:border-neutral-800 bg-white dark:bg-neutral-900">
+                          {imessageSenders === null ? (
+                            <p className="text-[12px] text-neutral-400 dark:text-neutral-500 p-3 text-center">Loading contacts...</p>
+                          ) : visible.length === 0 ? (
+                            <p className="text-[12px] text-neutral-400 dark:text-neutral-500 p-3 text-center">
+                              {needle ? 'No matches.' : 'No contacts found.'}
+                            </p>
+                          ) : (
+                            visible.map(c => {
+                              const denied = c.identifiers.every(id => denylist.includes(id))
+                              const partiallyDenied = !denied && c.identifiers.some(id => denylist.includes(id))
+                              const subtitle = c.identifiers.length === 1
+                                ? c.identifiers[0]
+                                : `${c.identifiers.length} numbers/emails`
+                              return (
+                                <button
+                                  key={`${c.name}:${c.identifiers.join(',')}`}
+                                  type="button"
+                                  onClick={() => toggleDenyContact(c.identifiers)}
+                                  className={cn(
+                                    'w-full flex items-center justify-between gap-3 px-3 py-2 text-left border-b border-neutral-100 dark:border-neutral-800 last:border-b-0 hover:bg-neutral-50 dark:hover:bg-neutral-800/50',
+                                    denied && 'bg-red-50/60 dark:bg-red-950/20'
+                                  )}
+                                >
+                                  <div className="flex-1 min-w-0">
+                                    <p className="text-[13px] text-neutral-900 dark:text-neutral-100 truncate">{c.name}</p>
+                                    <p className="text-[11px] text-neutral-400 dark:text-neutral-500 truncate">{subtitle}</p>
+                                  </div>
+                                  <span className={cn(
+                                    'text-[11px] font-medium shrink-0',
+                                    denied ? 'text-red-500' : partiallyDenied ? 'text-amber-500' : 'text-neutral-400 dark:text-neutral-500'
+                                  )}>
+                                    {denied ? 'Excluded' : partiallyDenied ? 'Partial' : 'Include'}
+                                  </span>
+                                </button>
+                              )
+                            })
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )
+              })()}
 
               {/* Pending fields — credential input form */}
               {detailPendingFields && detailPendingFields.fields.length > 0 && (

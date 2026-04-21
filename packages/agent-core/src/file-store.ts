@@ -1021,11 +1021,19 @@ export async function getPdfFormFields(dataDir: string, id: string): Promise<Pdf
   if (!entry) throw new Error(`File ${id} not found`)
   if (!entry.filename.toLowerCase().endsWith('.pdf')) throw new Error('Not a PDF file')
 
-  const { PDFDocument } = await import('pdf-lib')
+  const { PDFDocument, PDFName, PDFDict } = await import('pdf-lib')
   const buffer = await readFile(entry.path)
   const pdf = await PDFDocument.load(buffer)
   const form = pdf.getForm()
   const fields = form.getFields()
+
+  if (fields.length === 0) {
+    // Distinguish "no form at all" from XFA dynamic forms (which pdf-lib cannot fill).
+    const acroForm = pdf.catalog.lookup(PDFName.of('AcroForm'), PDFDict)
+    if (acroForm && acroForm.has(PDFName.of('XFA'))) {
+      throw new Error('This PDF uses XFA dynamic forms (Adobe LiveCycle), which are not supported. Only standard AcroForm fillable PDFs can be filled.')
+    }
+  }
 
   return fields.map(field => {
     const name = field.getName()
@@ -1050,12 +1058,18 @@ export async function getPdfFormFields(dataDir: string, id: string): Promise<Pdf
   })
 }
 
+export interface FillPdfResult {
+  file: FileEntry
+  filled: string[]
+  failed: { name: string; reason: string }[]
+}
+
 export async function fillPdfForm(
   dataDir: string,
   id: string,
   fieldValues: Record<string, string>,
   outputFilename?: string
-): Promise<FileEntry> {
+): Promise<FillPdfResult> {
   const index = await readIndex(dataDir)
   const entry = index.find(e => e.id === id)
   if (!entry) throw new Error(`File ${id} not found`)
@@ -1065,6 +1079,9 @@ export async function fillPdfForm(
   const buffer = await readFile(entry.path)
   const pdf = await PDFDocument.load(buffer)
   const form = pdf.getForm()
+
+  const filled: string[] = []
+  const failed: { name: string; reason: string }[] = []
 
   for (const [name, value] of Object.entries(fieldValues)) {
     try {
@@ -1080,10 +1097,19 @@ export async function fillPdfForm(
         form.getDropdown(name).select(value)
       } else if (typeName === 'PDFRadioGroup') {
         form.getRadioGroup(name).select(value)
+      } else {
+        failed.push({ name, reason: `Unsupported field type: ${typeName}` })
+        continue
       }
+      filled.push(name)
     } catch (err) {
-      console.warn(`[FileStore] Could not set field "${name}": ${(err as Error).message}`)
+      failed.push({ name, reason: (err as Error).message })
     }
+  }
+
+  // Bake appearance streams so filled values render in all viewers (Preview.app, Chrome, etc.)
+  try { form.updateFieldAppearances() } catch (err) {
+    console.warn('[FileStore] updateFieldAppearances failed:', (err as Error).message)
   }
 
   const filledBytes = await pdf.save()
@@ -1091,10 +1117,11 @@ export async function fillPdfForm(
 
   // Save as a new file in the same folder
   const baseName = entry.filename.replace(/\.pdf$/i, '')
-  const safeName = outputFilename ?? `${baseName} (filled).pdf`
+  let safeName = outputFilename ?? `${baseName} (filled).pdf`
+  if (!/\.pdf$/i.test(safeName)) safeName += '.pdf'
   const newEntry = await ingestFile(dataDir, safeName, filledBuffer, 'application/pdf', entry.group)
 
-  return newEntry
+  return { file: newEntry, filled, failed }
 }
 
 export async function renameFile(dataDir: string, id: string, newName: string): Promise<void> {
