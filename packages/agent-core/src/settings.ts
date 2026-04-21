@@ -1,5 +1,5 @@
 // packages/agent-core/src/settings.ts
-import { readFile, writeFile, rename, mkdir } from 'fs/promises'
+import { readFile, writeFile, rename, mkdir, chmod } from 'fs/promises'
 import { join } from 'path'
 import type { AgentSettings, Autonomy, DayName } from '@coagent/shared'
 export type { AgentSettings, Autonomy, DayName }
@@ -17,7 +17,7 @@ function getDefaultSettings(): AgentSettings {
     active_days: ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] as DayName[],
     autonomy: 'ask_first' as Autonomy,
     heartbeat_interval: 0,
-    powerModel: 'kimi-k2.5',
+    powerModel: 'kimi-k2.6',
     voice_enabled: false,
     voice_response: false,
     voice_hotkey: 'Control+Alt+Space',
@@ -36,6 +36,8 @@ function getDefaultSettings(): AgentSettings {
     auto_recap_minutes: 5,
     agent_name: '',
     autonomy_notes: '',
+    imessage_can_send: false,
+    imessage_denylist: [],
   }
 }
 
@@ -60,8 +62,8 @@ export async function readSettings(dataDir: string): Promise<AgentSettings> {
       active_days: parsed.active_days ?? DEFAULT_SETTINGS.active_days,
       autonomy: parsed.autonomy ?? DEFAULT_SETTINGS.autonomy,
       heartbeat_interval: parsed.heartbeat_interval ?? DEFAULT_SETTINGS.heartbeat_interval,
-      powerModel: (parsed.powerModel?.startsWith('claude-') || parsed.powerModel === 'moonshotai/kimi-k2.5')
-        ? 'kimi-k2.5'
+      powerModel: (parsed.powerModel?.startsWith('claude-') || parsed.powerModel === 'moonshotai/kimi-k2.5' || parsed.powerModel === 'kimi-k2.5' || parsed.powerModel === 'moonshotai/kimi-k2.6')
+        ? 'kimi-k2.6'
         : parsed.powerModel ?? DEFAULT_SETTINGS.powerModel,
       voice_enabled: parsed.voice_enabled ?? DEFAULT_SETTINGS.voice_enabled,
       voice_response: parsed.voice_response ?? DEFAULT_SETTINGS.voice_response,
@@ -81,6 +83,10 @@ export async function readSettings(dataDir: string): Promise<AgentSettings> {
       auto_recap_minutes: parsed.auto_recap_minutes ?? DEFAULT_SETTINGS.auto_recap_minutes,
       agent_name: parsed.agent_name ?? DEFAULT_SETTINGS.agent_name,
       autonomy_notes: parsed.autonomy_notes ?? DEFAULT_SETTINGS.autonomy_notes,
+      imessage_can_send: parsed.imessage_can_send ?? DEFAULT_SETTINGS.imessage_can_send,
+      imessage_denylist: Array.isArray(parsed.imessage_denylist)
+        ? parsed.imessage_denylist.filter((x: unknown): x is string => typeof x === 'string')
+        : DEFAULT_SETTINGS.imessage_denylist,
     }
   } catch (err: any) {
     if (err?.code !== 'ENOENT') {
@@ -91,7 +97,8 @@ export async function readSettings(dataDir: string): Promise<AgentSettings> {
 }
 
 export async function writeSettings(dataDir: string, patch: Partial<AgentSettings>): Promise<AgentSettings> {
-  await mkdir(dataDir, { recursive: true })
+  // Create the data dir with owner-only perms. Existing dirs are left alone.
+  await mkdir(dataDir, { recursive: true, mode: 0o700 })
   const current = await readSettings(dataDir)
 
   const patchHours = patch.active_hours
@@ -144,11 +151,21 @@ export async function writeSettings(dataDir: string, patch: Partial<AgentSetting
       : current.auto_recap_minutes,
     agent_name: patch.agent_name !== undefined ? patch.agent_name : current.agent_name,
     autonomy_notes: patch.autonomy_notes !== undefined ? patch.autonomy_notes : current.autonomy_notes,
+    imessage_can_send: patch.imessage_can_send !== undefined ? patch.imessage_can_send : current.imessage_can_send,
+    imessage_denylist: Array.isArray(patch.imessage_denylist)
+      ? Array.from(new Set(patch.imessage_denylist.filter((x): x is string => typeof x === 'string' && x.length > 0)))
+      : current.imessage_denylist,
   }
 
   const target = join(dataDir, SETTINGS_FILE)
   const tmp = target + '.tmp'
-  await writeFile(tmp, JSON.stringify(updated, null, 2), 'utf-8')
+  // mode: 0o600 is applied on create (won't re-apply if file already exists), so we
+  // also explicitly chmod when possible. Together these close the small window where
+  // a naive writeFile + chmod leaves the file world-readable.
+  await writeFile(tmp, JSON.stringify(updated, null, 2), { encoding: 'utf-8', mode: 0o600 })
+  if (process.platform !== 'win32') {
+    try { await chmod(tmp, 0o600) } catch { /* best-effort */ }
+  }
   await rename(tmp, target)
   return updated
 }

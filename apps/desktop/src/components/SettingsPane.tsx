@@ -145,7 +145,7 @@ interface ModelOption {
 }
 
 const MODEL_OPTIONS: ModelOption[] = [
-  { id: 'kimi-k2.5', provider: 'Kimi', label: 'Kimi K2.5', description: '8x cheaper — strong reasoning, 256K context', price: '$0.60 / $2.50 per M tokens', badge: 'Default' },
+  { id: 'kimi-k2.6', provider: 'Kimi', label: 'Kimi K2.6', description: 'Most intelligent Kimi — multimodal, 256K context', price: '$0.60 / $2.50 per M tokens', badge: 'Default' },
   { id: 'claude-sonnet-4-6', provider: 'Anthropic', label: 'Claude Sonnet 4.6', description: 'Best quality — prompt caching saves ~60%', price: '$3 / $15 per M tokens' },
   { id: 'claude-opus-4-6', provider: 'Anthropic', label: 'Claude Opus 4.6', description: 'Most powerful — deep reasoning', price: '$15 / $75 per M tokens' },
 ]
@@ -410,7 +410,7 @@ function GeneralTab({ settings, onUpdate }: { settings: AgentSettings; onUpdate:
 // --- Tab: Model ---
 
 function ModelTab({ settings, onSetModel }: { settings: AgentSettings; onSetModel: (id: string) => void }) {
-  const selectedModel = settings.powerModel || 'kimi-k2.5'
+  const selectedModel = settings.powerModel || 'kimi-k2.6'
 
   return (
     <>

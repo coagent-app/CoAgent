@@ -113,11 +113,12 @@ const MODELS: Record<string, ModelConfig> = {
     cacheWritePer1k: 0.00125,
     cacheReadPer1k: 0.0001,
   },
-  'kimi-k2.5': {
+  'kimi-k2.6': {
     provider: 'moonshot',
-    apiModel: 'kimi-k2.5',
-    label: 'Kimi K2.5',
-    description: '8x cheaper — strong reasoning, 256K context',
+    apiModel: 'kimi-k2.6',
+    label: 'Kimi K2.6',
+    description: 'Kimi\'s most intelligent model — strong reasoning, multimodal, 256K context',
+    // TODO: verify K2.6 pricing — these are carried over from K2.5
     inputPer1k: 0.0006,
     outputPer1k: 0.0025,
     cacheWritePer1k: 0,
@@ -656,10 +657,11 @@ async function proxyComposio(request: Request, env: Env, token: string, data: To
   }
 
   // For GET requests: strip any client-supplied user_ids and replace with the authenticated user's ID
+  // Coerce to string — legacy tokens stored userId as a number, which Composio v3 rejects.
   const forwardSearch = new URLSearchParams(url.search)
   if (request.method === 'GET' || request.method === 'HEAD') {
     forwardSearch.delete('user_ids')
-    forwardSearch.append('user_ids', data.userId)
+    forwardSearch.append('user_ids', String(data.userId))
   }
   const searchString = forwardSearch.toString() ? `?${forwardSearch.toString()}` : ''
 
@@ -681,7 +683,7 @@ async function proxyComposio(request: Request, env: Env, token: string, data: To
     if (bodyText) {
       try {
         const bodyJson = JSON.parse(bodyText)
-        bodyJson.user_id = data.userId
+        bodyJson.user_id = String(data.userId)
         bodyText = JSON.stringify(bodyJson)
       } catch {
         // Not JSON — pass through as-is
@@ -1137,7 +1139,7 @@ async function handleMoonshotProxy(request: Request, env: Env, ctx: ExecutionCon
 
   const requestedModel = parsedBody.model || ''
   // Accept both old OpenRouter-style IDs and new direct IDs
-  const normalizedModel = requestedModel === 'moonshotai/kimi-k2.5' ? 'kimi-k2.5' : requestedModel
+  const normalizedModel = (requestedModel === 'moonshotai/kimi-k2.5' || requestedModel === 'kimi-k2.5' || requestedModel === 'moonshotai/kimi-k2.6') ? 'kimi-k2.6' : requestedModel
   if (!ALLOWED_MOONSHOT_MODELS.has(normalizedModel)) {
     return jsonResponse({ error: `Model "${requestedModel}" is not allowed. Allowed: ${[...ALLOWED_MOONSHOT_MODELS].join(', ')}` }, 403)
   }
@@ -1182,8 +1184,8 @@ async function handleMoonshotProxy(request: Request, env: Env, ctx: ExecutionCon
       const resBody = await clone.json() as Record<string, unknown>
       const usage = resBody.usage as { prompt_tokens?: number; completion_tokens?: number } | undefined
       const modelId = (JSON.parse(body) as { model?: string }).model || ''
-      const normalized = modelId === 'moonshotai/kimi-k2.5' ? 'kimi-k2.5' : modelId
-      const modelConfig = MODELS[normalized] || MODELS['kimi-k2.5']
+      const normalized = (modelId === 'moonshotai/kimi-k2.5' || modelId === 'kimi-k2.5' || modelId === 'moonshotai/kimi-k2.6') ? 'kimi-k2.6' : modelId
+      const modelConfig = MODELS[normalized] || MODELS['kimi-k2.6']
       if (usage && modelConfig) {
         data.usage.inputTokens += usage.prompt_tokens || 0
         data.usage.outputTokens += usage.completion_tokens || 0
@@ -1234,8 +1236,8 @@ async function scanMoonshotStreamForUsage(
         const chunk = JSON.parse(line.slice(6))
         if (chunk.usage) {
           const modelId = (JSON.parse(requestBody) as { model?: string }).model || ''
-          const normalized2 = modelId === 'moonshotai/kimi-k2.5' ? 'kimi-k2.5' : modelId
-          const modelConfig = MODELS[normalized2] || MODELS['kimi-k2.5']
+          const normalized2 = (modelId === 'moonshotai/kimi-k2.5' || modelId === 'kimi-k2.5' || modelId === 'moonshotai/kimi-k2.6') ? 'kimi-k2.6' : modelId
+          const modelConfig = MODELS[normalized2] || MODELS['kimi-k2.6']
 
           // Re-read token data to avoid stale overwrites (stream may take seconds)
           const freshData = await getToken(env, token) || data
@@ -1897,7 +1899,9 @@ export default {
 
     // WebSocket connection
     if (request.headers.get('Upgrade') === 'websocket' && url.pathname.startsWith('/ws/')) {
-      const userId = url.pathname.split('/')[2]
+      // NOTE: The userId segment in the URL path is ignored — we always trust
+      // the validated token's userId (see resolvedUserId below). Do not add an
+      // equality check here; that would be an IDOR footgun.
       const token = url.searchParams.get('token')
       if (!token) return new Response('Missing token', { status: 401 })
       const data = await getToken(env, token)
@@ -1924,8 +1928,8 @@ export default {
     if (request.method === 'POST' && exaMatch) {
       // --- Shared secret check via ?secret= query parameter ---
       if (env.EXA_WEBHOOK_SECRET) {
-        const providedSecret = url.searchParams.get('secret')
-        if (providedSecret !== env.EXA_WEBHOOK_SECRET) {
+        const providedSecret = url.searchParams.get('secret') ?? ''
+        if (!timingSafeEqual(providedSecret, env.EXA_WEBHOOK_SECRET)) {
           console.log('[Relay] Exa webhook rejected: invalid or missing secret')
           return jsonResponse({ error: 'Forbidden' }, 403)
         }
@@ -2141,7 +2145,7 @@ export default {
       const tokenData: TokenData = {
         userId,
         stripeCustomerId: body.label || `beta-user-${userId}`,
-        model: 'kimi-k2.5',
+        model: 'kimi-k2.6',
         usage: freshUsage(),
         createdAt: new Date().toISOString(),
         active: true,
@@ -2527,7 +2531,11 @@ export default {
         }
       }
 
-      console.log(`[Subscribe/Checkout] New ${tier} user #${userId} (session: ${body.sessionId.slice(0, 12)}...): ${token.slice(0, 8)}...`)
+      // Log a short hash of the Stripe session id instead of the raw value — keeps logs
+      // correlatable without putting a reusable session id into log aggregators.
+      const sessionDigest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(body.sessionId))
+      const sessionHashPrefix = Array.from(new Uint8Array(sessionDigest).slice(0, 4), b => b.toString(16).padStart(2, '0')).join('')
+      console.log(`[Subscribe/Checkout] New ${tier} user #${userId} (session_hash: ${sessionHashPrefix}): ${token.slice(0, 8)}...`)
 
       return jsonResponse({ token, tier, referralCode, ...info })
     }
@@ -2711,7 +2719,7 @@ Do not use emojis. Do not be overly enthusiastic.`
             'Authorization': `Bearer ${env.MOONSHOT_API_KEY}`,
           },
           body: JSON.stringify({
-            model: 'kimi-k2.5',
+            model: 'kimi-k2.6',
             messages: [
               { role: 'system', content: systemPrompt },
               ...trimmed,

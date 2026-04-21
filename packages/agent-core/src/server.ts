@@ -12,7 +12,7 @@ import { readSettings, writeSettings } from './settings.js'
 
 import { listFiles, listFolders, ingestFile, deleteFileEntry, createFolder, moveFile, moveFolder, renameFile, renameFolder, deleteFolder, saveFolderOrder, searchFiles, autoOrganizeFiles } from './file-store.js'
 import { readCanvas, listCanvases } from './canvas-store.js'
-import { IMESSAGE_TOOLS, handleImessageTool } from './local-tools-imessage.js'
+import { IMESSAGE_TOOLS, handleImessageTool, setDenylistProvider, listContactsForDenyPicker } from './local-tools-imessage.js'
 import { CONTACTS_TOOLS, handleContactsTool } from './local-tools-contacts.js'
 import { embedTools, purgeTools, setToolEmbeddingsDir } from './tool-embeddings.js'
 import { writeRelayCredentials, getRelayConfig, getOpenAIProxy, loadApiKeysToEnv } from './auth.js'
@@ -193,19 +193,6 @@ function canAccessChatDb(): boolean {
   }
 }
 
-function canAccessAddressBook(): boolean {
-  try {
-    const { openSync, readSync, closeSync } = require('fs')
-    const fd = openSync(join(homedir(), 'Library', 'Application Support', 'AddressBook', 'AddressBook-v22.abcddb'), 'r')
-    const buf = Buffer.alloc(16)
-    readSync(fd, buf, 0, 16, 0)
-    closeSync(fd)
-    return true
-  } catch {
-    return false
-  }
-}
-
 function buildMcpConfigs(): MCPServerConfig[] {
   const mem = resolveMcpMemory()
   const configs: MCPServerConfig[] = [
@@ -338,10 +325,9 @@ CoAgent is a personal AI assistant that runs privately on your computer. Nothing
 
 **I log all tool calls.** When I use any connected tool, I log what was done. This builds context about your activity across integrations.
 
-**Every night at 3 AM, a background job runs.** The machine wakes from sleep for this. An agentic loop (Kimi K2.5 by default, Haiku fallback) handles:
+**Every night at 3 AM, a background job runs.** The machine wakes from sleep for this. An agentic loop (Kimi K2.6 by default, Haiku fallback) handles:
 1. **Memory updates** — New contacts, projects, and relationships from the day's tool logs are added to memory. Only durable facts (people, ongoing partnerships, recurring commitments).
 2. **Memory cleanup** — Stale entries pruned, duplicates consolidated, outdated info removed.
-3. **Preferences refinement** — Observed patterns in the user's style and workflow habits are recorded in \`preferences.md\` (≥3 supporting examples required before a pattern is written).
 
 You can steer the nightly job by editing \`nightly.md\` — extra instructions there apply on top of the defaults. After each run, a \`[Nightly · time]\` summary appears in chat.
 
@@ -384,13 +370,13 @@ Notes in \`~/.coagent/memory/\` — my brain across conversations.
 - **profile.md** — user profile: who you are, preferences, how to handle things.
 - **heartbeat.md** — what to check during heartbeats.
 - **nightly.md** — extra instructions for the 3 AM background job.
-- **preferences.md** — tone, format, behavior preferences. Refined nightly from observed behavior; user can edit freely.
+- **preferences.json** — structured category → preferred-integration map (e.g. "crm: gohighlevel"). The agent maintains this via the preferences tool.
 - **contacts.md** — key people and how to handle their messages.
 - **projects.md** — active projects, context, deadlines.
 
 Updated as we work together. User can edit directly.
 
-**Off-limits to the 3 AM job:** setup.md, profile.md, heartbeat.md, nightly.md — only the user or main agent edits these. (preferences.md is refined nightly from observed patterns.)
+**Off-limits to the 3 AM job:** setup.md, profile.md, heartbeat.md, nightly.md — only the user or main agent edits these.
 
 ## What I can always do
 
@@ -473,6 +459,23 @@ After they answer, transition naturally:
 Check setup.md for available integrations and mention any that are relevant to their role.
 
 Wait for them to confirm. Don't rush — this is the most important step.
+
+## Learn their preferred stack
+
+Before setting autonomy, learn which tools they reach for in their daily categories of work. This lets you skip "what CRM do you use?" questions later — you'll already know.
+
+Ask in a natural, conversational way. Weave it into the flow based on what they said they do. One question per message. Save each answer via preferences tool:
+preferences({ action: "set", category: "<slug>", preferred: "<tool>", note: "<short how-they-use-it>" })
+
+Categories to cover if relevant to their role:
+- **CRM / leads** — "What do you use to track clients and leads? HubSpot, GoHighLevel, Salesforce, a spreadsheet?"
+- **Email** — if they haven't said: "Gmail or Outlook for email?"
+- **Calendar** — "Google Calendar or Outlook?"
+- **Messaging** — "Slack, Teams, or iMessage for work chat?"
+- **Docs / notes** — "Google Docs, Notion, Apple Notes?"
+- **Invoicing / payments** — if commission/sales-oriented: "Stripe, QuickBooks, something else?"
+
+Skip any category that clearly doesn't apply. If they say "none" or "I don't really use one," don't force it.
 
 ## Set boundaries
 
@@ -565,7 +568,7 @@ entries from the day's tool logs. You can add extra instructions here —
 they're applied on top of the defaults, not instead of them.
 
 Off-limits files the job cannot modify: setup.md, profile.md, heartbeat.md,
-nightly.md. (preferences.md is refined nightly from observed patterns.)
+nightly.md.
 
 Examples:
   - Also check contacts.md for anyone I haven't emailed in 30+ days and note it
@@ -576,17 +579,6 @@ Examples:
 ## Extra instructions
 
 ## Skip
-`,
-
-  'preferences.md': `# Preferences
-
-## Communication
-
-## Emails
-
-## Documents
-
-## Actions
 `,
 
   'contacts.md': `# Contacts
@@ -968,7 +960,7 @@ DEFAULT_SKILLS['showcase'] = {
 
 ## Step 1: Get connected integrations and user context
 
-Call list_integrations to see what's connected. Also read profile.md and preferences.md from memory to understand who they are and what they care about.
+Call list_integrations to see what's connected. Also read profile.md from memory and call preferences(action: "list") to understand who they are and what tools they prefer.
 
 ## Step 2: Do something useful RIGHT NOW
 
@@ -1514,17 +1506,19 @@ let teamClient: TeamClient | null = null
 // Track which slugs are currently loaded in MCP so we can detect changes
 let currentMcpSlugs: string[] = []
 let imessageConnected = false
-let contactsConnected = false
 
-// Persist local integration connections so they survive restarts
+// Persist local integration connections so they survive restarts.
+// The legacy `contacts` field is still read for migration — users who connected
+// Contacts standalone on an older build get auto-upgraded to the bundle.
 const LOCAL_CONNECTIONS_FILE = join(DATA_DIR, 'local-connections.json')
 function saveLocalConnections() {
-  const data = { imessage: imessageConnected, contacts: contactsConnected }
+  const data = { imessage: imessageConnected }
   require('fs').writeFileSync(LOCAL_CONNECTIONS_FILE, JSON.stringify(data))
 }
 function loadLocalConnections(): { imessage: boolean; contacts: boolean } {
   try {
-    return JSON.parse(require('fs').readFileSync(LOCAL_CONNECTIONS_FILE, 'utf-8'))
+    const parsed = JSON.parse(require('fs').readFileSync(LOCAL_CONNECTIONS_FILE, 'utf-8'))
+    return { imessage: !!parsed.imessage, contacts: !!parsed.contacts }
   } catch { return { imessage: false, contacts: false } }
 }
 let whatsappConnected = false
@@ -1740,25 +1734,49 @@ const customMcpInit = getCustomMcpConfigs().then(async (configs) => {
 customMcpInit.catch(err => console.error('[Custom MCP] Failed to connect:', err.message))
 agent.mcpManager.registerPending('custom', customMcpInit)
 
-// Auto-reconnect local integrations (iMessage, Contacts) that were connected before restart
+// Filter iMessage tools based on current settings. When imessage_can_send is false,
+// the SEND tool is hidden from the agent entirely (not just blocked in the handler).
+function filterImessageTools(canSend: boolean): typeof IMESSAGE_TOOLS {
+  if (canSend) return IMESSAGE_TOOLS
+  return IMESSAGE_TOOLS.filter(t => t.name !== 'IMESSAGE_SEND')
+}
+
+// Cached iMessage denylist. The provider is sync (called inside SQL handlers),
+// so we keep a module-level snapshot and refresh it whenever settings change.
+let cachedImessageDenylist: string[] = []
+setDenylistProvider(() => cachedImessageDenylist)
+
+// The iMessage integration now bundles Contacts — both read the same macOS TCC
+// scope (Full Disk Access), so exposing them as separate connections just made
+// users flip two toggles for no reason. Tools are merged at registration time
+// and routed to the right handler by name prefix.
+function getImessageBundleTools(canSend: boolean) {
+  return [...filterImessageTools(canSend), ...CONTACTS_TOOLS]
+}
+async function handleImessageBundleTool(name: string, args: Record<string, unknown>): Promise<string> {
+  if (name.startsWith('CONTACTS_')) return handleContactsTool(name, args)
+  return handleImessageTool(name, args)
+}
+
+// Auto-reconnect the iMessage+Contacts bundle if it was connected before restart.
+// Legacy state: users who previously connected `contacts` separately get migrated
+// up to the merged bundle (iMessage needs FDA too, so the scope already matches).
 ;(async () => {
   const saved = loadLocalConnections()
-  if (saved.imessage && canAccessChatDb()) {
+  const shouldConnect = (saved.imessage || saved.contacts) && canAccessChatDb()
+  if (shouldConnect) {
     try {
-      agent.mcpManager.registerLocal('coagent:imessage', IMESSAGE_TOOLS, handleImessageTool)
+      const startupSettings = await readSettings(DATA_DIR)
+      cachedImessageDenylist = startupSettings.imessage_denylist
+      agent.mcpManager.registerLocal('coagent:imessage', getImessageBundleTools(startupSettings.imessage_can_send), handleImessageBundleTool)
       imessageConnected = true
       agent.imessageConnected = true
-      console.log('[iMessage] Auto-reconnected from saved state')
+      // Migrate legacy contacts-only state so the next save drops the stale field
+      if (saved.contacts && !saved.imessage) saveLocalConnections()
+      console.log(`[iMessage] Auto-reconnected bundle from saved state (send ${startupSettings.imessage_can_send ? 'enabled' : 'disabled'})`)
     } catch (e: any) { console.log('[iMessage] Auto-reconnect failed:', e.message) }
+    embedToolsFromMcp().catch(() => {})
   }
-  if (saved.contacts) {
-    try {
-      agent.mcpManager.registerLocal('coagent:contacts', CONTACTS_TOOLS, handleContactsTool)
-      contactsConnected = true
-      console.log('[Contacts] Auto-reconnected from saved state')
-    } catch (e: any) { console.log('[Contacts] Auto-reconnect failed:', e.message) }
-  }
-  if (saved.imessage || saved.contacts) embedToolsFromMcp().catch(() => {})
 })()
 
 // Kill any stale process on the port before starting.
@@ -2191,20 +2209,11 @@ async function sendIntegrations(ws: WebSocket): Promise<void> {
   if (process.platform === 'darwin') {
     builtins.push({
       slug: 'coagent:imessage',
-      name: 'iMessage',
+      name: 'iMessage & Contacts',
       connected: imessageConnected,
       category: 'CoAgent',
-      description: 'Read and send iMessages. Search conversations, get message history, send texts.',
-      capabilities: 'Search messages, Get conversations, List recent chats, Send iMessages',
-      builtin: true
-    })
-    builtins.push({
-      slug: 'coagent:contacts',
-      name: 'Contacts',
-      connected: contactsConnected,
-      category: 'CoAgent',
-      description: 'Search and look up contacts from macOS Contacts. Find phone numbers, emails, addresses.',
-      capabilities: 'Search contacts, Get contact details, List recent contacts',
+      description: 'Read and send iMessages, and look up macOS Contacts so the agent can match names to numbers. One permission, both tools.',
+      capabilities: 'Search messages, Get conversations, List recent chats, Send iMessages, Search contacts, Get contact details',
       builtin: true
     })
   }
@@ -3038,10 +3047,12 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
           })
           return
         }
-        console.log('[iMessage] Registering local handler...')
+        console.log('[iMessage] Registering local handler (bundle)...')
         try {
           await agent.mcpManager.disconnect('coagent:imessage')
-          agent.mcpManager.registerLocal('coagent:imessage', IMESSAGE_TOOLS, handleImessageTool)
+          const connectSettings = await readSettings(DATA_DIR)
+          cachedImessageDenylist = connectSettings.imessage_denylist
+          agent.mcpManager.registerLocal('coagent:imessage', getImessageBundleTools(connectSettings.imessage_can_send), handleImessageBundleTool)
           imessageConnected = true
           agent.imessageConnected = true
           saveLocalConnections()
@@ -3049,34 +3060,6 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
           await sendIntegrations(ws)
         } catch (err: any) {
           send(ws, { type: 'error', message: `Failed to connect iMessage: ${err.message}` })
-        }
-        return
-      }
-      if (msg.slug === 'coagent:contacts') {
-        console.log('[Contacts] Connect requested...')
-        if (!canAccessAddressBook()) {
-          console.log('[Contacts] FDA check failed — opening settings')
-          try {
-            const { execSync } = require('child_process')
-            execSync('open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"')
-          } catch {}
-          send(ws, {
-            type: 'integration_fda_required' as any,
-            slug: msg.slug,
-            message: 'Add Co-Agent to Full Disk Access in System Settings, then restart the app and click Connect again.'
-          })
-          return
-        }
-        console.log('[Contacts] Registering local handler...')
-        try {
-          await agent.mcpManager.disconnect('coagent:contacts')
-          agent.mcpManager.registerLocal('coagent:contacts', CONTACTS_TOOLS, handleContactsTool)
-          contactsConnected = true
-          saveLocalConnections()
-          embedToolsFromMcp().catch(() => {})
-          await sendIntegrations(ws)
-        } catch (err: any) {
-          send(ws, { type: 'error', message: `Failed to connect Contacts: ${err.message}` })
         }
         return
       }
@@ -3162,17 +3145,6 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
           await agent.mcpManager.disconnect('coagent:imessage')
           imessageConnected = false
           agent.imessageConnected = false
-          saveLocalConnections()
-          await sendIntegrations(ws)
-        } catch (err: any) {
-          send(ws, { type: 'error', message: err.message })
-        }
-        return
-      }
-      if (msg.slug === 'coagent:contacts') {
-        try {
-          await agent.mcpManager.disconnect('coagent:contacts')
-          contactsConnected = false
           saveLocalConnections()
           await sendIntegrations(ws)
         } catch (err: any) {
@@ -3296,6 +3268,7 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
     if (msg.type === 'update_settings') {
       try {
         const settings = await writeSettings(DATA_DIR, msg.patch)
+        cachedImessageDenylist = settings.imessage_denylist
         send(ws, { type: 'settings_update', settings })
         // If heartbeat interval or active hours changed, reschedule the wake
         if (msg.patch.heartbeat_interval !== undefined || msg.patch.active_hours !== undefined || msg.patch.active_days !== undefined) {
@@ -3309,8 +3282,30 @@ function handleAuthenticatedConnection(ws: WebSocket): void {
         if (msg.patch.auto_recap_meetings !== undefined || msg.patch.auto_recap_minutes !== undefined) {
           scheduler.rescheduleRecap()
         }
+        // If iMessage send permission changed AND iMessage is connected, re-register with the new tool set
+        if (msg.patch.imessage_can_send !== undefined && imessageConnected) {
+          try {
+            await agent.mcpManager.disconnect('coagent:imessage')
+            agent.mcpManager.registerLocal('coagent:imessage', getImessageBundleTools(settings.imessage_can_send), handleImessageBundleTool)
+            embedToolsFromMcp().catch(() => {})
+            console.log(`[iMessage] Re-registered with send ${settings.imessage_can_send ? 'enabled' : 'disabled'}`)
+          } catch (e: any) {
+            console.log('[iMessage] Re-register after settings change failed:', e.message)
+          }
+        }
       } catch (err: any) {
         send(ws, { type: 'error', message: err.message })
+      }
+    }
+
+    if (msg.type === 'list_imessage_senders') {
+      // Fuels the denylist picker UI — one entry per contact (all their identifiers
+      // grouped), plus any unknown 1:1 senders not yet saved to Contacts.
+      try {
+        const contacts = listContactsForDenyPicker()
+        send(ws, { type: 'imessage_senders', contacts })
+      } catch (err: any) {
+        send(ws, { type: 'imessage_senders', contacts: [], error: err?.message ?? String(err) })
       }
     }
 

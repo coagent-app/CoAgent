@@ -14,7 +14,14 @@ import type { AgentSettings } from './settings.js'
 import type { AgentTrigger, AgentMessage } from '@coagent/shared'
 import { searchFiles, readFileContent, readFileBase64, deleteFileEntry, getStorageStats, listFiles, ingestFile, createFolder, moveFile, grepFiles, getPdfFormFields, fillPdfForm } from './file-store.js'
 import { embedTools, searchToolsAndSchema, setToolEmbeddingsDir } from './tool-embeddings.js'
+import {
+  readPreferences as readStructuredPreferences,
+  setPreference as setStructuredPreference,
+  unsetPreference as unsetStructuredPreference,
+  type ToolPreference,
+} from './preferences.js'
 import { logToolCall, extractIntegration, searchToolLogs } from './service-logger.js'
+import { getIntegrationGuide } from './integration-guides.js'
 import { recordUsage } from './usage-tracker.js'
 import { getRelayConfig } from './auth.js'
 import { runResearch } from './research.js'
@@ -204,15 +211,16 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'search_tools',
-    description: 'Discover external integration tools including web search. Use for external services (Gmail, Slack, web search, etc.) — built-in tools are called directly. Schema is provided when you call the tool.',
+    description: 'Discover external integration tools including web search. Use for external services (Gmail, Slack, web search, etc.) — built-in tools are called directly. Optional: pass `queries` to pre-look-up several angles in parallel when useful; single `query` is fine otherwise.',
     input_schema: {
       type: 'object' as const,
       properties: {
-        query: { type: 'string', description: 'Always start with the integration name: "gmail send email", "slack post message", "calendly list events". Not just "send email".' },
+        query: { type: 'string', description: 'Single-query form. Always start with the integration name: "gmail send email", "slack post message". Use `queries` instead when you already know multiple angles.' },
+        queries: { type: 'array', items: { type: 'string' }, description: 'Optional batch — pre-look-up multiple angles in parallel. Same format as `query`. Example: ["excel update cell", "excel insert row", "excel add formula"]. One of `query` or `queries` required.' },
         context: { type: 'string', description: 'Topic context for tool log lookup: "Nathan slack", "south florida leads"' },
-        schema: { type: 'string', description: 'Describe full action with all fields: "send email to recipient with subject, body, CC, and attachment"' }
+        schema: { type: 'string', description: 'Describe full action with all fields: "send email to recipient with subject, body, CC, and attachment". When using `queries`, this describes the overall intent.' }
       },
-      required: ['query', 'context', 'schema']
+      required: ['context']
     }
   },
   {
@@ -243,7 +251,7 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'integration_notes',
-    description: 'Save and recall per-integration facts and preferences. These auto-inject into search_tools results so you remember them next time. Save things like: default IDs (primary calendar, Slack channel), user rules ("always CC legal", "never email X — use Slack"), and workflow preferences. Not for general knowledge — use memory for that. Keep under 500 chars, facts only.',
+    description: 'Save and recall per-integration facts. Per-integration setup details only — default IDs (primary calendar, Slack channel), tool-specific rules. Auto-injected into search_tools results. For category → preferred-integration mapping (e.g. "use GoHighLevel for CRM"), use the preferences tool instead. Keep under 500 chars.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -252,6 +260,20 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
         notes: { type: 'string', description: 'New notes (write only). Replaces prior.' },
       },
       required: ['action', 'integration']
+    }
+  },
+  {
+    name: 'preferences',
+    description: 'Record the user\'s preferred integration for a category of work. Persistently injected into your system prompt so you remember which tool to reach for. Use this when the user says things like "I use GoHighLevel for CRM" or "always send email from Gmail". Categories are short (e.g. "crm", "email", "sms", "calendar", "invoicing", "scheduling"). Keep notes minimal — one short phrase about how they use it.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        action: { type: 'string', enum: ['list', 'set', 'unset'] },
+        category: { type: 'string', description: 'Short slug (e.g. "crm", "email"). Required for set/unset.' },
+        preferred: { type: 'string', description: 'Integration slug or tool prefix (e.g. "gohighlevel", "gmail"). Required for set.' },
+        note: { type: 'string', description: 'Optional short note about how they use it. Max ~80 chars.' },
+      },
+      required: ['action']
     }
   },
   {
@@ -264,7 +286,7 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
         timezone: { type: 'string' }, role: { type: 'string' },
         what_you_do: { type: 'string', description: 'Their work description for system prompt' },
         agent_name: { type: 'string', description: 'What the user wants to call their agent (e.g. "Jarvis", "Friday")' },
-        // custom_instructions is user-only — edited in Settings UI, not by the agent. Use memory/preferences.md for agent-learned workflow rules.
+        // custom_instructions is user-only — edited in Settings UI, not by the agent. Use the preferences tool for agent-learned category → preferred-integration rules.
         onboarded: { type: 'boolean', description: 'True after onboarding done' },
         active_hours: { type: 'object', properties: { start: { type: 'number' }, end: { type: 'number' } } },
         active_days: { type: 'array', items: { type: 'string', enum: ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] } },
@@ -483,7 +505,7 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'run_python',
-    description: 'Execute Python code in a sandboxed in-app interpreter (Pyodide/WASM). Stateful within a conversation: imports and variables persist across calls. Use for data analysis (pandas), charts (matplotlib), calculations, and one-off scripting.\n\nCRITICAL — PACKAGE INSTALLATION IS FORBIDDEN: Never call `micropip`, `pip`, `!pip`, `subprocess`, `os.system`, or any install command. There is no network. Install attempts will fail. The packages below are ALREADY pre-loaded — just `import` them directly on first use and they will be auto-fetched from the local bundle.\n\nPre-installed packages (import directly, do NOT install): numpy, pandas, matplotlib, beautifulsoup4, lxml, requests, python-calamine (use `pd.read_excel(path, engine="calamine")` for .xlsx/.xls/.ods), python-dateutil (dateutil), pillow (PIL). If you need a package not in this list, tell the user — do not try to install it.\n\nTop-level `await` works natively (same as a Jupyter cell) — no asyncio.run() needed. Narrate in plain language what you are doing before/after each cell. Multiple cells per turn are fine for scrape→parse→chart workflows. 60-second timeout per cell. No filesystem or network access — work with data the user pastes or that you compute inline.',
+    description: 'Execute Python code in a sandboxed in-app interpreter (Pyodide/WASM). Stateful within a conversation: imports and variables persist across calls. Use for data analysis (pandas), charts (matplotlib), calculations, and one-off scripting.\n\nCRITICAL — NO FILESYSTEM OR NETWORK: This interpreter cannot read or write user files (PDFs, docs, uploads), cannot open `~/.coagent/...`, and cannot reach the internet. Do NOT use it as a fallback for file-manipulation tools (fill_pdf, files, write_canvas) — if those tools fail, fix the inputs or tell the user; do not reach for Python.\n\nCRITICAL — PACKAGE INSTALLATION IS FORBIDDEN: Never call `micropip`, `pip`, `!pip`, `subprocess`, `os.system`, or any install command. Install attempts will fail. The packages below are ALREADY pre-loaded — just `import` them directly and they will be auto-fetched from the local bundle.\n\nPre-installed packages (import directly, do NOT install): numpy, pandas, matplotlib, beautifulsoup4, lxml, requests, python-calamine (use `pd.read_excel(path, engine="calamine")` for .xlsx/.xls/.ods), python-dateutil (dateutil), pillow (PIL). If you need a package not in this list, tell the user — do not try to install it.\n\nTop-level `await` works natively (same as a Jupyter cell) — no asyncio.run() needed. Narrate in plain language what you are doing before/after each cell. Multiple cells per turn are fine for scrape→parse→chart workflows. 60-second timeout per cell. Work with data the user pastes or that you compute inline.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -606,6 +628,7 @@ const TOOL_LABELS: Record<string, string> = {
   read_team: 'Checking Team',
   team_notes: 'Updating Team Notes',
   integration_notes: 'Checking Integrations',
+  preferences: 'Updating Preferences',
 }
 
 // Action-specific labels for consolidated tools
@@ -720,7 +743,7 @@ function humanizeToolName(name: string): string {
 const HEARTBEAT_TOOLS = new Set([
   'get_current_time', 'memory', 'search_tools', 'call_external_tool',
   'queue_approval', 'add_done_item', 'notify_user', 'set_status_line',
-  'schedule', 'files', 'integration_notes', 'skills',
+  'schedule', 'files', 'integration_notes', 'preferences', 'skills',
 ])
 
 // External tools the heartbeat agent is NEVER allowed to call (sends, creates, deletes)
@@ -763,22 +786,12 @@ function listMemoryFiles(dataDir: string): string[] {
   } catch { return [] }
 }
 
-function readPreferences(dataDir: string): string {
-  try {
-    const content = require('fs').readFileSync(join(dataDir, 'memory', 'preferences.md'), 'utf-8').trim()
-    // Strip the "# Preferences" header and empty section headers to keep it lean
-    const lines = content.split('\n').filter((l: string) => {
-      const t = l.trim()
-      return t && t !== '# Preferences' && !/^##\s+\S+$/.test(t) || (t.startsWith('- ') || t.startsWith('* ') || (!t.startsWith('#') && t.length > 0))
-    })
-    const cleaned = lines.slice(0, 30).join('\n').trim()
-    return cleaned.length > 0 ? cleaned : ''
-  } catch { return '' }
-}
-
 export function buildSystemPrompt(connectedServices: string[], agentProfilePath: string, settings: AgentSettings, dataDir: string, teamRoster?: any[], teamName?: string, googleCalendarConnected = false, composioSlugs: string[] = [], imessageConnected = false): string {
   const memoryFiles = listMemoryFiles(dataDir)
-  const preferences = readPreferences(dataDir)
+  const prefs = readStructuredPreferences(dataDir)
+  const preferencesBlock = prefs.length > 0
+    ? prefs.map(p => `- ${p.category}: ${p.preferred}${p.note ? ` — ${p.note}` : ''}`).join('\n')
+    : ''
 
   // Auto-humanize slugs: "googledocs" → "Google Docs", "google_maps" → "Google Maps"
   const humanizeSlug = (s: string): string => {
@@ -789,11 +802,9 @@ export function buildSystemPrompt(connectedServices: string[], agentProfilePath:
   const integrationNames = composioSlugs.map(humanizeSlug)
 
   const serviceSection = connectedServices.length > 0
-    ? `You have access to these integrations: ${integrationNames.join(', ')}. Never tell the user an integration is missing if it's listed here — you can reach their email, calendar, docs, and so on through these.
+    ? `You have access to these integrations: ${integrationNames.join(', ')}. Don't say an integration is missing if it's listed here.
 
 To use one, first call search_tools(query, context, schema) to find the exact tool name, then call_external_tool(tool_name, parameters) to run it. When you need context for the search, run memory search in parallel.
-
-Built-in tools (memory, files, schedule, skills, send_team_message, etc.) are always available — call them directly without going through search_tools.
 
 You have web search — use search_tools with query "composio_search web" to find COMPOSIO_SEARCH_WEB and other search tools (news, scholar, etc.). Use these to look up current info, businesses, research topics, verify facts, etc.`
     : `You don't have any external integrations connected yet. The user can connect apps in the Integrations panel. Built-in tools (memory, files, schedule, skills) are always available. You also have web search — use search_tools with query "composio_search web" to find web search tools.`
@@ -818,20 +829,19 @@ You have web search — use search_tools with query "composio_search web" to fin
 - spawn_agents — run parallel sub-agents for independent work
 - search_tools + call_external_tool — discover and use connected integrations
 - queue_approval — draft actions for the user to review before executing
-- integration_notes — save and recall per-tool facts and preferences
+- integration_notes — save and recall per-integration setup facts (default IDs, per-tool rules)
+- preferences — record which integration to reach for in a given category of work (e.g. "crm → gohighlevel")
 - get_current_time — current date and time
 - update_settings — update user profile and preferences
 - notify_user — push notification to the user
 - set_status_line — update the status line shown in the app
 - add_done_item — log a completed action
 - create_custom_integration — build new API integrations. ALWAYS run skills(action: "execute", name: "integration-builder") FIRST before calling this tool. The skill has the required template and rules — never skip it.
-Every tool listed here is real and operational. Use them rather than saying you cannot.
-For anything outside these built-in tools, use search_tools to discover and call external integration tools.
+Built-in tools above are always available — call them directly. For anything else, go through search_tools.
 </tools>
-${customInstructions ? `\n${customInstructions}\n` : ''}${preferences ? `\n<preferences>\n${preferences}\n</preferences>\n` : ''}
-Memory is your long-term brain — search it BEFORE asking the user a question you might already know the answer to. Save useful info (contacts, decisions, preferences, project context) without being asked. Before writing, always check what's already there — update existing files, remove outdated info, keep it organized. One file per main topic. Workflow rules go in preferences.md (one bullet, ≤8 words). Tool IDs go in integration_notes.
 
-This system prompt is your source of truth. If earlier messages in this conversation reference different settings or modes, they are outdated — follow what is here now.
+Memory is your long-term brain — search it BEFORE asking the user a question you might already know the answer to. Take an extra step to save useful info without being asked (e.g. names, emails, deadlines, project goals, tool IDs). Before writing, always check what's already there — update existing files, remove outdated info, keep it organized. One file per main topic. When the user says they use a specific app for a category of work (e.g. "I use GoHighLevel for CRM"), call the preferences tool. Per-integration setup facts go in integration_notes.
+${customInstructions ? `\n${customInstructions}\n` : ''}${preferencesBlock ? `\n<preferences>\nThe user prefers these tools for these categories of work — reach for them first when a request matches. This expresses a choice (e.g. if they use both Gmail and Outlook, which is the default).\n${preferencesBlock}\n</preferences>\n` : ''}
 
 <autonomy>
 Mode: ${settings.autonomy}
@@ -849,10 +859,9 @@ ${googleCalendarConnected ? '\nGoogle Calendar is synced into schedule(list). To
 
 Keep responses short and direct. No emojis. Have personality — be warm, sharp, and human.
 Don't get caught up talking too much without saving important details to integration_notes or memory.
-Never use markdown (**, ##, [](), bullets) in emails, messages, or any external tool content — it renders as raw text.
+No markdown in emails, messages, or external tool content — it renders as raw text.
 Before sending, replying, or modifying anything external, make sure you have the correct information — don't guess.
 ${memoryFiles.length > 0 ? `\nRecent memories (read relevant ones before responding): ${memoryFiles.join(', ')}.` : ''}
-VOICE: voice mode is handled automatically — no special tags needed.
 Notifications: 2-4 word title, one-sentence body.${onboardingSection}${teamRoster && teamRoster.length > 0 ? `\n\n<team name="${teamName || 'Your Team'}">\nYou are part of a team. Each member has their own AI agent — when you message someone, you're talking to their agent, not the person directly.\nMembers:\n${teamRoster.map((m: any) => `- ${m.name} (${m.role})`).join('\n')}\nUse send_team_message to reach them. Include agent_context with relevant background.
 </team>` : ''}`
 }
@@ -1417,7 +1426,7 @@ export class Agent {
     // Memoize system prompt — only rebuild when services or settings actually change
     const memFileCount = listMemoryFiles(this.dataDir).length
     const teamRosterKey = this.teamClient ? `${this.teamClient.teamId}|${this.teamClient.getRoster().length}` : ''
-    const prefsMtime = (() => { try { return require('fs').statSync(join(this.dataDir, 'memory', 'preferences.md')).mtimeMs } catch { return 0 } })()
+    const prefsMtime = (() => { try { return require('fs').statSync(join(this.dataDir, 'memory', 'preferences.json')).mtimeMs } catch { return 0 } })()
     const promptKey = connectedServices.join(',') + '|' + JSON.stringify(settings) + '|' + memFileCount + '|' + teamRosterKey + '|' + this.googleCalendarConnected + '|' + this.imessageConnected + '|' + this.composioConnectedSlugs.join(',') + '|' + prefsMtime + '|' + (this.activeCanvasId || '')
     let systemPrompt: string
     if (this.cachedSystemPrompt && this.cachedPromptKey === promptKey) {
@@ -1494,8 +1503,8 @@ Rules:
 - NEVER fabricate tool results — always call the tool.`
     }
 
-    // Model routing: Kimi K2.5 for heartbeat + team (independent background), power model for chat
-    const KIMI = 'kimi-k2.5'
+    // Model routing: Kimi K2.6 for heartbeat + team (independent background), power model for chat
+    const KIMI = 'kimi-k2.6'
     const currentModel = (context === 'heartbeat' || context === 'team') ? KIMI : settings.powerModel
     const isClaudeModel = isAnthropicModel(currentModel)
     const maxTokens = context === 'heartbeat' ? 4096 : 8192
@@ -1946,62 +1955,92 @@ Rules:
             if (searchToolLimitResult.has(block.id)) {
               return searchToolLimitResult.get(block.id)!
             }
-            const input = block.input as { query: string; context?: string; schema?: string }
-            const query = input.query
-            const schemaQuery = input.schema || query
+            const input = block.input as { query?: string; queries?: string[]; context?: string; schema?: string }
+            // Accept either a single query or a batch of queries (pre-look-up multiple angles)
+            const queryList: string[] = Array.isArray(input.queries) && input.queries.length > 0
+              ? input.queries.filter(q => typeof q === 'string' && q.trim().length > 0)
+              : (input.query ? [input.query] : [])
 
-            // ONE embed call → tool search + schema search + max ranking (deduped within turn)
-            const searchKey = `${query}|${schemaQuery}`
-            let searchResult = searchCache.get(searchKey)
-            if (!searchResult) {
-              searchResult = await searchToolsAndSchema(query, schemaQuery, searchableTools)
-              searchCache.set(searchKey, searchResult)
+            if (queryList.length === 0) {
+              result = 'search_tools requires either `query` or `queries` (non-empty).'
             } else {
-              console.log(`[Agent] search_tools cache hit for "${query}"`)
-            }
-            const { matches, schemas } = searchResult
+              // Run all queries in parallel — each uses the per-turn cache so identical queries
+              // across calls aren't re-embedded.
+              const perQuery = await Promise.all(queryList.map(async (q) => {
+                const schemaQuery = input.schema || q
+                const searchKey = `${q}|${schemaQuery}`
+                let sr = searchCache.get(searchKey)
+                if (!sr) {
+                  sr = await searchToolsAndSchema(q, schemaQuery, searchableTools)
+                  searchCache.set(searchKey, sr)
+                } else {
+                  console.log(`[Agent] search_tools cache hit for "${q}"`)
+                }
+                return { q, matches: sr.matches }
+              }))
 
-            if (matches.length === 0) {
-              result = `No tools found matching "${query}". Available services: ${connectedServices.join(', ')}`
-            } else {
-              // Names + descriptions only — full schema is injected at call_external_tool time
-              // to avoid bloating context with schemas for tools the agent never calls.
-              result = `Found ${matches.length} tools for "${query}" — use call_external_tool(tool_name, parameters) to call. Schema will be provided when you call the tool.\n` +
-                matches.map(t => `- ${t.name}: ${t.description ?? ''}`).join('\n')
-
-              // Bundle sibling tools from the same integration(s) — so the agent
-              // can chain actions (e.g. list channels → send message) without another search_tools call.
-              const matchedNames = new Set(matches.map(t => t.name))
-              const hitIntegrations = new Set(
-                matches.map(t => extractIntegration(serverMap.get(t.name) || '', t.name)).filter(Boolean)
-              )
-              console.log(`[Agent] search_tools("${query}") → ${matches.length} matches, integrations: ${[...hitIntegrations].join(', ') || 'none'}, result size: ${result.length} chars`)
-              if (hitIntegrations.size > 0) {
-
-                // Auto-inject integration notes (only if notes exist) — parallel reads
-                const notesDir = join(this.dataDir, 'integration-notes')
-                const noteResults = await Promise.all(
-                  [...hitIntegrations].map(async (integ) => {
-                    try {
-                      const content = await readFile(join(notesDir, `${integ.replace(/[^a-z0-9_-]/gi, '_')}.txt`), 'utf-8')
-                      return content.trim() ? `[${integ} notes]: ${content.trim()}` : null
-                    } catch { return null }
-                  })
-                )
-                const noteLines = noteResults.filter((n): n is string => n !== null)
-                if (noteLines.length > 0) result += '\n\n' + noteLines.join('\n')
+              // Dedupe tool names across queries — first query to surface a tool wins its grouping
+              const seen = new Set<string>()
+              const sections: string[] = []
+              const allMatches: typeof perQuery[number]['matches'] = []
+              for (const { q, matches } of perQuery) {
+                const fresh = matches.filter(t => !seen.has(t.name))
+                fresh.forEach(t => seen.add(t.name))
+                allMatches.push(...fresh)
+                if (fresh.length === 0) {
+                  sections.push(`[${q}] no new tools (already shown above or none match)`)
+                } else {
+                  sections.push(`[${q}]\n` + fresh.map(t => `- ${t.name}: ${t.description ?? ''}`).join('\n'))
+                }
               }
 
-            }
+              if (allMatches.length === 0) {
+                result = `No tools found for: ${queryList.map(q => `"${q}"`).join(', ')}. Available services: ${connectedServices.join(', ')}`
+              } else {
+                const header = queryList.length === 1
+                  ? `Found ${allMatches.length} tools for "${queryList[0]}" — use call_external_tool(tool_name, parameters) to call. Schema will be provided when you call the tool.`
+                  : `Found ${allMatches.length} tools across ${queryList.length} queries — use call_external_tool(tool_name, parameters) to call. Schema will be provided when you call the tool.`
+                result = header + '\n' + sections.join('\n\n')
 
-            // Auto-inject tool log context
-            const logResults = input.context ? await searchToolLogs(this.dataDir, input.context) : null
-            if (logResults && logResults.length > 0) {
-              result += `\n\nTool log context for "${input.context}":\n` + logResults.map(l => `- ${l}`).join('\n')
-              console.log(`[Agent] Context: ${logResults.length} tool logs`)
-            }
+                // Auto-inject integration notes for every integration surfaced, deduped.
+                const hitIntegrations = new Set(
+                  allMatches.map(t => extractIntegration(serverMap.get(t.name) || '', t.name)).filter(Boolean)
+                )
+                console.log(`[Agent] search_tools(${queryList.map(q => `"${q}"`).join(', ')}) → ${allMatches.length} matches, integrations: ${[...hitIntegrations].join(', ') || 'none'}, result size: ${result.length} chars`)
+                if (hitIntegrations.size > 0) {
+                  // Built-in guides first (shipped with the binary, invisible to the user),
+                  // then user-specific notes (which can override/supplement).
+                  const guideLines = [...hitIntegrations]
+                    .map(integ => {
+                      const guide = getIntegrationGuide(integ)
+                      return guide ? guide.trim() : null
+                    })
+                    .filter((g): g is string => g !== null)
+                  if (guideLines.length > 0) result += '\n\n' + guideLines.join('\n\n')
 
-            console.log(`[Agent] search_tools("${query}"${input.context ? `, context: "${input.context}"` : ''}) → ${matches.map(t => t.name).join(', ')}`)
+                  const notesDir = join(this.dataDir, 'integration-notes')
+                  const noteResults = await Promise.all(
+                    [...hitIntegrations].map(async (integ) => {
+                      try {
+                        const content = await readFile(join(notesDir, `${integ.replace(/[^a-z0-9_-]/gi, '_')}.txt`), 'utf-8')
+                        return content.trim() ? `[${integ} notes]: ${content.trim()}` : null
+                      } catch { return null }
+                    })
+                  )
+                  const noteLines = noteResults.filter((n): n is string => n !== null)
+                  if (noteLines.length > 0) result += '\n\n' + noteLines.join('\n')
+                }
+              }
+
+              // Auto-inject tool log context (single lookup for the whole batch)
+              const logResults = input.context ? await searchToolLogs(this.dataDir, input.context) : null
+              if (logResults && logResults.length > 0) {
+                result += `\n\nTool log context for "${input.context}":\n` + logResults.map(l => `- ${l}`).join('\n')
+                console.log(`[Agent] Context: ${logResults.length} tool logs`)
+              }
+
+              console.log(`[Agent] search_tools(${queryList.map(q => `"${q}"`).join(', ')}${input.context ? `, context: "${input.context}"` : ''}) → ${allMatches.map(t => t.name).join(', ')}`)
+            }
 
           } else if (block.name === 'queue_approval') {
             this.queue.add(block.input as Parameters<ApprovalQueue['add']>[0])
@@ -2026,6 +2065,37 @@ Rules:
                 result = await readFile(notesFile, 'utf-8')
                 if (!result.trim()) result = '(empty)'
               } catch { result = '(none)' }
+            }
+
+          } else if (block.name === 'preferences') {
+            const input = block.input as { action: string; category?: string; preferred?: string; note?: string }
+            if (input.action === 'list') {
+              const current = readStructuredPreferences(this.dataDir)
+              result = current.length === 0
+                ? '(no preferences set)'
+                : current.map(p => `- ${p.category}: ${p.preferred}${p.note ? ` — ${p.note}` : ''}`).join('\n')
+            } else if (input.action === 'set') {
+              if (!input.category || !input.preferred) {
+                result = 'Rejected: set requires both "category" and "preferred".'
+              } else {
+                const pref: ToolPreference = {
+                  category: input.category.trim().toLowerCase(),
+                  preferred: input.preferred.trim(),
+                  ...(input.note ? { note: input.note.slice(0, 80) } : {}),
+                }
+                setStructuredPreference(this.dataDir, pref)
+                result = `Saved preference: ${pref.category} → ${pref.preferred}${pref.note ? ` (${pref.note})` : ''}.`
+                console.log(`[Agent] Preference set: ${pref.category} → ${pref.preferred}`)
+              }
+            } else if (input.action === 'unset') {
+              if (!input.category) {
+                result = 'Rejected: unset requires "category".'
+              } else {
+                const removed = unsetStructuredPreference(this.dataDir, input.category.trim().toLowerCase())
+                result = removed ? `Removed preference: ${input.category}.` : `No preference found for "${input.category}".`
+              }
+            } else {
+              result = `Rejected: unknown action "${input.action}". Use list, set, or unset.`
             }
 
           } else if (block.name === 'update_settings') {
@@ -2229,8 +2299,14 @@ Rules:
               else if (!input.field_values || Object.keys(input.field_values).length === 0) { result = 'Missing field_values. Use get_pdf_fields first to discover field names.' }
               else {
                 try {
-                  const newFile = await fillPdfForm(this.dataDir, input.id, input.field_values, input.output_filename)
-                  result = `Filled PDF saved as "${newFile.filename}" [id:${newFile.id}] in folder "${newFile.group || 'root'}".`
+                  const { file, filled, failed } = await fillPdfForm(this.dataDir, input.id, input.field_values, input.output_filename)
+                  const requested = Object.keys(input.field_values).length
+                  const lines = [`Filled ${filled.length}/${requested} fields. Saved as "${file.filename}" [id:${file.id}] in folder "${file.group || 'root'}".`]
+                  if (failed.length > 0) {
+                    lines.push(`Failed fields (run get_pdf_fields to see exact names):`)
+                    for (const f of failed) lines.push(`  - ${f.name}: ${f.reason}`)
+                  }
+                  result = lines.join('\n')
                 } catch (err: any) { result = `Error filling PDF: ${err.message}` }
               }
             } else if (input.action === 'stats') {

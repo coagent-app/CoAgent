@@ -9,6 +9,8 @@ import { streamOpenAI } from './openai-provider.js'
 import { embed } from './tool-embeddings.js'
 import { connect, Table } from '@lancedb/lancedb'
 import { KIMI_MODEL, MOONSHOT_BASE_URL, EMBED_DIM } from './constants.js'
+import { readPreferences, setPreference, unsetPreference } from './preferences.js'
+import { readFile, writeFile } from 'fs/promises'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -210,6 +212,14 @@ const SYSTEM_PROMPT = `You are a background maintenance agent. You run every nig
 
 OFF-LIMITS files (never modify): heartbeat.md, nightly.md, setup.md, profile.md
 
+0. OBSERVE TOOL PREFERENCES: Check today's logs for strong signals that the user prefers a specific integration for a category of work.
+   - Call preferences(action: "list") first to see what's already saved.
+   - Strong signal = the user repeatedly used the same integration for the same type of work (e.g. every CRM action went through GOHIGHLEVEL_*, every email through GMAIL_*).
+   - REQUIRE ≥3 uses in the same category before setting a preference.
+   - Call preferences(action: "set", category, preferred, note) to record. Keep notes short (≤80 chars) — just how they use it.
+   - If a saved preference is contradicted by new behavior (they switched tools), update it with set, or remove with unset.
+   - Categories should be short slugs: crm, email, sms, calendar, invoicing, scheduling, docs, storage, etc.
+
 1. PROCESS TODAY'S LOGS: Review the tool usage logs below and extract anything worth remembering.
    - Use search_memory FIRST to check what already exists before writing anything.
    - New people (name, email, company, role) → contacts.md
@@ -235,24 +245,92 @@ OFF-LIMITS files (never modify): heartbeat.md, nightly.md, setup.md, profile.md
    - Do NOT delete anything that is still actively useful or might be referenced again.
    - If everything looks clean, skip this step.
 
-4. UPDATE preferences.md WITH OBSERVED PATTERNS: Review today's logs for patterns in how the user works, and keep preferences.md accurate.
-   - Record style patterns you saw in their sent messages: tone, length, greetings, sign-offs, emoji use, formality.
-   - Record workflow habits: recipients they always CC, times they never send, integrations they favor for a given task.
-   - REQUIRE ≥3 supporting examples before recording a pattern. If you only saw it once or twice, skip it.
-   - If a pattern already in preferences.md is contradicted by new behavior, UPDATE or REMOVE it — don't let stale inferences persist.
-   - If no new patterns emerged with enough examples, skip this step.
-
 After you finish all memory tool calls, reply with a brief summary of what you did. Format:
 - Added: [what was added]
 - Updated: [what was changed]
 - Removed: [what was cleaned up]
 - Consolidated: [what was merged]
-- Patterns: [what was observed about how the user works]
 Or "Nothing to update." if you made no changes.`
 
+/** Integration notes tool — same shape as the main agent's. */
+const INTEGRATION_NOTES_TOOL: Anthropic.Tool = {
+  name: 'integration_notes',
+  description: 'Save and recall per-integration setup facts. Per-integration details only — default IDs (primary calendar, Slack channel), tool-specific rules. Read before writing to avoid clobbering. Keep under 500 chars.',
+  input_schema: {
+    type: 'object' as const,
+    properties: {
+      action: { type: 'string', enum: ['read', 'write'] },
+      integration: { type: 'string', description: 'lowercase slug e.g. "gmail", "slack"' },
+      notes: { type: 'string', description: 'New notes (write only). Replaces prior.' },
+    },
+    required: ['action', 'integration']
+  }
+}
+
+async function callIntegrationNotesTool(dataDir: string, input: Record<string, unknown>): Promise<string> {
+  const action = input.action as string
+  const integration = (input.integration as string | undefined)?.replace(/[^a-z0-9_-]/gi, '_')
+  if (!integration) return 'Rejected: "integration" is required.'
+  const notesDir = join(dataDir, 'integration-notes')
+  const notesFile = join(notesDir, `${integration}.txt`)
+  if (action === 'write') {
+    await mkdir(notesDir, { recursive: true })
+    const content = ((input.notes as string | undefined) || '').slice(0, 500)
+    await writeFile(notesFile, content, 'utf-8')
+    return `Notes saved for ${integration}.`
+  }
+  if (action === 'read') {
+    try {
+      const content = await readFile(notesFile, 'utf-8')
+      return content.trim() || '(empty)'
+    } catch { return '(none)' }
+  }
+  return `Rejected: unknown action "${action}".`
+}
+
+/** Tool definition for the preferences tool exposed to the 3am agent. */
+const PREFERENCES_TOOL: Anthropic.Tool = {
+  name: 'preferences',
+  description: 'Record or recall the user\'s preferred integration for a category of work. list returns all current preferences. set upserts by category. unset removes by category.',
+  input_schema: {
+    type: 'object' as const,
+    properties: {
+      action: { type: 'string', enum: ['list', 'set', 'unset'] },
+      category: { type: 'string', description: 'Short slug (e.g. "crm", "email"). Required for set/unset.' },
+      preferred: { type: 'string', description: 'Integration slug or tool prefix. Required for set.' },
+      note: { type: 'string', description: 'Optional short note (≤80 chars).' },
+    },
+    required: ['action']
+  }
+}
+
+function callPreferencesTool(dataDir: string, input: Record<string, unknown>): string {
+  const action = input.action as string
+  if (action === 'list') {
+    const current = readPreferences(dataDir)
+    return current.length === 0
+      ? '(no preferences set)'
+      : current.map(p => `- ${p.category}: ${p.preferred}${p.note ? ` — ${p.note}` : ''}`).join('\n')
+  }
+  if (action === 'set') {
+    const category = (input.category as string | undefined)?.trim().toLowerCase()
+    const preferred = (input.preferred as string | undefined)?.trim()
+    if (!category || !preferred) return 'Rejected: set requires "category" and "preferred".'
+    const note = (input.note as string | undefined)?.slice(0, 80)
+    setPreference(dataDir, { category, preferred, ...(note ? { note } : {}) })
+    return `Saved: ${category} → ${preferred}${note ? ` (${note})` : ''}.`
+  }
+  if (action === 'unset') {
+    const category = (input.category as string | undefined)?.trim().toLowerCase()
+    if (!category) return 'Rejected: unset requires "category".'
+    return unsetPreference(dataDir, category) ? `Removed: ${category}.` : `No preference found for "${category}".`
+  }
+  return `Rejected: unknown action "${action}".`
+}
+
 /**
- * Process tool logs via an agentic Haiku loop with memory tools.
- * Haiku searches, edits, and appends memory — updates contacts, projects, etc.
+ * Process tool logs via an agentic Haiku loop with memory + preferences tools.
+ * Haiku searches, edits, and appends memory — updates contacts, projects, preferences.
  * No briefing generation — context is provided live via search_tools context param.
  */
 export async function extractInsights(
@@ -327,11 +405,12 @@ export async function extractInsights(
 
 ${logSection}
 ${nightlySection}
-Run all three jobs: (1) process these logs into memory, (2) read ALL memory files and consolidate/organize, (3) prune stale entries. Use list_memory first to see all files, then read and process each one.`
+Run all jobs in order: (0) check logs for repeated use of the same integration for a category and update preferences, (1) process these logs into memory, (2) read ALL memory files and consolidate/organize, (3) prune stale entries. Use list_memory first to see all files, then read and process each one.`
 
-  // Cache system prompt + tool definitions (stable across runs)
-  const cachedTools: Anthropic.Tool[] = memoryTools.map((t, i) =>
-    i === memoryTools.length - 1
+  // Memory tools + local tools (integration_notes, preferences). Cache-anchor the last one.
+  const allTools: Anthropic.Tool[] = [...memoryTools, INTEGRATION_NOTES_TOOL, PREFERENCES_TOOL]
+  const cachedTools: Anthropic.Tool[] = allTools.map((t, i) =>
+    i === allTools.length - 1
       ? { ...t, cache_control: { type: 'ephemeral' as const } }
       : t
   )
@@ -395,7 +474,15 @@ Run all three jobs: (1) process these logs into memory, (2) read ALL memory file
 
         console.log(`[ServiceLogger] ${modelName} calling: ${block.name}(${JSON.stringify(block.input).slice(0, 100)})`)
         try {
-          const result = await callMemoryTool(block.name, block.input as Record<string, unknown>)
+          const input = block.input as Record<string, unknown>
+          let result: string
+          if (block.name === 'preferences') {
+            result = callPreferencesTool(dataDir, input)
+          } else if (block.name === 'integration_notes') {
+            result = await callIntegrationNotesTool(dataDir, input)
+          } else {
+            result = await callMemoryTool(block.name, input)
+          }
           toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: result })
         } catch (err: any) {
           toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: `Error: ${err.message}`, is_error: true })
