@@ -215,7 +215,7 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
     input_schema: {
       type: 'object' as const,
       properties: {
-        query: { type: 'string', description: 'Single-query form. Always start with the integration name: "gmail send email", "slack post message". Use `queries` instead when you already know multiple angles.' },
+        query: { type: 'string', description: 'Single-query form. Always start with the integration name and the exact operation. If continuing something that already exists (a thread, event, issue), search for that specifically: "gmail reply to thread" not "gmail send email", "slack reply in thread" not "slack post message", "calendar update event" not "calendar create event". Use `queries` instead when you already know multiple angles.' },
         queries: { type: 'array', items: { type: 'string' }, description: 'Optional batch — pre-look-up multiple angles in parallel. Same format as `query`. Example: ["excel update cell", "excel insert row", "excel add formula"]. One of `query` or `queries` required.' },
         context: { type: 'string', description: 'Topic context for tool log lookup: "Nathan slack", "south florida leads"' },
         schema: { type: 'string', description: 'Describe full action with all fields: "send email to recipient with subject, body, CC, and attachment". When using `queries`, this describes the overall intent.' }
