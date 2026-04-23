@@ -224,8 +224,42 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
     }
   },
   {
+    name: 'show_action_card',
+    description: `Show an interactive approval card inline before running a mutating action (send message, create event, file ticket, etc.).
+
+Prefer a single \`body\`. Use \`variants\` (max 3) only when the user would reasonably want to pick between distinct drafts.`,
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        title: { type: 'string', description: 'Short action title, e.g. "Send to Michelle"' },
+        platform: { type: 'string', description: 'Integration slug — gmail, slack, imessage, googlecalendar, linear, notion, etc. Used for logo + send button branding.' },
+        summary: { type: 'string', description: 'One-line subtitle under the title' },
+        body: { type: 'string', description: 'Single text preview (message, task description)' },
+        variants: {
+          type: 'array',
+          description: 'Optional multi-option drafts — max 3. User picks one.',
+          items: { type: 'object', properties: { label: { type: 'string' }, body: { type: 'string' } }, required: ['label', 'body'] }
+        },
+        fields: {
+          type: 'array',
+          description: 'Structured key/value rows (To, Subject, When, Where, Attendees, Channel, Amount, etc.)',
+          items: { type: 'object', properties: { label: { type: 'string' }, value: { type: 'string' } }, required: ['label', 'value'] }
+        },
+        action: {
+          type: 'object',
+          properties: {
+            label: { type: 'string', description: 'Button text, e.g. "Send via Gmail", "Create event"' },
+            confirmPrompt: { type: 'string', description: 'Written as if the user typed it. Include enough context to execute with no ambiguity.' }
+          },
+          required: ['label', 'confirmPrompt']
+        }
+      },
+      required: ['title', 'platform', 'action']
+    }
+  },
+  {
     name: 'queue_approval',
-    description: 'Queue a drafted action for the user to review and approve before it runs (send email, create event, delete, etc.). Use this when your autonomy mode tells you to queue instead of execute, or when the user explicitly asked you to draft something without sending it. Do NOT use this when the user asked you to do something directly and your autonomy mode allows it — just call the tool and execute. The `detail` field must contain the full draft so the user can approve as-is without rewriting. Do not use this to ask questions or surface "I\'m stuck" — say that in your reply instead. Fill every field.',
+    description: 'Queue a drafted action for later user review (send email, create event, delete, etc.). Use when the user asked you to draft without sending, or when autonomy mode requires approval. `detail` must contain the full draft so the user can approve without rewriting.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -466,7 +500,7 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'spawn_agents',
-    description: 'Launch background sub-agents for independent tasks. Returns IMMEDIATELY — continue talking to the user, don\'t wait. Results appear in chat when done.\n\nWhen to use: 2+ independent tasks (research competitors AND draft email), deep research while you keep talking, tasks that don\'t need each other\'s output.\nWhen NOT to use: single quick tasks, anything requiring back-and-forth with the user, tasks that depend on each other.\n\nCan: search, read memory/files, create documents, update memory.\nCannot: send emails, queue approvals, call external tools, or talk to the user.\n\nWrite instructions as if briefing someone with no context — include all names, dates, goals, and where to save output.',
+    description: 'Launch background sub-agents for independent work. Returns immediately — keep talking to the user; results surface in chat when each agent finishes.\n\nSub-agents can: search, read memory/files, write documents and memory.\nSub-agents cannot: send messages, queue approvals, call external integrations, or talk to the user.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -505,7 +539,7 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: 'run_python',
-    description: 'Execute Python code in a sandboxed in-app interpreter (Pyodide/WASM). Stateful within a conversation: imports and variables persist across calls. Use for data analysis (pandas), charts (matplotlib), calculations, and one-off scripting.\n\nCRITICAL — NO FILESYSTEM OR NETWORK: This interpreter cannot read or write user files (PDFs, docs, uploads), cannot open `~/.coagent/...`, and cannot reach the internet. Do NOT use it as a fallback for file-manipulation tools (fill_pdf, files, write_canvas) — if those tools fail, fix the inputs or tell the user; do not reach for Python.\n\nCRITICAL — PACKAGE INSTALLATION IS FORBIDDEN: Never call `micropip`, `pip`, `!pip`, `subprocess`, `os.system`, or any install command. Install attempts will fail. The packages below are ALREADY pre-loaded — just `import` them directly and they will be auto-fetched from the local bundle.\n\nPre-installed packages (import directly, do NOT install): numpy, pandas, matplotlib, beautifulsoup4, lxml, requests, python-calamine (use `pd.read_excel(path, engine="calamine")` for .xlsx/.xls/.ods), python-dateutil (dateutil), pillow (PIL). If you need a package not in this list, tell the user — do not try to install it.\n\nTop-level `await` works natively (same as a Jupyter cell) — no asyncio.run() needed. Narrate in plain language what you are doing before/after each cell. Multiple cells per turn are fine for scrape→parse→chart workflows. 60-second timeout per cell. Work with data the user pastes or that you compute inline.',
+    description: 'Run a short Python expression or script for arithmetic, dates, or unit conversions. Available: math, decimal, datetime, numpy. No filesystem, no network.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -605,6 +639,7 @@ type ToolContext = 'heartbeat' | 'chat' | 'webhook' | 'team'
 const TOOL_LABELS: Record<string, string> = {
   get_current_time: 'Checking the Time',
   search_tools: 'Searching for Tools',
+  show_action_card: 'Drafting action',
   queue_approval: 'Adding to Queue',
   add_done_item: 'Marking as Done',
   update_settings: 'Updating Settings',
@@ -1683,31 +1718,50 @@ Rules:
               try {
                 if (event.type === 'content_block_start' && (event as any).content_block?.type === 'tool_use') {
                   const name = (event as any).content_block.name
-                  if (CANVAS_TOOL_NAMES.has(name) || name === 'run_python') {
+                  if (CANVAS_TOOL_NAMES.has(name) || name === 'run_python' || name === 'show_action_card') {
                     streamingToolId = (event as any).content_block.id
                     streamingToolName = name
                   }
                 } else if (event.type === 'content_block_delta' && streamingToolId) {
                   const block = (snapshot.content as any[])?.[event.index]
                   if (block?.type === 'tool_use') {
-                    const input = block.input as { title?: string; code?: string; canvas_id?: string }
-                    if (input?.code) {
+                    if (streamingToolName === 'show_action_card') {
                       const now = Date.now()
-                      if (now - lastCanvasBroadcast > 100) {
+                      if (now - lastCanvasBroadcast > 80) {
                         lastCanvasBroadcast = now
-                        if (CANVAS_TOOL_NAMES.has(streamingToolName!)) {
-                          this.onBroadcast?.({
-                            type: 'canvas_streaming',
-                            canvasId: input.canvas_id || streamingToolId,
-                            title: input.title,
-                            partialCode: input.code,
-                          })
-                        } else if (streamingToolName === 'run_python') {
-                          this.onBroadcast?.({
-                            type: 'python_streaming',
-                            requestId: streamingToolId,
-                            partialCode: input.code,
-                          })
+                        const input = block.input as any
+                        this.onBroadcast?.({
+                          type: 'action_card_streaming',
+                          cardId: streamingToolId,
+                          title: input?.title,
+                          platform: input?.platform,
+                          summary: input?.summary,
+                          body: input?.body,
+                          variants: input?.variants,
+                          fields: input?.fields,
+                          action: input?.action,
+                        })
+                      }
+                    } else {
+                      const input = block.input as { title?: string; code?: string; canvas_id?: string }
+                      if (input?.code) {
+                        const now = Date.now()
+                        if (now - lastCanvasBroadcast > 100) {
+                          lastCanvasBroadcast = now
+                          if (CANVAS_TOOL_NAMES.has(streamingToolName!)) {
+                            this.onBroadcast?.({
+                              type: 'canvas_streaming',
+                              canvasId: input.canvas_id || streamingToolId,
+                              title: input.title,
+                              partialCode: input.code,
+                            })
+                          } else if (streamingToolName === 'run_python') {
+                            this.onBroadcast?.({
+                              type: 'python_streaming',
+                              requestId: streamingToolId,
+                              partialCode: input.code,
+                            })
+                          }
                         }
                       }
                     }
@@ -1806,6 +1860,42 @@ Rules:
               return out
             }
 
+            // Repair-style partial JSON parser for streaming tool args.
+            // OpenAI streams args as a raw string; we close open structures
+            // (strings, arrays, objects) and retry JSON.parse. Returns null
+            // if no sensible parse is possible yet.
+            const parsePartialJSON = (s: string): any => {
+              if (!s || !s.trim()) return null
+              try { return JSON.parse(s) } catch { /* fall through */ }
+              // Scan tracking in-string / escape / bracket stack
+              const stack: string[] = []
+              let inStr = false
+              let esc = false
+              for (let i = 0; i < s.length; i++) {
+                const c = s[i]
+                if (esc) { esc = false; continue }
+                if (c === '\\') { esc = true; continue }
+                if (inStr) { if (c === '"') inStr = false; continue }
+                if (c === '"') inStr = true
+                else if (c === '{') stack.push('}')
+                else if (c === '[') stack.push(']')
+                else if (c === '}' || c === ']') stack.pop()
+              }
+              // Build candidate: strip trailing escape, close open string,
+              // strip trailing comma/colon/partial key, close brackets.
+              let candidate = s
+              if (esc) candidate = candidate.slice(0, -1)
+              if (inStr) candidate += '"'
+              // Strip trailing partial key fragments: `, "titl` → `,` → strip
+              candidate = candidate.replace(/,\s*"[^"]*$/, '')
+              candidate = candidate.replace(/,\s*$/, '')
+              candidate = candidate.replace(/:\s*$/, ': null')
+              candidate += stack.reverse().join('')
+              try { return JSON.parse(candidate) } catch { return null }
+            }
+
+            let lastActionCardBroadcast = 0
+
             response = await streamOpenAI(openai, {
               model: currentModel,
               system: systemPrompt,
@@ -1834,6 +1924,22 @@ Rules:
                   type: 'python_streaming',
                   requestId: toolCallId,
                   partialCode: parsed.code,
+                })
+              } else if (toolName === 'show_action_card') {
+                if (now - lastActionCardBroadcast < 100) return
+                const parsed = parsePartialJSON(argsSoFar)
+                if (!parsed || typeof parsed !== 'object') return
+                lastActionCardBroadcast = now
+                this.onBroadcast?.({
+                  type: 'action_card_streaming',
+                  cardId: toolCallId,
+                  title: parsed.title,
+                  platform: parsed.platform,
+                  summary: parsed.summary,
+                  body: parsed.body,
+                  variants: parsed.variants,
+                  fields: parsed.fields,
+                  action: parsed.action,
                 })
               }
             })
@@ -1918,7 +2024,11 @@ Rules:
         // Fire UI progress callbacks immediately (before parallel execution)
         for (const block of toolBlocks) {
           if (onToolCall) {
-            if (block.name === 'call_external_tool') {
+            // show_action_card streams the card itself as the visible output —
+            // no "Drafting action" label needed; it's noise next to the card.
+            if (block.name === 'show_action_card') {
+              // skip label broadcast
+            } else if (block.name === 'call_external_tool') {
               const extName = ((block.input as any).tool_name as string) || 'external tool'
               onToolCall(extName, humanizeToolName(extName))
             } else {
@@ -2045,6 +2155,49 @@ Rules:
           } else if (block.name === 'queue_approval') {
             this.queue.add(block.input as Parameters<ApprovalQueue['add']>[0])
             result = 'Queued for approval.'
+
+          } else if (block.name === 'show_action_card') {
+            const input = block.input as {
+              title?: string
+              platform?: string
+              summary?: string
+              body?: string
+              variants?: { label: string; body: string }[]
+              fields?: { label: string; value: string }[]
+              action?: { label: string; confirmPrompt: string }
+            }
+
+            const errors: string[] = []
+            if (!input.title?.trim()) errors.push('title is required')
+            if (!input.platform?.trim()) errors.push('platform is required')
+            if (!input.action?.label?.trim()) errors.push('action.label is required')
+            if (!input.action?.confirmPrompt?.trim()) errors.push('action.confirmPrompt is required')
+            if (input.variants && input.variants.some(v => !v.label?.trim() || !v.body?.trim())) {
+              errors.push('each variant needs label and body')
+            }
+            if (input.fields && input.fields.some(f => !f.label?.trim() || !f.value?.trim())) {
+              errors.push('each field needs label and value')
+            }
+            if (!input.body?.trim() && !input.variants?.length && !input.fields?.length) {
+              errors.push('provide at least one of: body, variants, fields')
+            }
+
+            if (errors.length) {
+              result = `Rejected: ${errors.join('; ')}. Retry with corrections.`
+            } else {
+              this.onBroadcast?.({
+                type: 'action_card',
+                cardId: block.id,
+                title: input.title!,
+                platform: input.platform!,
+                summary: input.summary,
+                body: input.body,
+                variants: input.variants,
+                fields: input.fields,
+                action: input.action!
+              })
+              result = 'Action card shown to user. Awaiting their approval click.'
+            }
 
           } else if (block.name === 'add_done_item') {
             this.queue.addDone((block.input as { description: string }).description)

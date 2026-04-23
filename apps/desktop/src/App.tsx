@@ -14,7 +14,6 @@ import { CanvasPane } from '@/components/CanvasPane'
 import { OnboardingTour } from '@/components/OnboardingTour'
 import { OnboardingActivation } from '@/components/OnboardingActivation'
 import { QueueToast } from '@/components/QueueToast'
-import { QueueDrawer } from '@/components/QueueDrawer'
 import { useAgent } from '@/hooks/useAgent'
 import { useUpdater } from '@/hooks/useUpdater'
 import { useTheme } from '@/hooks/useTheme'
@@ -53,7 +52,7 @@ function ConnectingOverlay({ visible }: { visible: boolean }) {
 }
 
 export default function App() {
-  const { queue, done, newQueueIds, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, hydrated, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, error, chat, approve, reject, editQueueItem, dismissQueueToast, connectIntegration, disconnectIntegration, settings, updateSettings, authStatus, updateAuth, verifyAuth, files, folders, searchResults, transcribingFiles, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, relayActive, relayModel, setRelayModel, relayUsage, activateRelay, refreshRelayStatus, pendingFields, setPendingFields, setModel, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, imessageSenders, listImessageSenders, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, getTeamInfo, triggerPrompt, setTriggerPrompt, canvas, canvasVisible, canvasStreaming, canvasStreamingCode, openCanvas, closeCanvas, canvasesList, getCanvases, codeCells, codeCellOrder, cancelCodeCell, exportPdf, enableWakeScheduling } = useAgent()
+  const { queue, done, newQueueIds, messages, streamingText, thinking, processing, toolLabel, researchAgents, connected, hydrated, lastHeartbeat, heartbeatLog, triggerHeartbeat, statusLine, skills, updateSkill, deleteSkill, steer, stopAgent, integrations, error, chat, approve, reject, editQueueItem, dismissQueueToast, connectIntegration, disconnectIntegration, settings, updateSettings, authStatus, updateAuth, verifyAuth, files, folders, searchResults, transcribingFiles, ingestFile, deleteFile, ingestFilePaths, createFolder, moveFile, renameFile, renameFolder, deleteFolder, reorderFolders, moveFolder, searchFilesUI, relayActive, relayModel, setRelayModel, relayUsage, activateRelay, refreshRelayStatus, pendingFields, setPendingFields, setModel, usage, refreshUsage, organizing, autoOrganize, calendarEntries, completeCalendarEntry, deleteCalendarEntry, googleCalendarStatus, googleCalendarConnect, googleCalendarDisconnect, googleCalendarToggle, googleCalendarColor, googleCalendarSync, capabilityCard, confirmCapabilities, deleteCustomIntegration, whatsappQr, imessageSenders, listImessageSenders, toggleTrigger, getRelayCredentials, relayCredentials, isAdmin, adminUsers, adminNewToken, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken, teamInfo, teamMessages, teamStatus, sendTeamMessage, getTeamInfo, triggerPrompt, setTriggerPrompt, canvas, canvasVisible, canvasStreaming, canvasStreamingCode, openCanvas, closeCanvas, canvasesList, getCanvases, codeCells, codeCellOrder, cancelCodeCell, exportPdf, enableWakeScheduling, actionCards, approveActionCard, dismissActionCard } = useAgent()
   const { dark, toggle: toggleTheme } = useTheme()
   const updater = useUpdater()
   const [view, setView] = useState<View>('chat')
@@ -61,7 +60,6 @@ export default function App() {
   const selectedItem = selectedItemId ? queue.find(i => i.id === selectedItemId) ?? null : null
   const setSelectedItem = useCallback((item: ApprovalItem | null) => setSelectedItemId(item?.id ?? null), [])
   const [modalOpen, setModalOpen] = useState(false)
-  const [drawerOpen, setDrawerOpen] = useState(false)
   const [activated, setActivated] = useState(() => !!localStorage.getItem('coagent-token'))
   const [activationFading, setActivationFading] = useState(false)
   // Wait for WebSocket to connect before showing activation gate.
@@ -184,12 +182,10 @@ export default function App() {
 
   function handleApproveAll() {
     queue.filter(i => i.status === 'pending').forEach(i => approve(i.id))
-    setDrawerOpen(false)
   }
 
   function handleRejectAll() {
     queue.filter(i => i.status === 'pending').forEach(i => reject(i.id))
-    setDrawerOpen(false)
   }
 
   // Show loading screen while waiting for WebSocket to establish AND initial
@@ -259,16 +255,15 @@ export default function App() {
           dark={dark}
           toggleTheme={toggleTheme}
           hasTeam={!!teamInfo}
-          onQueueBadgeClick={() => { if (canvasVisible) closeCanvas(); setDrawerOpen(true); dismissQueueToast() }}
         />
 
         {view === 'chat' && (
           <div className="relative flex-1 flex overflow-hidden">
-            <ChatPane messages={messages} streamingText={streamingText} thinking={thinking} processing={processing} toolLabel={toolLabel} researchAgents={researchAgents} connected={connected} onChat={chat} onSteer={steer} onStop={stopAgent} onIngestFile={ingestFile} files={files} onNavigateToSettings={() => setView('settings')} lastHeartbeat={lastHeartbeat} heartbeatLog={heartbeatLog} onTriggerHeartbeat={triggerHeartbeat} statusLine={statusLine} skills={skills} capabilityCard={capabilityCard} onConfirmCapabilities={confirmCapabilities} userName={settings?.name} userRole={settings?.role} onboarded={settings?.onboarded} agentName={settings?.agent_name} codeCells={codeCells} codeCellOrder={codeCellOrder} onCancelCodeCell={cancelCodeCell} onOpenCanvas={openCanvas} className="flex-1" />
-            {newQueueItems.length > 0 && !drawerOpen && (
+            <ChatPane messages={messages} streamingText={streamingText} thinking={thinking} processing={processing} toolLabel={toolLabel} researchAgents={researchAgents} connected={connected} onChat={chat} onSteer={steer} onStop={stopAgent} onIngestFile={ingestFile} files={files} onNavigateToSettings={() => setView('settings')} lastHeartbeat={lastHeartbeat} heartbeatLog={heartbeatLog} onTriggerHeartbeat={triggerHeartbeat} statusLine={statusLine} skills={skills} capabilityCard={capabilityCard} onConfirmCapabilities={confirmCapabilities} userName={settings?.name} userRole={settings?.role} onboarded={settings?.onboarded} agentName={settings?.agent_name} codeCells={codeCells} codeCellOrder={codeCellOrder} onCancelCodeCell={cancelCodeCell} onOpenCanvas={openCanvas} actionCards={actionCards} onApproveActionCard={approveActionCard} onDismissActionCard={dismissActionCard} className="flex-1" />
+            {newQueueItems.length > 0 && (
               <QueueToast
                 items={newQueueItems}
-                onReview={() => { setDrawerOpen(true); dismissQueueToast() }}
+                onReview={() => { setView('queue'); dismissQueueToast() }}
                 onDismiss={dismissQueueToast}
               />
             )}
@@ -286,16 +281,6 @@ export default function App() {
 
               />
             )}
-            <QueueDrawer
-              open={drawerOpen}
-              queue={queue}
-              onClose={() => setDrawerOpen(false)}
-              onApprove={handleApprove}
-              onReject={handleReject}
-              onApproveAll={handleApproveAll}
-              onRejectAll={handleRejectAll}
-              onEdit={editQueueItem}
-            />
           </div>
         )}
 

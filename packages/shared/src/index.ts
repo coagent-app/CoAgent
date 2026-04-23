@@ -316,6 +316,31 @@ export type WSServerMessage =
   | { type: 'code_cell_error'; cellId: string; errorType: string; message: string; traceback: string; stdout: string; stderr: string }
   | { type: 'subagent_complete'; agentId: string; label: string; resultLength: number }
   | { type: 'wake_scheduling_result'; success: boolean; message?: string }
+  | {
+      type: 'action_card'
+      cardId: string
+      title: string
+      platform: string
+      summary?: string
+      body?: string
+      variants?: { label: string; body: string }[]
+      fields?: { label: string; value: string }[]
+      action: { label: string; confirmPrompt: string }
+    }
+  | {
+      // Streaming partial — any subset of fields may be present while the
+      // model is still generating. Superseded by a final `action_card` on
+      // content_block_stop.
+      type: 'action_card_streaming'
+      cardId: string
+      title?: string
+      platform?: string
+      summary?: string
+      body?: string
+      variants?: { label: string; body: string }[]
+      fields?: { label: string; value: string }[]
+      action?: { label?: string; confirmPrompt?: string }
+    }
 
 export type PythonEvent =
   | { type: 'stdout'; line: string }

@@ -212,6 +212,8 @@ const SYSTEM_PROMPT = `You are a background maintenance agent. You run every nig
 
 OFF-LIMITS files (never modify): heartbeat.md, nightly.md, setup.md, profile.md
 
+Each bullet carries a [YYYY-MM-DD] tag — use it to judge staleness at the bullet level. Tags are stamped automatically; don't add them yourself.
+
 0. OBSERVE TOOL PREFERENCES: Check today's logs for strong signals that the user prefers a specific integration for a category of work.
    - Call preferences(action: "list") first to see what's already saved.
    - Strong signal = the user repeatedly used the same integration for the same type of work (e.g. every CRM action went through GOHIGHLEVEL_*, every email through GMAIL_*).

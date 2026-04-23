@@ -11,7 +11,8 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { AgentMessage, FileEntry } from '@coagent/shared'
 import { CodeCell } from '@/components/CodeCell'
-import type { CodeCell as CodeCellType } from '@/hooks/useAgent'
+import type { CodeCell as CodeCellType, ActionCardState } from '@/hooks/useAgent'
+import { ActionCard } from '@/components/ActionCard'
 
 interface ChatPaneProps {
   messages: AgentMessage[]
@@ -43,6 +44,9 @@ interface ChatPaneProps {
   codeCellOrder?: string[]
   onCancelCodeCell?: (id: string) => void
   onOpenCanvas?: (canvasId: string) => void
+  actionCards?: ActionCardState[]
+  onApproveActionCard?: (cardId: string, selectedVariantLabel?: string) => void
+  onDismissActionCard?: (cardId: string) => void
   className?: string
 }
 
@@ -675,6 +679,9 @@ const HistoricalMessageList = React.memo(function HistoricalMessageList({
   onCancelCodeCell,
   onOpenCanvas,
   welcomeContent,
+  actionCards,
+  onApproveActionCard,
+  onDismissActionCard,
 }: {
   messages: AgentMessage[]
   files: FileEntry[]
@@ -682,6 +689,9 @@ const HistoricalMessageList = React.memo(function HistoricalMessageList({
   onCancelCodeCell?: (id: string) => void
   onOpenCanvas?: (id: string) => void
   welcomeContent: string | null
+  actionCards: ActionCardState[]
+  onApproveActionCard?: (cardId: string, selectedVariantLabel?: string) => void
+  onDismissActionCard?: (cardId: string) => void
 }) {
   // Deduplicate doc cards: only show each canvas ID on the LAST message that references it.
   // Build a set of canvas IDs that appear in a later message, then filter them out of earlier ones.
@@ -724,6 +734,15 @@ const HistoricalMessageList = React.memo(function HistoricalMessageList({
             <div key={cell.id} className="flex justify-start">
               <CodeCell cell={cell} onCancel={onCancelCodeCell} />
             </div>
+          ))}
+          {actionCards.filter(c => (
+            c.anchorMessageId
+              ? c.anchorMessageId === msg.id
+              : c.messageIdx === i
+          )).map(card => (
+            onApproveActionCard && onDismissActionCard ? (
+              <ActionCard key={card.id} card={card} onApprove={onApproveActionCard} onDismiss={onDismissActionCard} />
+            ) : null
           ))}
         </React.Fragment>
       ))}
@@ -778,7 +797,7 @@ function useDictation(onResult: (text: string) => void) {
   return { recording, transcribing, start, stop }
 }
 
-export function ChatPane({ messages, streamingText, thinking, processing, toolLabel, researchAgents = [], connected, onChat, onSteer, onStop, onIngestFile, files, onNavigateToSettings, lastHeartbeat, heartbeatLog = [], onTriggerHeartbeat, statusLine, skills = [], capabilityCard, onConfirmCapabilities, userName, userRole, onboarded, agentName, codeCells = {}, codeCellOrder = [], onCancelCodeCell, onOpenCanvas, className }: ChatPaneProps) {
+export function ChatPane({ messages, streamingText, thinking, processing, toolLabel, researchAgents = [], connected, onChat, onSteer, onStop, onIngestFile, files, onNavigateToSettings, lastHeartbeat, heartbeatLog = [], onTriggerHeartbeat, statusLine, skills = [], capabilityCard, onConfirmCapabilities, userName, userRole, onboarded, agentName, codeCells = {}, codeCellOrder = [], onCancelCodeCell, onOpenCanvas, actionCards = [], onApproveActionCard, onDismissActionCard, className }: ChatPaneProps) {
   // Group cells by anchor index for interleaved rendering between messages.
   // Cells with anchorIndex = N appear after the message at index N-1 (i.e.
   // between message N-1 and message N).
@@ -946,12 +965,49 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
       }
     }
     if (!isNearBottomRef.current) return
+    // Pin on discrete events (new message, new card). Growth during streaming
+    // (streamingText chunks, card body inflating) is handled exclusively by
+    // the ResizeObserver below — using the same target (scrollHeight) avoids
+    // the scrollIntoView-vs-scrollTop pixel mismatch that caused up/down jitter.
+    const viewport = messagesEndRef.current?.closest('[data-radix-scroll-area-viewport]') as HTMLElement | null
+    if (!viewport) return
     requestAnimationFrame(() => {
+      if (!isNearBottomRef.current) return
+      viewport.scrollTop = viewport.scrollHeight
+    })
+  }, [messages.length, actionCards.length])
+
+  // Keep view pinned to bottom when content grows (e.g. variant tab switch
+  // inflates an ActionCard, or streaming body fills in) — but only if the
+  // user was already near bottom, and only on growth (not shrink), coalesced
+  // with rAF so bursts of resizes don't cause repeated scroll jumps.
+  useEffect(() => {
+    const viewport = messagesEndRef.current?.closest('[data-radix-scroll-area-viewport]') as HTMLElement | null
+    if (!viewport) return
+    let lastHeight = 0
+    let rafPending = false
+    const ro = new ResizeObserver((entries) => {
+      const entry = entries[0]
+      if (!entry) return
+      const h = entry.contentRect.height
+      const grew = h > lastHeight + 1 // ignore sub-pixel jitter
+      lastHeight = h
+      if (!grew || !isNearBottomRef.current || rafPending) return
+      rafPending = true
       requestAnimationFrame(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'instant' as ScrollBehavior, block: 'end' })
+        rafPending = false
+        if (!isNearBottomRef.current) return
+        // Direct scrollTop assignment — no reflow, no animation, no layout thrash.
+        viewport.scrollTop = viewport.scrollHeight
       })
     })
-  }, [messages, streamingText, thinking])
+    const content = viewport.firstElementChild as HTMLElement | null
+    if (content) {
+      lastHeight = content.getBoundingClientRect().height
+      ro.observe(content)
+    }
+    return () => ro.disconnect()
+  }, [])
 
   const pendingMsgRef = useRef<string | null>(null)
 
@@ -1091,6 +1147,9 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
             onCancelCodeCell={onCancelCodeCell}
             onOpenCanvas={onOpenCanvas}
             welcomeContent={messages.length === 0 && !isActive ? getWelcomeMessage(userName, userRole) : null}
+            actionCards={actionCards}
+            onApproveActionCard={onApproveActionCard}
+            onDismissActionCard={onDismissActionCard}
           />
 
           {thinking && !streamingText && (
@@ -1131,6 +1190,19 @@ export function ChatPane({ messages, streamingText, thinking, processing, toolLa
               <AgentBubble content={streamingText} files={files} />
             </div>
           )}
+
+          {/* Tail render: cards whose anchor message isn't in the current
+              messages array yet (e.g. streamed before chat_history caught up).
+              Once the anchor message appears, the card snaps inline and
+              disappears from here. */}
+          {actionCards.filter(c => {
+            if (c.anchorMessageId) return !messages.some(m => m.id === c.anchorMessageId)
+            return c.messageIdx >= messages.length
+          }).map(card => (
+            onApproveActionCard && onDismissActionCard ? (
+              <ActionCard key={card.id} card={card} onApprove={onApproveActionCard} onDismiss={onDismissActionCard} />
+            ) : null
+          ))}
 
           {capabilityCard && onConfirmCapabilities && (
             <div className="flex justify-start">

@@ -23,7 +23,6 @@ interface SidebarProps {
   dark: boolean
   toggleTheme: () => void
   hasTeam?: boolean
-  onQueueBadgeClick?: () => void
 }
 
 const MAX_SIDEBAR_INTEGRATIONS = 8
@@ -157,7 +156,7 @@ function useAgencyEasterEgg(hasTeam: boolean) {
   return display
 }
 
-export function Sidebar({ view, onViewChange, queueCount, integrations, onConnect, onDisconnect, onOpenModal, userName, dark, toggleTheme, hasTeam, onQueueBadgeClick }: SidebarProps) {
+export function Sidebar({ view, onViewChange, queueCount, integrations, onConnect, onDisconnect, onOpenModal, userName, dark, toggleTheme, hasTeam }: SidebarProps) {
   const brandName = useAgencyEasterEgg(!!hasTeam)
 
   return (

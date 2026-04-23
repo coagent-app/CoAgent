@@ -18,6 +18,66 @@ function simpleHash(s: string): string {
   return h.toString(36)
 }
 
+// ---------------------------------------------------------------------------
+// Per-bullet date stamping
+// ---------------------------------------------------------------------------
+// File-level <!-- created/updated --> comments only tell the agent when a
+// file as a whole was last touched. When the 3 AM refiner edits one bullet
+// out of thirty, the whole file's timestamp shifts forward and every other
+// bullet looks fresh. Stamping each bullet with its own [YYYY-MM-DD] prefix
+// gives the agent line-level staleness so it can prune or re-ask on just
+// the parts that are actually old.
+//
+// Applied from writeMemory / appendMemory / editSection so every write path
+// flows through the same transform. Bullets already carrying a tag are left
+// alone (preserves dates from prior writes).
+
+const BULLET_DATE_RE = /^\[\d{4}-\d{2}-\d{2}\]\s+/
+const BULLET_LINE_RE = /^(\s*)([-*]\s+|\d+\.\s+)(.*)$/
+
+function today(): string {
+  const d = new Date()
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+export function stampBullets(content: string, dateStr: string = today()): string {
+  const lines = content.split('\n')
+  let inFrontmatter = false
+  let frontmatterSeen = false
+  let inCodeBlock = false
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+
+    if (!frontmatterSeen && i === 0 && line.trim() === '---') {
+      inFrontmatter = true
+      frontmatterSeen = true
+      continue
+    }
+    if (inFrontmatter) {
+      if (line.trim() === '---') inFrontmatter = false
+      continue
+    }
+
+    if (/^\s*```/.test(line)) {
+      inCodeBlock = !inCodeBlock
+      continue
+    }
+    if (inCodeBlock) continue
+
+    const m = line.match(BULLET_LINE_RE)
+    if (!m) continue
+    const [, indent, marker, rest] = m
+    if (BULLET_DATE_RE.test(rest)) continue // already stamped, preserve date
+    lines[i] = `${indent}${marker}[${dateStr}] ${rest}`
+  }
+
+  return lines.join('\n')
+}
+
 export interface MemorySearchResult {
   path: string
   chunkIndex: number
@@ -213,12 +273,14 @@ export class MemoryStore {
   async writeMemory(relativePath: string, content: string): Promise<void> {
     const fullPath = this.assertSafePath(relativePath)
     await mkdir(dirname(fullPath), { recursive: true })
+    // Stamp every un-dated bullet with today's date (line-level freshness)
+    const bulletStamped = stampBullets(content)
     // Auto-stamp created/updated time so the agent can see when memories were made
     const now = new Date().toISOString().replace('T', ' ').slice(0, 19)
-    const hasTimestamp = /^<!-- (created|updated):/.test(content)
+    const hasTimestamp = /^<!-- (created|updated):/.test(bulletStamped)
     const stamped = hasTimestamp
-      ? content.replace(/<!-- updated: .* -->/, `<!-- updated: ${now} -->`)
-      : `<!-- created: ${now} -->\n${content}`
+      ? bulletStamped.replace(/<!-- updated: .* -->/, `<!-- updated: ${now} -->`)
+      : `<!-- created: ${now} -->\n${bulletStamped}`
     await writeFile(fullPath, stamped, 'utf-8')
     await this.indexFile(relativePath, stamped)
     this.indexedAt.set(relativePath, Date.now())
@@ -299,7 +361,9 @@ export class MemoryStore {
     await mkdir(dirname(fullPath), { recursive: true })
     const existing = existsSync(fullPath) ? await readFile(fullPath, 'utf-8') : ''
     const now = new Date().toISOString().replace('T', ' ').slice(0, 19)
-    const timestampedContent = `<!-- appended: ${now} -->\n${content}`
+    // Stamp every un-dated bullet in the new content with today's date
+    const bulletStamped = stampBullets(content)
+    const timestampedContent = `<!-- appended: ${now} -->\n${bulletStamped}`
     let updated: string
     if (existing) {
       // Update the top-level updated timestamp if present
@@ -318,8 +382,9 @@ export class MemoryStore {
 
     if (!this.table) return
 
-    // Only embed the new content — don't re-index the whole file
-    const chunks = chunkContent(content)
+    // Only embed the new content — don't re-index the whole file.
+    // Use the bullet-stamped version so search results match what's on disk.
+    const chunks = chunkContent(bulletStamped)
     if (chunks.length === 0) return
 
     // Get current max chunkIndex for this path
@@ -354,15 +419,20 @@ export class MemoryStore {
     const idx = file.indexOf(oldContent)
     if (idx === -1) return false
 
+    // Stamp un-dated bullets in the replacement content. Bullets that
+    // already carry a date tag are preserved — so the agent re-writing
+    // a line without its prior tag implicitly re-dates it to today.
+    const stampedNew = stampBullets(newContent)
+
     if (!this.table) {
       // No DB — just write the file
-      const updated = file.slice(0, idx) + newContent + file.slice(idx + oldContent.length)
+      const updated = file.slice(0, idx) + stampedNew + file.slice(idx + oldContent.length)
       await writeFile(fullPath, updated, 'utf-8')
       return true
     }
 
     // Embed ALL new chunks FIRST — prevents file/DB split if embedding fails
-    const chunks = chunkContent(newContent)
+    const chunks = chunkContent(stampedNew)
     const newRows: { path: string; chunkIndex: number; content: string; vector: number[] }[] = []
     if (chunks.length > 0) {
       const escapedForMax = relativePath.replace(/'/g, "''")
@@ -389,7 +459,7 @@ export class MemoryStore {
     await this.table.delete(`path = '${escapedPath}' AND content = '${escapedContent}'`)
     if (newRows.length > 0) await this.table.add(newRows)
 
-    const updated = file.slice(0, idx) + newContent + file.slice(idx + oldContent.length)
+    const updated = file.slice(0, idx) + stampedNew + file.slice(idx + oldContent.length)
     await writeFile(fullPath, updated, 'utf-8')
     this.indexedAt.set(relativePath, Date.now())
     this.saveIndexedAt()

@@ -25,6 +25,24 @@ function makeMsg(role: 'user' | 'assistant', content: string): AgentMessage {
   return { id: `local-${Date.now()}-${++_msgSeq}`, role, content, timestamp: new Date().toISOString() }
 }
 
+export type ActionCardState = {
+  id: string
+  messageIdx: number
+  // Stable anchor: the id of the message the card was created below.
+  // Renders after that message regardless of index shifts. Falls back to
+  // messageIdx if the anchor message can't be found.
+  anchorMessageId?: string
+  title: string
+  platform: string
+  summary?: string
+  body?: string
+  variants?: { label: string; body: string }[]
+  fields?: { label: string; value: string }[]
+  action: { label: string; confirmPrompt: string }
+  status: 'pending' | 'sent' | 'dismissed'
+  sentAt?: string
+}
+
 export interface CodeCell {
   id: string
   code: string
@@ -165,6 +183,16 @@ export function useAgent() {
   // Code cells are session-only — don't restore from cache to avoid stale anchoring issues
   const [codeCells, setCodeCells] = useState<Record<string, CodeCell>>({})
   const [codeCellOrder, setCodeCellOrder] = useState<string[]>([])
+  // Session-only: don't persist cards to localStorage. Reload clears them so
+  // they can't resurrect with a stale messageIdx that no longer aligns with
+  // the current messages array.
+  const [actionCards, setActionCards] = useState<ActionCardState[]>([])
+  const actionCardsRef = useRef<ActionCardState[]>([])
+
+  // Clear any previously-persisted cards from before this change.
+  useEffect(() => {
+    try { localStorage.removeItem('coagent-action-cards') } catch {}
+  }, [])
   const settingsRef = useRef<AgentSettings | null>(_cached.settings ?? null)
   const prevConnectedSlugs = useRef<Set<string> | null>(null)
 
@@ -181,6 +209,7 @@ export function useAgent() {
   useEffect(() => { streamingTextRef.current = streamingText }, [streamingText])
   useEffect(() => { processingRef.current = processing }, [processing])
   useEffect(() => { codeCellsRef.current = codeCells }, [codeCells])
+  useEffect(() => { actionCardsRef.current = actionCards }, [actionCards])
   useEffect(() => {
     let unmounted = false
 
@@ -317,6 +346,53 @@ export function useAgent() {
             timeoutsRef.current.push(setTimeout(() => setResearchAgents([]), 2000))
           }
         }
+        if ((msg as any).type === 'action_card' || (msg as any).type === 'action_card_streaming') {
+          // As soon as a card starts streaming, it's the visible work —
+          // clear thinking dots + tool label so the card takes over.
+          setThinking(false)
+          setToolLabel(null)
+          const m = msg as any
+          setActionCards(prev => {
+            const existing = prev.find(c => c.id === m.cardId)
+            if (existing) {
+              // Merge streaming partial into existing card (preserve messageIdx + status).
+              // Variants/fields arrays are replaced (not merged) so partial JSON
+              // like `[{label:"Short"}]` → `[{label:"Short",body:"..."}]` shows
+              // progress instead of sticking on the first partial element.
+              return prev.map(c => c.id === m.cardId ? {
+                ...c,
+                title: m.title ?? c.title,
+                platform: m.platform ?? c.platform,
+                summary: m.summary ?? c.summary,
+                body: m.body ?? c.body,
+                variants: m.variants ?? c.variants,
+                fields: m.fields ?? c.fields,
+                action: m.action ? { ...(c.action || {}), ...m.action } : c.action,
+              } : c)
+            }
+            // Don't create the card until we have at least a title + platform —
+            // avoids flashing an empty shell while the first JSON keys parse.
+            if (!m.title || !m.platform) return prev
+            const msgs = messagesRef.current
+            const attachIdx = msgs.length
+            // Anchor to the last existing message by ID so the card's position
+            // stays stable as new messages append after it.
+            const anchorMessageId = msgs[msgs.length - 1]?.id
+            return [...prev, {
+              id: m.cardId,
+              messageIdx: attachIdx,
+              anchorMessageId,
+              title: m.title,
+              platform: m.platform,
+              summary: m.summary,
+              body: m.body,
+              variants: m.variants,
+              fields: m.fields,
+              action: m.action ?? { label: 'Send', confirmPrompt: '' },
+              status: 'pending',
+            }]
+          })
+        }
         if (msg.type === 'chat_chunk') {
           wasStreamingRef.current = true
           setThinking(false)
@@ -383,6 +459,9 @@ export function useAgent() {
         if (msg.type === 'chat_history') {
           wasStreamingRef.current = false
           setStreamingText(null)
+          // Don't wipe actionCards on chat_history reload — they persist via
+          // localStorage. Only drop cards whose messageIdx points past the
+          // new message count so they still render below actual content.
           const serverMessages = msg.messages.slice(-100)
           // If server has fewer messages than cache (e.g. backend restarted),
           // keep the cached messages so the user doesn't see them vanish.
@@ -1122,6 +1201,20 @@ export function useAgent() {
     }
   }, [])
 
+  const approveActionCard = useCallback((cardId: string, selectedVariantLabel?: string) => {
+    const card = actionCardsRef.current.find(c => c.id === cardId)
+    if (!card || card.status !== 'pending') return
+    setActionCards(prev => prev.map(c => c.id === cardId ? { ...c, status: 'sent', sentAt: new Date().toISOString() } : c))
+    const prompt = selectedVariantLabel
+      ? `${card.action.confirmPrompt}\n\n[Selected variant: ${selectedVariantLabel}]`
+      : card.action.confirmPrompt
+    chat(prompt)
+  }, [chat])
+
+  const dismissActionCard = useCallback((cardId: string) => {
+    setActionCards(prev => prev.map(c => c.id === cardId ? { ...c, status: 'dismissed' } : c))
+  }, [])
+
   // Stable actions object — all callbacks are already memoized with useCallback,
   // so this only changes when a callback identity changes (rare). Keeping it
   // separate prevents consumers that only use actions from re-rendering on every
@@ -1138,7 +1231,7 @@ export function useAgent() {
     getRelayCredentials, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken,
     sendTeamMessage, getTeamInfo, getTeamHistory, setTriggerPrompt, openCanvas, closeCanvas,
     getCanvases, cancelCodeCell, exportPdf, dismissQueueToast, enableWakeScheduling,
-    listImessageSenders,
+    listImessageSenders, approveActionCard, dismissActionCard,
   }), [
     triggerHeartbeat, updateSkill, deleteSkill, steer, stopAgent,
     handleSetRelayModel, setPendingFields, setModel, chat, approve, reject,
@@ -1151,7 +1244,7 @@ export function useAgent() {
     getRelayCredentials, clearAdminNewToken, adminCreateToken, adminListTokens, adminRevokeToken,
     sendTeamMessage, getTeamInfo, getTeamHistory, setTriggerPrompt, openCanvas, closeCanvas,
     getCanvases, cancelCodeCell, exportPdf, dismissQueueToast, enableWakeScheduling,
-    listImessageSenders,
+    listImessageSenders, approveActionCard, dismissActionCard,
   ])
 
   return {
@@ -1164,7 +1257,7 @@ export function useAgent() {
     organizing, calendarEntries, googleCalendarStatus, capabilityCard, whatsappQr, imessageSenders,
     relayCredentials, isAdmin, adminUsers, adminNewToken, teamInfo, teamMessages, teamStatus,
     triggerPrompt, canvas, canvasVisible, canvasStreaming, canvasStreamingCode,
-    canvasesList, codeCells, codeCellOrder,
+    canvasesList, codeCells, codeCellOrder, actionCards,
     // Stable actions (memoized above)
     ...actions,
   }

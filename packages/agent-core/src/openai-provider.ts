@@ -258,7 +258,7 @@ export async function streamOpenAI(
   // Accumulate the full response from stream deltas
   let textContent = ''
   let reasoningContent = ''
-  const toolCalls = new Map<number, { id: string; name: string; arguments: string }>()
+  const toolCalls = new Map<number, { id: string; name: string; arguments: string; uniqueId?: string }>()
   let finishReason: string | null = null
   let promptTokens = 0
   let completionTokens = 0
@@ -301,13 +301,19 @@ export async function streamOpenAI(
         const existing = toolCalls.get(idx)!
         if (tc.id) existing.id = tc.id
         if (tc.function?.name) existing.name = tc.function.name
+        // Stabilize the uniqueId as soon as we have an id/name — reused for
+        // both streaming callbacks and the final tool_use block so IDs match.
+        if (!existing.uniqueId && (existing.id || existing.name)) {
+          const sanitized = (existing.id || '').replace(/[^a-zA-Z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || `idx-${idx}`
+          existing.uniqueId = `${sanitized}-${Math.random().toString(36).slice(2, 10)}`
+        }
         if (tc.function?.arguments) {
           existing.arguments += tc.function.arguments
           if (onToolArgsDelta && existing.name) {
             try {
               onToolArgsDelta({
                 toolName: existing.name,
-                toolCallId: existing.id || `idx_${idx}`,
+                toolCallId: existing.uniqueId || `idx_${idx}`,
                 argsSoFar: existing.arguments,
               })
             } catch (err) {
@@ -337,15 +343,18 @@ export async function streamOpenAI(
   if (textContent) {
     content.push({ type: 'text', text: textContent } as Anthropic.TextBlock)
   }
-  for (const [, tc] of toolCalls) {
+  for (const [idx, tc] of toolCalls) {
     let input: Record<string, unknown> = {}
     try { input = JSON.parse(tc.arguments) } catch { /* malformed */ }
-    // Kimi reuses tool_call IDs like "tool_name:N" across different API calls.
-    // Append a random suffix to make IDs globally unique across the conversation,
-    // preventing orphaned tool_call errors when the same ID appears in multiple turns.
+    // Use the uniqueId stabilized during streaming so streaming callbacks
+    // and the final tool_use block share the same id. Kimi reuses raw
+    // tool_call IDs like "tool_name:N" across calls, so the random suffix
+    // keeps them globally unique and prevents orphaned tool_call errors.
     // IDs must match ^[a-zA-Z0-9-]+ for Anthropic API compatibility.
-    const sanitized = (tc.id || '').replace(/[^a-zA-Z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || 'tc'
-    const uniqueId = `${sanitized}-${Math.random().toString(36).slice(2, 10)}`
+    const uniqueId = tc.uniqueId || (() => {
+      const sanitized = (tc.id || '').replace(/[^a-zA-Z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || `idx-${idx}`
+      return `${sanitized}-${Math.random().toString(36).slice(2, 10)}`
+    })()
     content.push({
       type: 'tool_use',
       id: uniqueId,

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { MemoryStore, chunkContent } from './memory-store'
+import { MemoryStore, chunkContent, stampBullets } from './memory-store'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -50,6 +50,55 @@ describe('chunkContent', () => {
     const chunks = chunkContent(text)
     // The section is > 800 chars so it should be split on \n\n
     expect(chunks.length).toBeGreaterThanOrEqual(2)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// stampBullets unit tests
+// ---------------------------------------------------------------------------
+
+describe('stampBullets', () => {
+  it('prepends [date] to un-dated bullets', () => {
+    const out = stampBullets('- fresh bullet', '2026-04-22')
+    expect(out).toBe('- [2026-04-22] fresh bullet')
+  })
+
+  it('preserves existing [date] tags', () => {
+    const out = stampBullets('- [2026-01-05] older bullet', '2026-04-22')
+    expect(out).toBe('- [2026-01-05] older bullet')
+  })
+
+  it('handles numbered lists', () => {
+    const out = stampBullets('1. numbered item', '2026-04-22')
+    expect(out).toBe('1. [2026-04-22] numbered item')
+  })
+
+  it('skips bullets inside fenced code blocks', () => {
+    const input = '- real bullet\n\n```\n- bullet in code\n```\n\n- another real'
+    const out = stampBullets(input, '2026-04-22')
+    expect(out).toBe(
+      '- [2026-04-22] real bullet\n\n```\n- bullet in code\n```\n\n- [2026-04-22] another real'
+    )
+  })
+
+  it('skips YAML frontmatter', () => {
+    const input = '---\nname: x\n---\n- first bullet\n- second bullet'
+    const out = stampBullets(input, '2026-04-22')
+    expect(out).toBe('---\nname: x\n---\n- [2026-04-22] first bullet\n- [2026-04-22] second bullet')
+  })
+
+  it('leaves headings and paragraphs untouched', () => {
+    const input = '# Heading\n\nA plain paragraph.\n\n- actual bullet'
+    const out = stampBullets(input, '2026-04-22')
+    expect(out).toBe('# Heading\n\nA plain paragraph.\n\n- [2026-04-22] actual bullet')
+  })
+
+  it('preserves indentation on nested bullets', () => {
+    const input = '- parent\n  - child\n    - grandchild'
+    const out = stampBullets(input, '2026-04-22')
+    expect(out).toBe(
+      '- [2026-04-22] parent\n  - [2026-04-22] child\n    - [2026-04-22] grandchild'
+    )
   })
 })
 
