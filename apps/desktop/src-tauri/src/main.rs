@@ -10,6 +10,23 @@ use std::ffi::c_void;
 use std::sync::atomic::AtomicPtr;
 use tauri::{Emitter, Listener, Manager};
 
+// Cross-platform home directory. HOME is Unix-only; Windows uses USERPROFILE.
+fn home_dir() -> std::path::PathBuf {
+    if let Ok(h) = std::env::var("HOME") {
+        return std::path::PathBuf::from(h);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(p) = std::env::var("USERPROFILE") {
+            return std::path::PathBuf::from(p);
+        }
+        if let (Ok(drive), Ok(path)) = (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
+            return std::path::PathBuf::from(format!("{}{}", drive, path));
+        }
+    }
+    std::env::temp_dir()
+}
+
 // ── File logging (visible when launched from Finder where stderr is lost) ────
 fn log(msg: &str) {
     use std::io::Write;
@@ -285,8 +302,7 @@ fn is_allowed_path(path: &str) -> Result<std::path::PathBuf, String> {
     let canonical = p.canonicalize()
         .map_err(|e| format!("Cannot resolve path '{}': {}", path, e))?;
 
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-    let home_path = std::path::Path::new(&home);
+    let home_path = home_dir();
 
     let allowed_prefixes: Vec<std::path::PathBuf> = vec![
         home_path.join(".coagent"),
@@ -402,8 +418,7 @@ fn reveal_in_file_manager(path: String) -> Result<(), String> {
 
 #[tauri::command]
 fn get_ws_nonce() -> Result<String, String> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let nonce_path = std::path::Path::new(&home).join(".coagent").join(".ws-nonce");
+    let nonce_path = home_dir().join(".coagent").join(".ws-nonce");
     std::fs::read_to_string(&nonce_path)
         .map(|s| s.trim().to_string())
         .map_err(|e| format!("Failed to read WS nonce: {}", e))
@@ -411,27 +426,24 @@ fn get_ws_nonce() -> Result<String, String> {
 
 #[tauri::command]
 fn get_relay_credentials() -> Result<String, String> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let cred_path = std::path::Path::new(&home).join(".coagent").join(".relay-credentials");
+    let cred_path = home_dir().join(".coagent").join(".relay-credentials");
     std::fs::read_to_string(&cred_path)
         .map_err(|e| format!("Failed to read relay credentials: {}", e))
 }
 
 /// Generate a one-time activation nonce for the coagent://activate deep link.
 ///
-/// Reads 32 cryptographically random bytes from the OS (`/dev/urandom` on
-/// macOS/Linux) and hex-encodes them.  The nonce is stored alongside its
-/// creation timestamp.  The deep link handler will reject any deep link whose
-/// nonce doesn't match or whose nonce is older than 10 minutes.
+/// Reads 32 cryptographically random bytes from the OS (getrandom crate maps
+/// to `/dev/urandom` on macOS/Linux and `BCryptGenRandom` on Windows) and
+/// hex-encodes them. The nonce is stored alongside its creation timestamp.
+/// The deep link handler will reject any deep link whose nonce doesn't match
+/// or whose nonce is older than 10 minutes.
 #[tauri::command]
 fn generate_activation_nonce() -> Result<String, String> {
-    use std::io::Read;
-
-    // Read 32 random bytes from the OS.
+    // Read 32 random bytes from the OS (cross-platform).
     let mut buf = [0u8; 32];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut buf))
-        .map_err(|e| format!("Failed to read /dev/urandom: {}", e))?;
+    getrandom::getrandom(&mut buf)
+        .map_err(|e| format!("Failed to read OS RNG: {}", e))?;
 
     // Hex-encode into a 64-character string.
     let nonce: String = buf.iter().map(|b| format!("{:02x}", b)).collect();
@@ -709,8 +721,7 @@ fn write_file_bytes(path: String, base64: String) -> Result<(), String> {
     let canonical_parent = parent.canonicalize()
         .map_err(|e| format!("resolve parent '{}': {}", parent.display(), e))?;
 
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-    let coagent_root = std::path::Path::new(&home).join(".coagent");
+    let coagent_root = home_dir().join(".coagent");
     let canonical_root = coagent_root.canonicalize().unwrap_or(coagent_root);
 
     if !canonical_parent.starts_with(&canonical_root) {

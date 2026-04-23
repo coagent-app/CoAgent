@@ -225,3 +225,137 @@ jobs:
           ORIGINAL=$(basename "$DMG")
           gh release delete-asset "$TAG" --repo "${{ github.repository }}" "$ORIGINAL" --yes 2>/dev/null || true
           gh release upload "$TAG" --repo "${{ github.repository }}" "/tmp/${FINAL}"
+
+  # ─────────────────────────────────────────────────────────────
+  # Windows build — unsigned artifacts only for now.
+  # `continue-on-error: true` so a Windows regression never blocks the macOS release.
+  # Signing (Authenticode) will be added once a cert is procured.
+  # ─────────────────────────────────────────────────────────────
+  build-windows:
+    runs-on: windows-latest
+    continue-on-error: true
+    name: Build — Windows (x86_64, unsigned)
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      BINARIES: apps/desktop/src-tauri/binaries
+      NODE_VERSION: v22.12.0
+      RUST_TARGET: x86_64-pc-windows-msvc
+      BUN_TARGET: bun-windows-x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Toolchain ──────────────────────────────────────────────
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+          key: x86_64-pc-windows-msvc
+
+      # ── Sidecar: bundled Node.js ───────────────────────────────
+      - name: Download bundled Node.js
+        run: |
+          mkdir -p "$BINARIES"
+          curl -fsSL "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-win-x64.zip" -o /tmp/node.zip
+          unzip -q /tmp/node.zip -d /tmp
+          cp "/tmp/node-${NODE_VERSION}-win-x64/node.exe" "${BINARIES}/node-${RUST_TARGET}.exe"
+
+      # ── Sidecar: whisper (static build) ────────────────────────
+      - name: Compile whisper sidecar
+        run: |
+          git clone --depth 1 https://github.com/ggerganov/whisper.cpp /tmp/whisper.cpp
+          cmake -S /tmp/whisper.cpp -B /tmp/whisper.cpp/build \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_NATIVE=OFF -DGGML_METAL=OFF
+          cmake --build /tmp/whisper.cpp/build --config Release --target whisper-cli -j 2
+          cp /tmp/whisper.cpp/build/bin/Release/whisper-cli.exe "${BINARIES}/whisper-${RUST_TARGET}.exe"
+
+      # ── Vendor MCP SDK ─────────────────────────────────────────
+      - name: Vendor MCP SDK
+        run: |
+          mkdir -p apps/desktop/src-tauri/vendor
+          cd apps/desktop/src-tauri/vendor
+          cat > package.json <<'PKG'
+          { "name": "coagent-vendor", "private": true,
+            "dependencies": { "@modelcontextprotocol/sdk": "^1.0.0" } }
+          PKG
+          npm install --production --ignore-scripts
+
+      # ── Build frontend & TypeScript packages ───────────────────
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build TypeScript packages
+        run: pnpm build
+
+      # ── Sidecar: Bun-compiled binaries ─────────────────────────
+      - name: Compile Bun sidecars
+        run: |
+          bun build packages/agent-core/dist/server.js \
+            --compile --target=${BUN_TARGET} \
+            --outfile "${BINARIES}/coagent-server-${RUST_TARGET}.exe"
+          bun build packages/mcp-memory/dist/index.js \
+            --compile --target=${BUN_TARGET} \
+            --outfile "${BINARIES}/coagent-memory-${RUST_TARGET}.exe"
+
+      # ── Tauri build (NSIS installer, unsigned) ─────────────────
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          VITE_RELAY_URL: ${{ secrets.VITE_RELAY_URL }}
+        with:
+          projectPath: apps/desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Co-Agent ${{ github.ref_name }}'
+          releaseBody: 'See the assets below to download for your platform.'
+          releaseDraft: true
+          prerelease: false
+          args: --target x86_64-pc-windows-msvc
+
+      # ── Upload renamed NSIS installer ──────────────────────────
+      - name: Rename & upload Windows installer
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME:-${{ github.ref_name }}}"
+          VERSION="${TAG#v}"
+          NSIS=$(find apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis -name "*.exe" 2>/dev/null | head -1)
+          if [ -z "$NSIS" ]; then
+            echo "No NSIS installer found"
+            exit 0
+          fi
+          echo "Found installer: $NSIS"
+          FINAL="Co-Agent_${VERSION}_Windows-x64-unsigned.exe"
+          cp "$NSIS" "/tmp/${FINAL}"
+          ORIGINAL=$(basename "$NSIS")
+          gh release delete-asset "$TAG" --repo "${{ github.repository }}" "$ORIGINAL" --yes 2>/dev/null || true
+          gh release upload "$TAG" --repo "${{ github.repository }}" "/tmp/${FINAL}"
+
+      # ── Always upload build artifacts for inspection ───────────
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build-output
+          path: |
+            apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+          if-no-files-found: warn
+          retention-days: 7

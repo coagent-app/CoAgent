@@ -181,6 +181,9 @@ function resolveMcpExa(): { command: string; args: string[] } | null {
 
 
 function canAccessChatDb(): boolean {
+  // iMessage + Contacts are macOS-only (chat.db / AddressBook-v22.abcddb via bun:sqlite + FDA).
+  // Short-circuit on Windows/Linux so the tools are never registered and the handler never runs.
+  if (process.platform !== 'darwin') return false
   try {
     const { openSync, readSync, closeSync } = require('fs')
     const fd = openSync(join(homedir(), 'Library', 'Messages', 'chat.db'), 'r')
@@ -253,33 +256,55 @@ initCustomMcpDir(DATA_DIR)
 // spawns of node/npm can find them.
 function augmentPathForGuiLaunch(): void {
   const home = homedir()
-  const candidates = [
-    '/opt/homebrew/bin',           // Apple Silicon Homebrew
-    '/usr/local/bin',              // Intel Homebrew + pkg installer
-    `${home}/.volta/bin`,
-    `${home}/.bun/bin`,
-    `${home}/.local/bin`,
-  ]
+  const isWin = process.platform === 'win32'
+  const candidates = isWin
+    ? [
+        join(home, 'scoop', 'shims'),
+        join(home, 'scoop', 'apps', 'nodejs', 'current'),
+        join(home, 'AppData', 'Roaming', 'npm'),
+        join(home, 'AppData', 'Local', 'fnm_multishells'),
+        'C:\\Program Files\\nodejs',
+      ]
+    : [
+        '/opt/homebrew/bin',           // Apple Silicon Homebrew
+        '/usr/local/bin',              // Intel Homebrew + pkg installer
+        `${home}/.volta/bin`,
+        `${home}/.bun/bin`,
+        `${home}/.local/bin`,
+      ]
   // nvm / fnm / mise store node under versioned dirs — pick the newest
   try {
     const { readdirSync, statSync } = require('fs') as typeof import('fs')
-    const versioned = [
-      `${home}/.nvm/versions/node`,
-      `${home}/.local/share/fnm/node-versions`,
-      `${home}/.fnm/node-versions`,
-      `${home}/.local/share/mise/installs/node`,
-    ]
+    const versioned = isWin
+      ? [
+          join(home, 'AppData', 'Roaming', 'fnm', 'node-versions'),
+          join(home, 'AppData', 'Local', 'fnm', 'node-versions'),
+        ]
+      : [
+          `${home}/.nvm/versions/node`,
+          `${home}/.local/share/fnm/node-versions`,
+          `${home}/.fnm/node-versions`,
+          `${home}/.local/share/mise/installs/node`,
+        ]
     for (const root of versioned) {
       if (!existsSync(root)) continue
       const entries = readdirSync(root).filter((n: string) => !n.startsWith('.'))
       if (!entries.length) continue
       entries.sort().reverse() // newest-ish first
       for (const v of entries) {
-        const bin = join(root, v, 'bin')
-        // fnm/mise nest an extra "installation" dir
-        const altBin = join(root, v, 'installation', 'bin')
-        if (existsSync(bin)) candidates.push(bin)
-        if (existsSync(altBin)) candidates.push(altBin)
+        if (isWin) {
+          // Windows layout: <root>/<version>/node.exe  OR  <root>/<version>/installation/node.exe
+          const dir = join(root, v)
+          const altDir = join(root, v, 'installation')
+          if (existsSync(join(dir, 'node.exe'))) candidates.push(dir)
+          if (existsSync(join(altDir, 'node.exe'))) candidates.push(altDir)
+        } else {
+          const bin = join(root, v, 'bin')
+          // fnm/mise nest an extra "installation" dir
+          const altBin = join(root, v, 'installation', 'bin')
+          if (existsSync(bin)) candidates.push(bin)
+          if (existsSync(altBin)) candidates.push(altBin)
+        }
       }
     }
   } catch { /* ignore */ }
@@ -1315,8 +1340,11 @@ async function installCustomMcpDeps(dir: string): Promise<void> {
         unlinkSync(linkPath)
       }
     } catch { /* path doesn't exist */ }
+    // Windows: use 'junction' — NTFS junction points don't require admin or Developer Mode,
+    // unlike real directory symlinks which do. Works identically for node's module resolution.
+    const linkType = process.platform === 'win32' ? 'junction' : 'dir'
     try {
-      symlinkSync(vendorDir, linkPath, 'dir')
+      symlinkSync(vendorDir, linkPath, linkType)
       console.log(`[Custom MCP] Linked bundled node_modules: ${linkPath} -> ${vendorDir}`)
       return
     } catch (err: any) {
@@ -2120,7 +2148,17 @@ function shutdown(signal: string): void {
   agent.stop()
   Promise.race([agent.currentRunLoop, new Promise(r => setTimeout(r, 5000))])
     .catch(() => {})
-    .finally(() => {
+    .finally(async () => {
+      // Tear down MCP children before exit so stdio subprocesses (mcp-memory, etc.)
+      // don't orphan into zombies when the parent dev server exits.
+      try {
+        await Promise.race([
+          agent.mcpManager.disconnectAll(),
+          new Promise(r => setTimeout(r, 2000)),
+        ])
+      } catch (err) {
+        console.warn('[Server] MCP disconnectAll error:', (err as Error).message)
+      }
       if (wss) {
         wss.close((err) => {
           if (err) console.error('[Server] Error closing WebSocket server:', err)

@@ -20,6 +20,12 @@ process.on('uncaughtException', (err: any) => {
   process.exit(1)
 })
 
+// Orphan protection: if the parent dies (SIGKILL, crash, tsx-watch hard reload),
+// its end of our stdin pipe closes and we get EOF. Exit instead of hanging around
+// as a zombie eating CPU/memory.
+process.stdin.on('end', () => process.exit(0))
+process.stdin.on('close', () => process.exit(0))
+
 const MEMORY_BASE = process.env.COAGENT_DATA_DIR ?? join(homedir(), '.coagent')
 const store = new MemoryStore(MEMORY_BASE)
 
