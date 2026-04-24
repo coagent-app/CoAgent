@@ -258,15 +258,19 @@ export default function App() {
         />
 
         {view === 'chat' && (
-          <div className="relative flex-1 flex overflow-hidden">
-            <ChatPane messages={messages} streamingText={streamingText} thinking={thinking} processing={processing} toolLabel={toolLabel} researchAgents={researchAgents} connected={connected} onChat={chat} onSteer={steer} onStop={stopAgent} onIngestFile={ingestFile} files={files} onNavigateToSettings={() => setView('settings')} lastHeartbeat={lastHeartbeat} heartbeatLog={heartbeatLog} onTriggerHeartbeat={triggerHeartbeat} statusLine={statusLine} skills={skills} capabilityCard={capabilityCard} onConfirmCapabilities={confirmCapabilities} userName={settings?.name} userRole={settings?.role} onboarded={settings?.onboarded} agentName={settings?.agent_name} codeCells={codeCells} codeCellOrder={codeCellOrder} onCancelCodeCell={cancelCodeCell} onOpenCanvas={openCanvas} actionCards={actionCards} onApproveActionCard={approveActionCard} onDismissActionCard={dismissActionCard} className="flex-1" />
-            {newQueueItems.length > 0 && (
-              <QueueToast
-                items={newQueueItems}
-                onReview={() => { setView('queue'); dismissQueueToast() }}
-                onDismiss={dismissQueueToast}
-              />
-            )}
+          <div className="flex-1 flex overflow-hidden">
+            {/* Inner wrapper is the QueueToast's positioning parent, so the toast
+                centers on the chat column only — not on the combined chat+canvas row. */}
+            <div className="relative flex-1 flex min-w-0 overflow-hidden">
+              <ChatPane messages={messages} streamingText={streamingText} thinking={thinking} processing={processing} toolLabel={toolLabel} researchAgents={researchAgents} connected={connected} onChat={chat} onSteer={steer} onStop={stopAgent} onIngestFile={ingestFile} files={files} onNavigateToSettings={() => setView('settings')} lastHeartbeat={lastHeartbeat} heartbeatLog={heartbeatLog} onTriggerHeartbeat={triggerHeartbeat} statusLine={statusLine} skills={skills} capabilityCard={capabilityCard} onConfirmCapabilities={confirmCapabilities} userName={settings?.name} userRole={settings?.role} onboarded={settings?.onboarded} agentName={settings?.agent_name} codeCells={codeCells} codeCellOrder={codeCellOrder} onCancelCodeCell={cancelCodeCell} onOpenCanvas={openCanvas} actionCards={actionCards} onApproveActionCard={approveActionCard} onDismissActionCard={dismissActionCard} className="flex-1" />
+              {newQueueItems.length > 0 && (
+                <QueueToast
+                  items={newQueueItems}
+                  onReview={() => { setView('queue'); dismissQueueToast() }}
+                  onDismiss={dismissQueueToast}
+                />
+              )}
+            </div>
             {canvas && canvasVisible && (
               <CanvasPane
                 canvas={canvas}
