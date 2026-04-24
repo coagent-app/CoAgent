@@ -1,7 +1,7 @@
-import React from 'react'
+import React, { useState, useEffect } from 'react'
 import {
   Inbox, MessageSquare, Settings,
-  ChevronRight, FolderOpen, Sun, Moon, Calendar as CalendarIcon, Zap, Users
+  ChevronRight, ChevronDown, FolderOpen, Sun, Moon, Calendar as CalendarIcon, Zap, Users
 } from 'lucide-react'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
@@ -159,6 +159,13 @@ function useAgencyEasterEgg(hasTeam: boolean) {
 export function Sidebar({ view, onViewChange, queueCount, integrations, onConnect, onDisconnect, onOpenModal, userName, dark, toggleTheme, hasTeam }: SidebarProps) {
   const brandName = useAgencyEasterEgg(!!hasTeam)
 
+  // Chat expand-arrow state: dropdown reveals the Team entry. Auto-expand when
+  // the user is currently viewing the team so the active row is visible.
+  const [chatExpanded, setChatExpanded] = useState(view === 'team')
+  useEffect(() => {
+    if (view === 'team') setChatExpanded(true)
+  }, [view])
+
   return (
     <div className="w-52 bg-[#FAFAFA] dark:bg-neutral-900 border-r border-neutral-200 dark:border-neutral-800 flex flex-col py-4 px-3 flex-shrink-0">
       <div className="px-2 mb-5">
@@ -168,8 +175,55 @@ export function Sidebar({ view, onViewChange, queueCount, integrations, onConnec
       </div>
 
       <div className="flex flex-col gap-0.5 mb-2">
-        <NavItem icon={MessageSquare} label="Chat" active={view === 'chat'} onClick={() => onViewChange('chat')} />
-        {hasTeam && <NavItem icon={Users} label="Team" active={view === 'team'} onClick={() => onViewChange('team')} />}
+        {hasTeam ? (
+          <>
+            {/* Chat row with expand chevron — clicking label/icon navigates to chat,
+                clicking the chevron toggles the dropdown revealing the team entry. */}
+            {/* Split-button row rendered as one continuous pill: Chat button
+                (left, rounded-l) + Chevron button (right, rounded-r). Both
+                halves share the same active/hover background so the active
+                state reads as a single highlighted row. */}
+            <div className={cn(
+              'flex items-stretch rounded-md transition-colors',
+              view === 'chat'
+                ? 'bg-neutral-100 dark:bg-neutral-800'
+                : 'hover:bg-neutral-100 dark:hover:bg-neutral-800'
+            )}>
+              <button
+                onClick={() => onViewChange('chat')}
+                className={cn(
+                  'sidebar-nav-item flex items-center gap-2.5 flex-1 px-2.5 py-1.5 rounded-l-md text-[13px] font-medium transition-colors text-left',
+                  view === 'chat'
+                    ? 'text-neutral-900 dark:text-neutral-100'
+                    : 'text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200'
+                )}
+              >
+                <MessageSquare size={15} strokeWidth={1.75} className="flex-shrink-0" />
+                <span className="flex-1">Chat</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setChatExpanded(v => !v)}
+                aria-label={chatExpanded ? 'Collapse Chat' : 'Expand Chat'}
+                className={cn(
+                  'flex items-center justify-center px-1.5 rounded-r-md transition-colors',
+                  view === 'chat'
+                    ? 'text-neutral-400 dark:text-neutral-500'
+                    : 'text-neutral-300 hover:text-neutral-500 dark:text-neutral-600 dark:hover:text-neutral-400'
+                )}
+              >
+                {chatExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+              </button>
+            </div>
+            {chatExpanded && (
+              <div className="ml-4 flex flex-col gap-0.5">
+                <NavItem icon={Users} label="Team" active={view === 'team'} onClick={() => onViewChange('team')} />
+              </div>
+            )}
+          </>
+        ) : (
+          <NavItem icon={MessageSquare} label="Chat" active={view === 'chat'} onClick={() => onViewChange('chat')} />
+        )}
         <NavItem icon={Zap} label="Skills" active={view === 'skills'} onClick={() => onViewChange('skills')} />
         <NavItem icon={CalendarIcon} label="Schedule" active={view === 'calendar'} onClick={() => onViewChange('calendar')} />
         <NavItem icon={Inbox} label="Queue" active={view === 'queue'} onClick={() => onViewChange('queue')} badge={queueCount} />
