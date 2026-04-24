@@ -1088,14 +1088,33 @@ async function handleMessagesProxy(request: Request, env: Env, ctx: ExecutionCon
 
 // --- OpenRouter chat completions proxy ---
 
-/** Calculate cost for OpenRouter models (simple input/output, no cache) */
+/** Calculate cost for OpenAI-compatible models (Moonshot/Kimi), accounting for cached tokens.
+ *  Moonshot returns cached tokens in `cached_tokens` (or `prompt_tokens_details.cached_tokens`);
+ *  cached tokens are billed at ~1/6 the rate of fresh input. */
 function calcOpenRouterCost(
-  usage: { prompt_tokens?: number; completion_tokens?: number },
+  usage: {
+    prompt_tokens?: number
+    completion_tokens?: number
+    cached_tokens?: number
+    prompt_tokens_details?: { cached_tokens?: number }
+  },
   config: ModelConfig,
 ): number {
-  const input = (usage.prompt_tokens || 0) / 1000
+  const totalPrompt = usage.prompt_tokens || 0
+  const cached = usage.cached_tokens ?? usage.prompt_tokens_details?.cached_tokens ?? 0
+  const fresh = Math.max(0, totalPrompt - cached)
   const output = (usage.completion_tokens || 0) / 1000
-  return input * config.inputPer1k + output * config.outputPer1k
+  return (fresh / 1000) * config.inputPer1k
+    + (cached / 1000) * config.cacheReadPer1k
+    + output * config.outputPer1k
+}
+
+/** Extract cached-token count from a Moonshot usage object, with fallbacks. */
+function extractCachedTokens(usage: {
+  cached_tokens?: number
+  prompt_tokens_details?: { cached_tokens?: number }
+}): number {
+  return usage.cached_tokens ?? usage.prompt_tokens_details?.cached_tokens ?? 0
 }
 
 /** Models allowed through the Moonshot proxy — prevents abuse of our API key on expensive models */
@@ -1182,13 +1201,20 @@ async function handleMoonshotProxy(request: Request, env: Env, ctx: ExecutionCon
     try {
       const clone = res.clone()
       const resBody = await clone.json() as Record<string, unknown>
-      const usage = resBody.usage as { prompt_tokens?: number; completion_tokens?: number } | undefined
+      const usage = resBody.usage as {
+        prompt_tokens?: number
+        completion_tokens?: number
+        cached_tokens?: number
+        prompt_tokens_details?: { cached_tokens?: number }
+      } | undefined
       const modelId = (JSON.parse(body) as { model?: string }).model || ''
       const normalized = (modelId === 'moonshotai/kimi-k2.5' || modelId === 'kimi-k2.5' || modelId === 'moonshotai/kimi-k2.6') ? 'kimi-k2.6' : modelId
       const modelConfig = MODELS[normalized] || MODELS['kimi-k2.6']
       if (usage && modelConfig) {
+        const cached = extractCachedTokens(usage)
         data.usage.inputTokens += usage.prompt_tokens || 0
         data.usage.outputTokens += usage.completion_tokens || 0
+        data.usage.cacheReadTokens = (data.usage.cacheReadTokens || 0) + cached
         const callCost = calcOpenRouterCost(usage, modelConfig)
         data.usage.llmCostUsd += callCost
         data.usage.totalCostUsd += callCost
@@ -1239,10 +1265,15 @@ async function scanMoonshotStreamForUsage(
           const normalized2 = (modelId === 'moonshotai/kimi-k2.5' || modelId === 'kimi-k2.5' || modelId === 'moonshotai/kimi-k2.6') ? 'kimi-k2.6' : modelId
           const modelConfig = MODELS[normalized2] || MODELS['kimi-k2.6']
 
+          // Diagnostic: log raw Moonshot usage so we can see whether cached_tokens is populated
+          console.log(`[Moonshot usage] model=${normalized2} usage=${JSON.stringify(chunk.usage)}`)
+
           // Re-read token data to avoid stale overwrites (stream may take seconds)
           const freshData = await getToken(env, token) || data
+          const cached = extractCachedTokens(chunk.usage)
           freshData.usage.inputTokens += chunk.usage.prompt_tokens || 0
           freshData.usage.outputTokens += chunk.usage.completion_tokens || 0
+          freshData.usage.cacheReadTokens = (freshData.usage.cacheReadTokens || 0) + cached
           const callCost = calcOpenRouterCost(chunk.usage, modelConfig)
           freshData.usage.llmCostUsd += callCost
           freshData.usage.totalCostUsd += callCost
@@ -1779,6 +1810,25 @@ export default {
         if (filtered.length === members.length) return jsonResponse({ error: 'Member not found' }, 404)
         await env.TOKENS.put(`team:${teamId}:members`, JSON.stringify(filtered))
         return jsonResponse({ ok: true, members: filtered })
+      }
+
+      // POST /team/leave — current user leaves their team (self-service)
+      if (request.method === 'POST' && url.pathname === '/team/leave') {
+        const teamId = (tokenData as any).teamId
+        if (!teamId) return jsonResponse({ error: 'Not currently in a team' }, 404)
+
+        const selfUserId = String(tokenData.userId)
+        const membersJson = await env.TOKENS.get(`team:${teamId}:members`)
+        const members: { userId: string; name: string; role: string }[] = membersJson ? JSON.parse(membersJson) : []
+        const filtered = members.filter(m => String(m.userId) !== selfUserId)
+        await env.TOKENS.put(`team:${teamId}:members`, JSON.stringify(filtered))
+
+        // Disassociate the user's token from the team so future authed calls
+        // see no team and the sidebar chevron disappears on reconnect.
+        delete (tokenData as any).teamId
+        await saveToken(env, token, tokenData)
+
+        return jsonResponse({ ok: true })
       }
 
       // GET /team/ws — WebSocket upgrade to TeamChannel DO
