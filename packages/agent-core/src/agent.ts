@@ -223,6 +223,11 @@ const INTERNAL_TOOLS: Anthropic.Tool[] = [
       required: ['context']
     }
   },
+  // show_action_card — disabled 2026-04-24 to reduce tool-schema tokens (~341 tok/turn).
+  // Replaced by queue_approval + (eventually) show_widget. See memory/project_inline_widgets.md.
+  // Dead wire points still commented below at: TOOL_LABELS, streaming handler (~1721),
+  // OpenAI-path streaming (~1928), UI broadcast skip (~2029), tool executor (~2159).
+  /*
   {
     name: 'show_action_card',
     description: `Show an interactive approval card inline before running a mutating action (send message, create event, file ticket, etc.).
@@ -257,6 +262,7 @@ Prefer a single \`body\`. Use \`variants\` (max 3) only when the user would reas
       required: ['title', 'platform', 'action']
     }
   },
+  */
   {
     name: 'queue_approval',
     description: 'Queue a drafted action for later user review (send email, create event, delete, etc.). Use when the user asked you to draft without sending, or when autonomy mode requires approval. `detail` must contain the full draft so the user can approve without rewriting.',
@@ -639,7 +645,7 @@ type ToolContext = 'heartbeat' | 'chat' | 'webhook' | 'team'
 const TOOL_LABELS: Record<string, string> = {
   get_current_time: 'Checking the Time',
   search_tools: 'Searching for Tools',
-  show_action_card: 'Drafting action',
+  // show_action_card: 'Drafting action',  // disabled 2026-04-24
   queue_approval: 'Adding to Queue',
   add_done_item: 'Marking as Done',
   update_settings: 'Updating Settings',
@@ -811,13 +817,13 @@ const AUTONOMY_DESCRIPTIONS: Record<string, string> = {
 function listMemoryFiles(dataDir: string): string[] {
   const memDir = join(dataDir, 'memory')
   try {
-    const { readdirSync, statSync } = require('fs') as typeof import('fs')
+    const { readdirSync } = require('fs') as typeof import('fs')
+    // Sort alphabetically, NOT by mtime — mtime ordering flips on every memory
+    // write and invalidates Moonshot's prefix cache on the entire system prompt.
     return readdirSync(memDir)
       .filter((f: string) => f.endsWith('.md'))
-      .map((f: string) => ({ name: f, mtime: statSync(join(memDir, f)).mtimeMs }))
-      .sort((a, b) => b.mtime - a.mtime)
+      .sort()
       .slice(0, 10)
-      .map(f => f.name)
   } catch { return [] }
 }
 
@@ -1718,13 +1724,16 @@ Rules:
               try {
                 if (event.type === 'content_block_start' && (event as any).content_block?.type === 'tool_use') {
                   const name = (event as any).content_block.name
-                  if (CANVAS_TOOL_NAMES.has(name) || name === 'run_python' || name === 'show_action_card') {
+                  // show_action_card disabled 2026-04-24 — was: || name === 'show_action_card'
+                  if (CANVAS_TOOL_NAMES.has(name) || name === 'run_python') {
                     streamingToolId = (event as any).content_block.id
                     streamingToolName = name
                   }
                 } else if (event.type === 'content_block_delta' && streamingToolId) {
                   const block = (snapshot.content as any[])?.[event.index]
                   if (block?.type === 'tool_use') {
+                    // show_action_card streaming branch disabled 2026-04-24
+                    /*
                     if (streamingToolName === 'show_action_card') {
                       const now = Date.now()
                       if (now - lastCanvasBroadcast > 80) {
@@ -1742,7 +1751,9 @@ Rules:
                           action: input?.action,
                         })
                       }
-                    } else {
+                    } else
+                    */
+                    {
                       const input = block.input as { title?: string; code?: string; canvas_id?: string }
                       if (input?.code) {
                         const now = Date.now()
@@ -1925,7 +1936,10 @@ Rules:
                   requestId: toolCallId,
                   partialCode: parsed.code,
                 })
-              } else if (toolName === 'show_action_card') {
+              }
+              // show_action_card disabled 2026-04-24
+              /*
+              else if (toolName === 'show_action_card') {
                 if (now - lastActionCardBroadcast < 100) return
                 const parsed = parsePartialJSON(argsSoFar)
                 if (!parsed || typeof parsed !== 'object') return
@@ -1942,6 +1956,7 @@ Rules:
                   action: parsed.action,
                 })
               }
+              */
             })
 
             this.activeStream = null
@@ -2024,11 +2039,9 @@ Rules:
         // Fire UI progress callbacks immediately (before parallel execution)
         for (const block of toolBlocks) {
           if (onToolCall) {
-            // show_action_card streams the card itself as the visible output —
-            // no "Drafting action" label needed; it's noise next to the card.
-            if (block.name === 'show_action_card') {
-              // skip label broadcast
-            } else if (block.name === 'call_external_tool') {
+            // show_action_card disabled 2026-04-24 — branch no longer needed.
+            // Was: if (block.name === 'show_action_card') { /* skip label */ }
+            if (block.name === 'call_external_tool') {
               const extName = ((block.input as any).tool_name as string) || 'external tool'
               onToolCall(extName, humanizeToolName(extName))
             } else {
@@ -2156,6 +2169,8 @@ Rules:
             this.queue.add(block.input as Parameters<ApprovalQueue['add']>[0])
             result = 'Queued for approval.'
 
+          // show_action_card executor disabled 2026-04-24
+          /*
           } else if (block.name === 'show_action_card') {
             const input = block.input as {
               title?: string
@@ -2198,6 +2213,7 @@ Rules:
               })
               result = 'Action card shown to user. Awaiting their approval click.'
             }
+          */
 
           } else if (block.name === 'add_done_item') {
             this.queue.addDone((block.input as { description: string }).description)
@@ -3417,9 +3433,9 @@ Rules:
   private selectHistory(_currentQuery: string, historySource?: Anthropic.MessageParam[]): Anthropic.MessageParam[] {
     const history = historySource ?? this.conversationHistory
 
-    // Find the last 10 real user messages (text, not just tool_results)
+    // Find the last 6 real user messages (text, not just tool_results)
     const realUserIndices: number[] = []
-    for (let i = history.length - 1; i >= 0 && realUserIndices.length < 10; i--) {
+    for (let i = history.length - 1; i >= 0 && realUserIndices.length < 6; i--) {
       const msg = history[i]
       if (msg.role !== 'user') continue
       const isRealUser = typeof msg.content === 'string' ||
@@ -3493,8 +3509,8 @@ Rules:
   private compactToolResults(messages: Anthropic.MessageParam[]): Anthropic.MessageParam[] {
     if (messages.length <= 4) return messages
 
-    // Find the last TEN user messages that contain plain text (not just tool_results).
-    // Keep 10-turn window of full-fidelity tool results so the agent retains data
+    // Find the last SIX user messages that contain plain text (not just tool_results).
+    // Keep 6-turn window of full-fidelity tool results so the agent retains data
     // across follow-up questions without re-calling tools.
     let userTurnCount = 0
     let compactBefore = 0
@@ -3505,7 +3521,7 @@ Rules:
           (Array.isArray(msg.content) && (msg.content as any[]).some(b => b.type === 'text'))
         if (isRealUserMsg) {
           userTurnCount++
-          if (userTurnCount >= 10) { compactBefore = i; break }
+          if (userTurnCount >= 6) { compactBefore = i; break }
         }
       }
     }
