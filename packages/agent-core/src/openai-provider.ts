@@ -105,7 +105,34 @@ export function translateMessages(
     }
   }
 
-  // ── Safety net: deduplicate tool_call IDs for OpenAI compatibility ──
+  // ── Sanitize tool_call_ids to match safe alphanumeric+dash form ──
+  // Kimi reuses raw IDs like "memory:1" across requests. The colon survives in
+  // some upstream paths and OpenAI's API accepts them but then the relay/Kimi
+  // sometimes echoes a fresh "memory:N" while a sanitized "memory-N" is in
+  // history, breaking call/response pairing. Normalize both sides here.
+  const sanitizeId = (id: string): string =>
+    id.replace(/[^a-zA-Z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || 'tc'
+  const idRemap = new Map<string, string>()
+  for (const msg of out as any[]) {
+    if (msg.role === 'assistant' && Array.isArray(msg.tool_calls)) {
+      for (const tc of msg.tool_calls) {
+        if (tc.id && /[^a-zA-Z0-9-]/.test(tc.id)) {
+          const clean = idRemap.get(tc.id) ?? sanitizeId(tc.id)
+          idRemap.set(tc.id, clean)
+          tc.id = clean
+        }
+      }
+    }
+    if (msg.role === 'tool' && msg.tool_call_id) {
+      if (idRemap.has(msg.tool_call_id)) {
+        msg.tool_call_id = idRemap.get(msg.tool_call_id)!
+      } else if (/[^a-zA-Z0-9-]/.test(msg.tool_call_id)) {
+        msg.tool_call_id = sanitizeId(msg.tool_call_id)
+      }
+    }
+  }
+
+  // ── Deduplicate tool_call IDs ──
   const seenToolCallIds = new Set<string>()
   for (let i = 0; i < out.length; i++) {
     const msg = out[i] as any
@@ -113,9 +140,9 @@ export function translateMessages(
       for (const tc of msg.tool_calls) {
         if (seenToolCallIds.has(tc.id)) {
           const oldId = tc.id
-          const newId = `${oldId.replace(/[^a-zA-Z0-9-]/g, '-')}-dd-${Math.random().toString(36).slice(2, 8)}`
+          const newId = `${oldId}-dd-${Math.random().toString(36).slice(2, 8)}`
           tc.id = newId
-          // Find and rename the matching tool response message
+          // Find and rename the matching tool response message (first one after this assistant)
           for (let j = i + 1; j < out.length; j++) {
             const resp = out[j] as any
             if (resp.role === 'tool' && resp.tool_call_id === oldId) {
@@ -129,34 +156,69 @@ export function translateMessages(
     }
   }
 
-  // ── Validate: every tool_call has a matching tool response ──
-  const allToolCallIds = new Set<string>()
-  const allToolResponseIds = new Set<string>()
-  for (const msg of out as any[]) {
-    if (msg.role === 'assistant' && msg.tool_calls) {
-      for (const tc of msg.tool_calls) allToolCallIds.add(tc.id)
+  // ── Strict bidirectional orphan handling ──
+  // Iterate until stable: removing one orphan can expose others.
+  // Handles BOTH directions:
+  //   1. assistant tool_call with no following tool response → strip just that call
+  //   2. role:'tool' message with no preceding assistant tool_call → drop the message
+  // Surgical: only the offending call is removed; sibling tool_calls + content stay.
+  for (let pass = 0; pass < 10; pass++) {
+    const callIds = new Set<string>()
+    const respIds = new Set<string>()
+    for (const msg of out as any[]) {
+      if (msg.role === 'assistant' && msg.tool_calls) {
+        for (const tc of msg.tool_calls) callIds.add(tc.id)
+      }
+      if (msg.role === 'tool') respIds.add(msg.tool_call_id)
     }
-    if (msg.role === 'tool') allToolResponseIds.add(msg.tool_call_id)
-  }
-  const orphanedCalls = [...allToolCallIds].filter(id => !allToolResponseIds.has(id))
-  if (orphanedCalls.length > 0) {
-    console.error(`[translateMessages] ORPHANED tool_calls (no response): ${orphanedCalls.join(', ')}`)
-    // Remove assistant messages that have orphaned tool_calls to prevent 400
+    const orphanCalls = new Set([...callIds].filter(id => !respIds.has(id)))
+    const orphanResps = new Set([...respIds].filter(id => !callIds.has(id)))
+
+    if (orphanCalls.size === 0 && orphanResps.size === 0) break
+
+    if (orphanCalls.size > 0) {
+      console.error(`[translateMessages] orphan tool_calls (no response): ${[...orphanCalls].join(', ')}`)
+    }
+    if (orphanResps.size > 0) {
+      console.error(`[translateMessages] orphan tool responses (no call): ${[...orphanResps].join(', ')}`)
+    }
+
     for (let i = out.length - 1; i >= 0; i--) {
       const msg = out[i] as any
-      if (msg.role === 'assistant' && msg.tool_calls) {
-        const hasOrphan = msg.tool_calls.some((tc: any) => orphanedCalls.includes(tc.id))
-        if (hasOrphan) {
-          // Strip the tool_calls, keep only text content
+      // Strip orphan responses
+      if (msg.role === 'tool' && orphanResps.has(msg.tool_call_id)) {
+        out.splice(i, 1)
+        continue
+      }
+      // Surgically strip only orphan tool_calls from assistant messages
+      if (msg.role === 'assistant' && Array.isArray(msg.tool_calls)) {
+        const kept = msg.tool_calls.filter((tc: any) => !orphanCalls.has(tc.id))
+        if (kept.length === 0) {
           if (msg.content) {
             delete msg.tool_calls
           } else {
             out.splice(i, 1)
           }
-          console.log(`[translateMessages] Stripped orphaned tool_calls from assistant msg at index ${i}`)
+        } else if (kept.length !== msg.tool_calls.length) {
+          msg.tool_calls = kept
         }
       }
     }
+  }
+
+  // ── Final assertion: structure must be valid for OpenAI API ──
+  const finalCallIds = new Set<string>()
+  const finalRespIds = new Set<string>()
+  for (const msg of out as any[]) {
+    if (msg.role === 'assistant' && msg.tool_calls) {
+      for (const tc of msg.tool_calls) finalCallIds.add(tc.id)
+    }
+    if (msg.role === 'tool') finalRespIds.add(msg.tool_call_id)
+  }
+  const stillOrphanCalls = [...finalCallIds].filter(id => !finalRespIds.has(id))
+  const stillOrphanResps = [...finalRespIds].filter(id => !finalCallIds.has(id))
+  if (stillOrphanCalls.length > 0 || stillOrphanResps.length > 0) {
+    console.error(`[translateMessages] FATAL: orphans survived sanitize`, { stillOrphanCalls, stillOrphanResps })
   }
 
   return out
