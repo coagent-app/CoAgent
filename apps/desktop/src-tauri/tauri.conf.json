@@ -1,6 +1,6 @@
 {
   "productName": "Co-Agent",
-  "version": "0.6.9",
+  "version": "0.6.10",
   "identifier": "com.coagent.app",
   "build": {
     "frontendDist": "../dist",
