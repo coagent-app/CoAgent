@@ -30,3 +30,6 @@ packages/mcp-memory/test-search.js
 /coagent-logo.png
 /setup.md
 scripts/test-*-live.ts
+
+# Forks (separate repos)
+forks/
